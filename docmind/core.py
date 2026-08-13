@@ -6,6 +6,7 @@
 """
 from datetime import datetime
 
+from docmind import config
 from docmind.agent.react_agent import ReActAgent
 from docmind.agent.tools import ToolRegistry
 from docmind.mcp_client import register_mcp_tools
@@ -25,9 +26,10 @@ def build_agent():
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        hits = store.search(query)
+        # 阈值过滤：低于 RETRIEVE_MIN_SCORE 的切片视为无关，避免噪音进入上下文
+        hits = [h for h in store.search(query) if h.score >= config.RETRIEVE_MIN_SCORE]
         if not hits:
-            return "知识库中没有找到相关内容。"
+            return "知识库中没有找到与问题相关的内容（均未通过相关性阈值）。"
         lines = []
         for i, h in enumerate(hits, 1):
             lines.append(f"[{i}] (来源: {h.source}, 相关度: {h.score:.2f})\n{h.text}")

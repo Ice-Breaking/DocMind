@@ -27,6 +27,7 @@ KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "docs", "knowledge")
 CHUNK_SIZE = 280          # 每片最大字符数（中文 QA 类文档不宜过大，避免关键内容被稀释）
 CHUNK_OVERLAP = 40        # 相邻切片重叠字符数
 TOP_K = 4                 # 检索返回条数
+RETRIEVE_MIN_SCORE = 0.45  # 相关性阈值：低于此值的切片视为无关，不进入上下文
 
 # MCP Server 配置：name -> 启动命令（stdio 模式）
 # 用当前解释器启动子进程，保证虚拟环境里的 mcp 包可用
