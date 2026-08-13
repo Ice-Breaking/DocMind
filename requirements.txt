@@ -1,0 +1,14 @@
+# LLM 调用（OpenAI 兼容模式对接百炼）
+openai>=1.40.0
+
+# RAG 向量检索（轻量实现，仅用 numpy 算余弦相似度）
+numpy>=1.26.0
+
+# MCP 官方 Python SDK
+mcp>=1.2.0
+
+# Web 界面
+gradio>=4.44.0
+
+# 环境变量
+python-dotenv>=1.0.0

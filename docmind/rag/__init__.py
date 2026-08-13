@@ -1,0 +1,3 @@
+from docmind.rag.vector_store import VectorStore
+
+__all__ = ["VectorStore"]
