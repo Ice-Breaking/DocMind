@@ -1,9 +1,21 @@
 """LLM 客户端封装：OpenAI 兼容模式对接百炼（DashScope）"""
-from openai import OpenAI
+import time
+
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 
 from docmind import config
 
 _client: OpenAI | None = None
+
+# 可重试的瞬时错误（限流/超时/服务端抖动）
+_RETRYABLE = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
+_MAX_RETRIES = 3
 
 
 def get_client() -> OpenAI:
@@ -15,8 +27,20 @@ def get_client() -> OpenAI:
         _client = OpenAI(
             api_key=config.DASHSCOPE_API_KEY,
             base_url=config.DASHSCOPE_BASE_URL,
+            timeout=60.0,  # 避免请求挂起导致界面卡在“思考中”
         )
     return _client
+
+
+def _with_retry(fn):
+    """瞬时错误退避重试，避免偶发限流/超时导致回答中断"""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn()
+        except _RETRYABLE:
+            if attempt == _MAX_RETRIES - 1:
+                raise
+            time.sleep(2 * (attempt + 1))
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None):
@@ -29,12 +53,11 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
-    resp = get_client().chat.completions.create(
+    return _with_retry(lambda: get_client().chat.completions.create(
         model=config.CHAT_MODEL,
         messages=messages,
         **kwargs,
-    )
-    return resp.choices[0].message
+    )).choices[0].message
 
 
 def embed(texts: list[str]) -> list[list[float]]:
@@ -42,9 +65,9 @@ def embed(texts: list[str]) -> list[list[float]]:
     batch_size = 10
     results: list[list[float]] = []
     for i in range(0, len(texts), batch_size):
-        resp = get_client().embeddings.create(
+        resp = _with_retry(lambda chunk=texts[i:i + batch_size]: get_client().embeddings.create(
             model=config.EMBEDDING_MODEL,
-            input=texts[i:i + batch_size],
-        )
+            input=chunk,
+        ))
         results.extend(d.embedding for d in resp.data)
     return results

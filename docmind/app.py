@@ -16,18 +16,24 @@ def _render_trace(lines: list[str]) -> str:
 
 
 def respond_simple(question: str, history: list):
-    """流式输出思考过程，最后给出完整回答（Gradio messages 格式）"""
+    """流式输出思考过程，最后给出完整回答（Gradio messages 格式）。
+    任何异常都兼底为一条完整消息，避免界面停留在“思考中”"""
     trace_lines = []
     final_answer = ""
     user_msg = {"role": "user", "content": question}
-    for step in agent.ask(question):
-        if step.kind == "final":
-            final_answer = step.text
-        else:
-            icon = "🔧" if step.kind == "tool_call" else "📥"
-            trace_lines.append(f"{icon} {step.text}")
-            partial = f"⏳ 思考中...\n\n{_render_trace(trace_lines)}"
-            yield history + [user_msg, {"role": "assistant", "content": partial}]
+    try:
+        for step in agent.ask(question):
+            if step.kind == "final":
+                final_answer = step.text
+            else:
+                icon = "🔧" if step.kind == "tool_call" else "📥"
+                trace_lines.append(f"{icon} {step.text}")
+                partial = f"⏳ 思考中...\n\n{_render_trace(trace_lines)}"
+                yield history + [user_msg, {"role": "assistant", "content": partial}]
+    except Exception as e:  # noqa: BLE001
+        final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
+    if not final_answer:
+        final_answer = "⚠️ 未获得模型回复，请重试。"
     full = final_answer
     if trace_lines:
         full += "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)

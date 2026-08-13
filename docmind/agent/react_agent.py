@@ -49,7 +49,13 @@ class ReActAgent:
         recent_signatures: list[str] = []   # 重复调用检测
 
         for _ in range(config.MAX_AGENT_STEPS):
-            message = chat(self.history, tools=openai_tools)
+            try:
+                message = chat(self.history, tools=openai_tools)
+            except Exception as e:  # noqa: BLE001 - 模型调用失败不能弄崩生成器
+                error_msg = f"抱歉，模型调用失败（已自动重试过）：{e}\n请稍后重试。"
+                self.history.append({"role": "assistant", "content": error_msg})
+                yield AgentStep("final", error_msg)
+                return
 
             # 模型给出最终回答
             if not message.tool_calls:
@@ -88,7 +94,8 @@ class ReActAgent:
                     recent_signatures.append(sig)
                     result = self.registry.execute(name, args)
 
-                yield AgentStep("tool_result", f"`{name}` 返回: {result[:300]}")
+                shown = result[:300] + ("…（已截断）" if len(result) > 300 else "")
+                yield AgentStep("tool_result", f"`{name}` 返回: {shown}")
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
