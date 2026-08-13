@@ -1,5 +1,6 @@
 """全局配置：从 .env 加载"""
 import os
+import sys
 
 from dotenv import load_dotenv
 
@@ -28,6 +29,8 @@ CHUNK_OVERLAP = 80        # 相邻切片重叠字符数
 TOP_K = 4                 # 检索返回条数
 
 # MCP Server 配置：name -> 启动命令（stdio 模式）
+# 用当前解释器启动子进程，保证虚拟环境里的 mcp 包可用
+_PYTHON = sys.executable
 MCP_SERVERS = {
-    "weather": ["python", os.path.join(PROJECT_ROOT, "mcp_servers", "weather_server.py")],
+    "weather": [_PYTHON, os.path.join(PROJECT_ROOT, "mcp_servers", "weather_server.py")],
 }

@@ -16,9 +16,10 @@ def _render_trace(lines: list[str]) -> str:
 
 
 def respond_simple(question: str, history: list):
-    """流式输出思考过程，最后给出完整回答"""
+    """流式输出思考过程，最后给出完整回答（Gradio messages 格式）"""
     trace_lines = []
     final_answer = ""
+    user_msg = {"role": "user", "content": question}
     for step in agent.ask(question):
         if step.kind == "final":
             final_answer = step.text
@@ -26,11 +27,11 @@ def respond_simple(question: str, history: list):
             icon = "🔧" if step.kind == "tool_call" else "📥"
             trace_lines.append(f"{icon} {step.text}")
             partial = f"⏳ 思考中...\n\n{_render_trace(trace_lines)}"
-            yield history + [[question, partial]]
+            yield history + [user_msg, {"role": "assistant", "content": partial}]
     full = final_answer
     if trace_lines:
         full += "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
-    yield (history[:-1] + [[question, full]]) if history else [[question, full]]
+    yield history + [user_msg, {"role": "assistant", "content": full}]
 
 
 def reset_chat():
@@ -44,7 +45,7 @@ with gr.Blocks(title="DocMind") as demo:
         "从零实现的知识助理 Agent：**手写 ReAct 循环 + RAG 知识库检索 + MCP 工具调用**\n\n"
         f"已注册工具：`{'` `'.join(tool_names)}`"
     )
-    chatbot = gr.Chatbot(height=480, show_copy_button=True)
+    chatbot = gr.Chatbot(height=480)
     with gr.Row():
         msg = gr.Textbox(
             placeholder="试试：DocMind 的检索流程是怎样的？/ 北京天气怎么样？",

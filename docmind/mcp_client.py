@@ -2,14 +2,39 @@
 
 流程：启动 Server 子进程 → initialize → list_tools → 转成本地 Tool 注册。
 工具执行时通过 session.call_tool 转发。
+
+关键设计：连接是长生命周期资源，必须始终活在同一个事件循环里，
+因此用一个后台常驻线程持有专用事件循环，所有异步操作都投递到它执行。
 """
 import asyncio
 import contextlib
+import threading
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from docmind.agent.tools import ToolRegistry
+
+
+class _BackgroundLoop:
+    """后台常驻事件循环：所有 MCP 连接共享，避免跨循环使用 async 资源"""
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, daemon=True, name="mcp-loop").start()
+
+    def run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=60)
+
+
+_runner: _BackgroundLoop | None = None
+
+
+def _get_runner() -> _BackgroundLoop:
+    global _runner
+    if _runner is None:
+        _runner = _BackgroundLoop()
+    return _runner
 
 
 class McpConnection:
@@ -45,27 +70,14 @@ class McpConnection:
         return "\n".join(texts) if texts else "(工具无返回内容)"
 
 
-def _run(coro):
-    """在同步的工具 handler 里跑异步调用"""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        # 已在事件循环中（如 Gradio async 场景）：开新线程执行
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    return asyncio.run(coro)
-
-
 def register_mcp_tools(registry: ToolRegistry, servers: dict[str, list[str]]) -> list[McpConnection]:
     """连接所有配置的 MCP Server，并把其工具注册进 registry。返回连接列表（退出时 close）"""
+    runner = _get_runner()
     connections = []
     for name, command in servers.items():
         conn = McpConnection(name, command)
         try:
-            _run(_init_and_register(conn, registry))
+            runner.run(_init_and_register(conn, registry))
             connections.append(conn)
         except Exception as e:  # noqa: BLE001
             print(f"[警告] MCP Server '{name}' 连接失败，跳过: {e}")
@@ -81,14 +93,14 @@ async def _init_and_register(conn: McpConnection, registry: ToolRegistry) -> Non
             name=t.name,
             description=f"[MCP:{conn.name}] {t.description or ''}",
             parameters=schema,
-            handler=(lambda c=conn, tn=t.name: lambda args: c._call_sync(tn, args)),
+            handler=lambda args, c=conn, tn=t.name: c._call_sync(tn, args),
             source=f"mcp:{conn.name}",
         )
 
 
 # 同步包装方法挂在 McpConnection 上
 def _call_sync(self: McpConnection, tool_name: str, arguments: dict) -> str:
-    return _run(self.call_tool_async(tool_name, arguments))
+    return _get_runner().run(self.call_tool_async(tool_name, arguments))
 
 
 McpConnection._call_sync = _call_sync  # type: ignore[attr-defined]
