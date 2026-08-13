@@ -24,8 +24,8 @@ MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "8"))
 
 # RAG 配置
 KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "docs", "knowledge")
-CHUNK_SIZE = 500          # 每片最大字符数
-CHUNK_OVERLAP = 80        # 相邻切片重叠字符数
+CHUNK_SIZE = 280          # 每片最大字符数（中文 QA 类文档不宜过大，避免关键内容被稀释）
+CHUNK_OVERLAP = 40        # 相邻切片重叠字符数
 TOP_K = 4                 # 检索返回条数
 
 # MCP Server 配置：name -> 启动命令（stdio 模式）

@@ -38,9 +38,13 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """文本向量化（RAG 用）"""
-    resp = get_client().embeddings.create(
-        model=config.EMBEDDING_MODEL,
-        input=texts,
-    )
-    return [d.embedding for d in resp.data]
+    """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交"""
+    batch_size = 10
+    results: list[list[float]] = []
+    for i in range(0, len(texts), batch_size):
+        resp = get_client().embeddings.create(
+            model=config.EMBEDDING_MODEL,
+            input=texts[i:i + batch_size],
+        )
+        results.extend(d.embedding for d in resp.data)
+    return results
