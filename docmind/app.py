@@ -68,6 +68,45 @@ body, .gradio-container, .main {
     color: #5a6478 !important; font-size: 13px !important; line-height: 1.7 !important;
 }
 
+/* Markdown 内容排版 */
+.message.bot h1, .message.bot h2, .message.bot h3, .message.bot h4 {
+    font-size: 15px !important; font-weight: 700 !important; color: #1e293b !important;
+    margin: 10px 0 6px !important;
+}
+.message.bot p { margin: 6px 0 !important; }
+.message.bot ul, .message.bot ol { margin: 6px 0 !important; padding-left: 22px !important; }
+.message.bot li { margin: 3px 0 !important; }
+.message.bot code {
+    background: #f1f3fb !important; color: #6d28d9 !important;
+    padding: 1px 6px !important; border-radius: 5px !important; font-size: 12.5px !important;
+}
+.message.bot pre { background: #f7f9fd !important; border-radius: 8px !important; padding: 10px 12px !important; overflow-x: auto; }
+.message.bot table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.message.bot th, .message.bot td { border: 1px solid #e6e9f4; padding: 5px 10px; }
+.message.bot strong { color: #1e293b; }
+
+/* 隐藏对话区滚动条（保留滚动能力） */
+#chatbot { scrollbar-width: none !important; }
+#chatbot * { scrollbar-width: none !important; }
+#chatbot ::-webkit-scrollbar { display: none !important; width: 0 !important; }
+
+/* 长回复折叠：默认收起 + 底部渐隐遮罩 + 展开按钮 */
+.message.bot.dm-collapsed {
+    max-height: 360px !important; overflow: hidden !important; position: relative !important;
+}
+.message.bot.dm-collapsed::after {
+    content: ""; position: absolute; bottom: 0; left: 0; right: 0; height: 84px;
+    background: linear-gradient(180deg, rgba(255,255,255,0) 0%, #ffffff 82%);
+    pointer-events: none;
+}
+.dm-toggle {
+    position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 3;
+    background: #eef2ff; color: #6366f1; border: 1px solid #dbe2ff;
+    border-radius: 999px; padding: 5px 16px; font-size: 12.5px; font-weight: 600;
+    cursor: pointer; box-shadow: 0 1px 4px rgba(99,102,241,.18);
+}
+.dm-toggle:hover { background: #e0e7ff; }
+
 /* 输入区 */
 #input-box textarea {
     border-radius: 12px !important; border: 1.5px solid #e6e9f4 !important;
@@ -81,10 +120,12 @@ body, .gradio-container, .main {
 }
 #send-btn:hover { filter: brightness(1.06); }
 #clear-btn {
-    background: #ffffff !important; border: 1.5px solid #e6e9f4 !important;
-    border-radius: 12px !important; color: #8a94a6 !important;
+    background: transparent !important; border: none !important;
+    box-shadow: none !important; color: #9aa3b5 !important;
+    font-size: 13px !important; font-weight: 500 !important;
+    min-width: 72px !important;
 }
-#clear-btn:hover { border-color: #c7d2fe !important; color: #6366f1 !important; }
+#clear-btn:hover { color: #6366f1 !important; background: #f4f6ff !important; }
 
 /* 示例问题 */
 .examples .example-btn { border-radius: 999px !important; font-size: 12.5px !important; }
@@ -105,6 +146,46 @@ footer { display: none !important; }
     #chatbot { height: calc(100dvh - 290px) !important; min-height: 300px; }
     #send-btn, #clear-btn { min-width: 64px !important; }
 }
+"""
+
+# 长回复折叠：周期性扫描 DOM，给超高的 AI 气泡加渐隐遮罩 + 展开/收起按钮
+# （流式输出会反复重建 DOM，故用定时扫描；经 launch(head=...) 注入 <head>，
+#  因 gr.HTML 会过滤 script、js 参数在 SSR 模式下不可靠）
+FOLD_SCRIPT = """
+<script>
+(() => {
+  if (window.__dmFoldInstalled) return;
+  window.__dmFoldInstalled = true;
+  const MAX_H = 360;
+  function attachToggle(el) {
+    const old = el.querySelector('.dm-toggle');
+    if (old) old.remove();
+    const btn = document.createElement('button');
+    btn.className = 'dm-toggle';
+    btn.textContent = '⌄ 展开全文';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const wasCollapsed = el.classList.contains('dm-collapsed');
+      el.classList.toggle('dm-collapsed');
+      el.dataset.dmExpanded = wasCollapsed ? '1' : '';
+      btn.textContent = wasCollapsed ? '⌃ 收起' : '⌄ 展开全文';
+    };
+    el.appendChild(btn);
+  }
+  function scan() {
+    document.querySelectorAll('.message.bot').forEach((el) => {
+      if (el.scrollHeight > MAX_H) {
+        if (!el.querySelector('.dm-toggle')) attachToggle(el);
+        if (!el.classList.contains('dm-collapsed') && el.dataset.dmExpanded !== '1') {
+          el.classList.add('dm-collapsed');
+        }
+      }
+    });
+  }
+  scan();
+  setInterval(scan, 600);
+})();
+</script>
 """
 
 HEADER_HTML = f"""
@@ -190,7 +271,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
             elem_id="input-box",
         )
         send = gr.Button("发送", scale=1, min_width=80, elem_id="send-btn")
-        clear = gr.Button("🗑️ 新对话", scale=1, min_width=110, elem_id="clear-btn")
+        clear = gr.Button("↺ 新对话", scale=0, min_width=72, elem_id="clear-btn")
 
     gr.Examples(examples=EXAMPLES, inputs=msg, label="✨ 示例问题", examples_per_page=8, elem_id="examples-area")
 
@@ -206,5 +287,5 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 
 
 if __name__ == "__main__":
-    # Gradio 6：theme / css 从 Blocks 构造器移到了 launch()
-    demo.launch(theme=theme, css=CUSTOM_CSS)
+    # Gradio 6：theme / css 移到 launch()；折叠脚本经 head 参数注入页面
+    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT)
