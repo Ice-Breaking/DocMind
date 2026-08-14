@@ -41,10 +41,10 @@ body, .gradio-container, .main {
     padding: 3px 11px; border-radius: 999px;
 }
 
-/* 对话区：高度随视口自适应，保证一屏完整展示 */
+/* 对话区：高度随视口自适应，保证一屏完整展示；内部消息列表可滚动 */
 #chatbot {
     border: none !important; background: transparent !important; box-shadow: none !important;
-    height: calc(100dvh - 330px) !important; min-height: 340px;
+    height: calc(100dvh - 340px) !important; min-height: 300px;
 }
 .message { max-width: 86% !important; word-break: break-word !important; overflow-wrap: anywhere !important; }
 .message.user {
@@ -120,31 +120,64 @@ body, .gradio-container, .main {
 }
 #send-btn:hover { filter: brightness(1.06); }
 #clear-btn {
-    background: transparent !important; border: none !important;
-    box-shadow: none !important; color: #9aa3b5 !important;
-    font-size: 13px !important; font-weight: 500 !important;
-    min-width: 72px !important;
+    background: #ffffff !important; border: 1.5px solid #e6e9f4 !important;
+    border-radius: 12px !important; color: #6366f1 !important;
+    max-width: 46px !important; min-width: 46px !important; padding: 0 !important;
+    font-size: 20px !important; font-weight: 400 !important; box-shadow: 0 1px 3px rgba(30,41,59,.04);
 }
-#clear-btn:hover { color: #6366f1 !important; background: #f4f6ff !important; }
+#clear-btn:hover { border-color: #a5b4fc !important; background: #f4f6ff !important; }
 
-/* 示例问题 */
-.examples .example-btn { border-radius: 999px !important; font-size: 12.5px !important; }
+/* 示例问题：PC 端自动换行，移动端单行横向滑动，任何分辨率都可见 */
+#examples-area .gallery-item { border-radius: 999px !important; font-size: 12.5px !important; white-space: nowrap; }
 
 /* 隐藏 Gradio 默认页脚 */
 footer { display: none !important; }
 
-/* 移动端适配 */
+/* 移动端适配（基准 375×667）：全屏弹性布局，一屏完整展示，AI 内容内部滚动 */
 @media (max-width: 640px) {
-    .gradio-container { padding: 8px 10px !important; }
-    .dm-header { padding: 11px 14px; border-radius: 12px; }
-    .dm-title { font-size: 17px; }
-    .dm-sub { font-size: 11.5px; }
-    .dm-chip { font-size: 10.5px; padding: 2px 8px; }
+    /* 容器锁定一屏高度，禁止页面级滚动 */
+    gradio-app, .gradio-container {
+        height: 100dvh !important; max-height: 100dvh !important;
+        overflow: hidden !important; box-sizing: border-box;
+    }
+    .gradio-container { padding: 6px 8px !important; }
+    /* 逐层贯通 flex，让对话区自动占满剩余空间 */
+    .gradio-container .main,
+    .gradio-container .wrap,
+    .gradio-container main.contain,
+    .gradio-container .column {
+        height: 100% !important; display: flex !important;
+        flex-direction: column !important; min-height: 0 !important;
+    }
+    .gradio-container .main { padding: 0 !important; }
+    .gradio-container .column { gap: 6px !important; }
+    .gradio-container .column > .block { flex: 0 0 auto; }
+    /* 对话区所在块拉伸填满；不支持 :has 的浏览器回退到固定高度 */
+    #chatbot { height: calc(100dvh - 300px) !important; min-height: 160px; }
+    .gradio-container .column > .block:has(#chatbot) {
+        flex: 1 1 auto !important; min-height: 0 !important;
+        display: flex !important; flex-direction: column !important;
+    }
+    .gradio-container .column > .block:has(#chatbot) #chatbot {
+        flex: 1 1 auto !important; height: auto !important;
+    }
+    .dm-header { padding: 8px 12px; border-radius: 12px; margin: 0; }
+    .dm-title { font-size: 16px; }
+    .dm-sub { font-size: 10px; margin-top: 2px; }
+    .dm-chips { margin-top: 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
+    .dm-chip { font-size: 9px; padding: 1px 6px; }
     .message { max-width: 94% !important; }
-    /* 手机上隐藏示例区，确保对话+输入一屏完整 */
-    #examples-area { display: none !important; }
-    #chatbot { height: calc(100dvh - 290px) !important; min-height: 300px; }
-    #send-btn, #clear-btn { min-width: 64px !important; }
+    /* 示例区单行横滑（Gradio 6 结构：.gallery > .gallery-item），任何分辨率都可见 */
+    #examples-area .label { font-size: 10px !important; margin-bottom: 1px !important; }
+    #examples-area .gallery {
+        display: flex !important; flex-wrap: nowrap !important;
+        overflow-x: auto !important; scrollbar-width: none !important;
+    }
+    #examples-area .gallery::-webkit-scrollbar { display: none !important; }
+    #examples-area .gallery-item { flex: 0 0 auto !important; font-size: 11.5px !important; }
+    #examples-area { margin: 0 !important; }
+    #input-row { gap: 6px !important; }
+    #clear-btn { max-width: 42px !important; min-width: 42px !important; }
 }
 """
 
@@ -263,6 +296,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     )
 
     with gr.Row(elem_id="input-row"):
+        clear = gr.Button("+", scale=0, elem_id="clear-btn")
         msg = gr.Textbox(
             placeholder="输入你的问题，回车发送…",
             scale=8,
@@ -271,7 +305,6 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
             elem_id="input-box",
         )
         send = gr.Button("发送", scale=1, min_width=80, elem_id="send-btn")
-        clear = gr.Button("↺ 新对话", scale=0, min_width=72, elem_id="clear-btn")
 
     gr.Examples(examples=EXAMPLES, inputs=msg, label="✨ 示例问题", examples_per_page=8, elem_id="examples-area")
 
