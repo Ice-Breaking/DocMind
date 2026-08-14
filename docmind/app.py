@@ -12,8 +12,7 @@ tool_names = list(agent.registry.tools.keys())
 
 # ---------------------------------------------------------------- 样式
 CUSTOM_CSS = """
-/* 整体背景与容器 */
-.gradio-container { max-width: 880px !important; margin: auto !important; padding: 10px 16px !important; }
+/* 整体背景（容器尺寸/布局规则在 LAYOUT_CSS 中经 head 注入） */
 body, .gradio-container, .main {
     background: linear-gradient(180deg, #f5f7fd 0%, #fbfcfe 100%) !important;
 }
@@ -21,7 +20,7 @@ body, .gradio-container, .main {
 /* 顶部品牌卡片：白底 + 渐变点缀条，清爽不压迫 */
 .dm-header {
     background: #ffffff; border: 1px solid #e9ecf7; border-radius: 14px;
-    padding: 14px 20px; margin: 2px 0 12px; position: relative; overflow: hidden;
+    padding: 14px 20px; margin: 0; position: relative; overflow: hidden;
     box-shadow: 0 1px 3px rgba(15, 23, 42, .04);
 }
 .dm-header::before {
@@ -41,10 +40,9 @@ body, .gradio-container, .main {
     padding: 3px 11px; border-radius: 999px;
 }
 
-/* 对话区：高度随视口自适应，保证一屏完整展示；内部消息列表可滚动 */
+/* 对话区：去掉边框背景，高度由全局弹性布局接管（LAYOUT_CSS），内部消息列表可滚动 */
 #chatbot {
     border: none !important; background: transparent !important; box-shadow: none !important;
-    height: calc(100dvh - 340px) !important; min-height: 300px;
 }
 .message { max-width: 86% !important; word-break: break-word !important; overflow-wrap: anywhere !important; }
 .message.user {
@@ -139,42 +137,55 @@ body, .gradio-container, .main {
 footer { display: none !important; }
 """
 
-# 移动端适配 CSS（基准 375×667）：必须经 launch(head=...) 注入。
+# 全局布局 CSS：必须经 launch(head=...) 注入。
 # 原因：launch(css=) 的样式会被 Gradio 重写并限定到 .contain 作用域内，
 # 带 .gradio-container 前缀的选择器（锁定容器、块排序等）会永远失配。
-MOBILE_CSS = """
+LAYOUT_CSS = """
+/* ============ 全局：一屏弹性布局（PC/移动端一致） ============ */
+gradio-app, .gradio-container {
+    height: 100dvh !important; max-height: 100dvh !important;
+    overflow: hidden !important; box-sizing: border-box !important;
+    width: 100% !important; max-width: 880px !important; margin: 0 auto !important;
+}
+body { overflow-x: hidden !important; }
+/* 逐层贯通 flex + 宽度护栏：min-width:0 防止内容把布局撑宽 */
+.gradio-container .main,
+.gradio-container .wrap,
+.gradio-container main.contain,
+.gradio-container .column {
+    height: 100% !important; display: flex !important;
+    flex-direction: column !important; min-height: 0 !important;
+    min-width: 0 !important; max-width: 100% !important; box-sizing: border-box;
+}
+.gradio-container .main { padding: 0 !important; }
+.gradio-container { padding: 10px 16px !important; }
+.gradio-container .column { gap: 8px !important; }
+.gradio-container .column > .block,
+.gradio-container .column > .row {
+    flex: 0 0 auto; min-width: 0 !important; max-width: 100% !important;
+}
+/* 块顺序：头部 → 示例区 → 对话区 → 输入区（PC/移动端一致）。
+   examples/chatbot/input 的 elem_id 直接挂在块自身，按 ID 直接定位 */
+.gradio-container .column > .block:has(.dm-header) { order: 1; }
+.gradio-container .column > #examples-area { order: 2; }
+.gradio-container .column > #chatbot { order: 3; }
+.gradio-container .column > #input-row { order: 4; }
+/* 对话区拉伸填满剩余空间，消息在内部滚动 */
+.gradio-container .column > #chatbot {
+    flex: 1 1 auto !important; min-height: 160px !important; height: auto !important;
+    display: flex !important; flex-direction: column !important; min-width: 0 !important;
+}
+.gradio-container .column > #chatbot > * { flex: 1 1 auto !important; min-height: 0 !important; min-width: 0 !important; }
+/* 长内容防溢出：气泡内换行兜底，代码块内部横滑，不撑宽页面 */
+.message { overflow-wrap: anywhere !important; word-break: break-word !important; min-width: 0 !important; }
+.message.bot { overflow: hidden !important; }
+.message.bot pre { max-width: 100% !important; overflow-x: auto !important; white-space: pre-wrap; word-break: break-all; }
+.message.bot table { display: block; max-width: 100%; overflow-x: auto; }
+
+/* ============ 移动端（≤ 640px，基准 375×667）：压缩间距与字号 ============ */
 @media (max-width: 640px) {
-    /* 容器锁定一屏高度，禁止页面级滚动与横向溢出 */
-    gradio-app, .gradio-container {
-        height: 100dvh !important; max-height: 100dvh !important;
-        overflow: hidden !important; box-sizing: border-box;
-    }
-    body { overflow-x: hidden !important; }
     .gradio-container { padding: 6px 8px !important; }
-    /* 块顺序重排：头部 → 示例区（垂直居中偏上）→ 对话区 → 输入区。
-       examples/chatbot/input 的 elem_id 直接挂在块自身，按 ID 直接定位 */
-    .gradio-container .column > .block:has(.dm-header) { order: 1; }
-    .gradio-container .column > #examples-area { order: 2; }
-    .gradio-container .column > #chatbot { order: 3; }
-    .gradio-container .column > #input-row { order: 4; }
-    /* 逐层贯通 flex，让对话区自动占满剩余空间 */
-    .gradio-container .main,
-    .gradio-container .wrap,
-    .gradio-container main.contain,
-    .gradio-container .column {
-        height: 100% !important; display: flex !important;
-        flex-direction: column !important; min-height: 0 !important;
-    }
-    .gradio-container .main { padding: 0 !important; }
     .gradio-container .column { gap: 6px !important; }
-    .gradio-container .column > .block { flex: 0 0 auto; }
-    /* 对话区拉伸填满剩余空间，消息在内部滚动 */
-    .gradio-container .column > #chatbot {
-        flex: 1 1 auto !important; min-height: 0 !important; height: auto !important;
-        display: flex !important; flex-direction: column !important;
-    }
-    .gradio-container .column > #chatbot > * { flex: 1 1 auto !important; min-height: 0 !important; }
-    .gradio-container .column > #chatbot { min-height: 160px; }
     /* 头部压缩 */
     .dm-header { padding: 8px 12px; border-radius: 12px; margin: 0; }
     .dm-title { font-size: 16px; }
@@ -335,6 +346,6 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 
 
 if __name__ == "__main__":
-    # Gradio 6：theme / css 移到 launch()；折叠脚本与移动端样式经 head 注入
+    # Gradio 6：theme / css 移到 launch()；折叠脚本与全局布局样式经 head 注入
     # （head 注入的内容不会被 Gradio 的 CSS 作用域重写）
-    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT + f"<style>{MOBILE_CSS}</style>")
+    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>")
