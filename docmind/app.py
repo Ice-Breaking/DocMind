@@ -193,23 +193,26 @@ body { overflow-x: hidden !important; }
     .dm-chips { margin-top: 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
     .dm-chip { font-size: 9px; padding: 1px 6px; }
     .message { max-width: 94% !important; }
-    /* 示例区：无标题，2×2 等宽网格，文字完整显示（自动换行），内容水平居中 */
+    /* 示例区：单列全宽列表，每条一行，emoji 引导，触控友好 */
     #examples-area { margin: 0 !important; }
     #examples-area .gallery {
-        display: grid !important;
-        grid-template-columns: 1fr 1fr !important;
+        display: flex !important; flex-direction: column !important;
         gap: 6px !important; width: 100% !important;
     }
     #examples-area .gallery-item {
-        min-width: 0 !important; font-size: 11px !important;
-        padding: 6px 8px !important; line-height: 1.45 !important;
-        display: flex !important; align-items: center !important; justify-content: center !important;
+        width: 100% !important; min-width: 0 !important;
+        display: flex !important; align-items: center !important; justify-content: flex-start !important;
+        padding: 8px 12px !important; font-size: 12px !important; line-height: 1.4 !important;
+        background: #ffffff !important; border: 1px solid #e8ebf6 !important;
+        border-radius: 10px !important; box-shadow: 0 1px 2px rgba(30, 41, 59, .03);
     }
-    /* 胶囊嵌套层：取消截断，允许换行，文字居中 */
+    #examples-area .gallery-item:active { background: #f4f6ff !important; border-color: #c7d2fe !important; }
+    /* 胶囊嵌套层：单行完整显示，不换行不截断 */
     #examples-area .gallery-item span,
     #examples-area .gallery-item span > div {
-        max-width: 100% !important; white-space: normal !important;
-        word-break: break-word !important; text-align: center !important;
+        max-width: 100% !important; white-space: nowrap !important;
+        overflow: hidden !important; text-overflow: ellipsis !important;
+        text-align: left !important;
     }
     /* 输入区：+ 按钮与输入框严格垂直居中 */
     #input-row { gap: 6px !important; display: flex !important; align-items: center !important; }
@@ -273,10 +276,10 @@ HEADER_HTML = f"""
 """
 
 EXAMPLES = [
-    ["什么是 RAG？它解决了什么问题？"],
-    ["Agent 如何防止死循环？"],
-    ["MCP 和 Function Calling 是什么关系？"],
-    ["北京天气怎么样？"],
+    ["💡 什么是 RAG？它解决了什么问题？"],
+    ["🛡️ Agent 如何防止死循环？"],
+    ["🔌 MCP 和 Function Calling 是什么关系？"],
+    ["🌤️ 北京天气怎么样？"],
 ]
 
 
