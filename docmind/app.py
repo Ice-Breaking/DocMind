@@ -150,7 +150,7 @@ gradio-app, .gradio-container {
 body { overflow-x: hidden !important; }
 /* 逐层贯通 flex + 宽度护栏：min-width:0 防止内容把布局撑宽 */
 .gradio-container .main,
-.gradio-container .wrap,
+.gradio-container .main > .wrap,
 .gradio-container main.contain,
 .gradio-container .column {
     height: 100% !important; display: flex !important;
@@ -176,6 +176,16 @@ body { overflow-x: hidden !important; }
     display: flex !important; flex-direction: column !important; min-width: 0 !important;
 }
 .gradio-container .column > #chatbot > * { flex: 1 1 auto !important; min-height: 0 !important; min-width: 0 !important; }
+/* 对话区内部滚动链：空态遮罩不占高，.wrapper/.bubble-wrap 接管滚动，长回复不截断 */
+.gradio-container .column > #chatbot > .wrap { flex: 0 0 auto !important; height: auto !important; }
+.gradio-container .column > #chatbot .wrapper {
+    display: flex !important; flex-direction: column !important;
+    flex: 1 1 auto !important; min-height: 0 !important;
+}
+.gradio-container .column > #chatbot .bubble-wrap {
+    flex: 1 1 auto !important; min-height: 0 !important;
+    height: auto !important; overflow-y: auto !important;
+}
 /* 长内容防溢出：气泡内换行兜底，代码块内部横滑，不撑宽页面 */
 .message { overflow-wrap: anywhere !important; word-break: break-word !important; min-width: 0 !important; }
 .message.bot { overflow: hidden !important; }
@@ -253,6 +263,12 @@ FOLD_SCRIPT = """
         }
       }
     });
+    /* 会话开始后隐藏示例区，把空间让给对话；新对话清空后自动恢复 */
+    const ex = document.querySelector('#examples-area');
+    if (ex) {
+      const hasMsg = !!document.querySelector('#chatbot .message');
+      ex.style.display = hasMsg ? 'none' : '';
+    }
   }
   scan();
   setInterval(scan, 600);
