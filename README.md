@@ -4,7 +4,7 @@
 >
 > 不依赖 LangChain / LlamaIndex，Agent 核心完全手写，便于理解与面试讲解。
 
-![DocMind 界面演示](docs/ui_chat.png)
+![DocMind 界面演示](docs/ui_clean.png)
 
 ## 架构
 

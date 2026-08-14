@@ -94,8 +94,7 @@ class ReActAgent:
                     recent_signatures.append(sig)
                     result = self.registry.execute(name, args)
 
-                shown = result[:300] + ("…（已截断）" if len(result) > 300 else "")
-                yield AgentStep("tool_result", f"`{name}` 返回: {shown}")
+                yield AgentStep("tool_result", f"`{name}` 返回: {result}")
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

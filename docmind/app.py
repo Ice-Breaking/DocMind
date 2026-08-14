@@ -13,69 +13,108 @@ tool_names = list(agent.registry.tools.keys())
 # ---------------------------------------------------------------- 样式
 CUSTOM_CSS = """
 /* 整体背景与容器 */
-.gradio-container { max-width: 880px !important; margin: auto !important; }
-body, .gradio-container, .main { background: linear-gradient(180deg, #eef1fb 0%, #f8f9fd 60%) !important; }
+.gradio-container { max-width: 880px !important; margin: auto !important; padding: 10px 16px !important; }
+body, .gradio-container, .main {
+    background: linear-gradient(180deg, #f5f7fd 0%, #fbfcfe 100%) !important;
+}
 
-/* 顶部品牌卡片 */
+/* 顶部品牌卡片：白底 + 渐变点缀条，清爽不压迫 */
 .dm-header {
-    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-    border-radius: 18px; padding: 26px 28px; margin: 8px 0 18px;
-    box-shadow: 0 8px 24px rgba(99, 102, 241, .28); color: #fff;
+    background: #ffffff; border: 1px solid #e9ecf7; border-radius: 14px;
+    padding: 14px 20px; margin: 2px 0 12px; position: relative; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .04);
 }
-.dm-title { font-size: 26px; font-weight: 800; letter-spacing: .5px; }
-.dm-sub { margin-top: 6px; font-size: 13.5px; opacity: .88; line-height: 1.6; }
-.dm-chips { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+.dm-header::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, #818cf8, #c4b5fd, #93c5fd);
+}
+.dm-title { font-size: 19px; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dm-badge {
+    font-size: 11px; font-weight: 600; color: #6366f1;
+    background: #eef2ff; border: 1px solid #e0e7ff; padding: 2px 9px; border-radius: 999px;
+}
+.dm-sub { margin-top: 5px; font-size: 12.5px; color: #8a94a6; line-height: 1.55; }
+.dm-chips { margin-top: 10px; display: flex; gap: 7px; flex-wrap: wrap; }
 .dm-chip {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
-    background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35);
-    padding: 4px 12px; border-radius: 999px; backdrop-filter: blur(4px);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+    background: #f4f6ff; border: 1px solid #e4e9fb; color: #5b5bd6;
+    padding: 3px 11px; border-radius: 999px;
 }
 
-/* 对话区 */
-#chatbot { border: none !important; background: transparent !important; box-shadow: none !important; }
+/* 对话区：高度随视口自适应，保证一屏完整展示 */
+#chatbot {
+    border: none !important; background: transparent !important; box-shadow: none !important;
+    height: calc(100dvh - 330px) !important; min-height: 340px;
+}
+.message { max-width: 86% !important; word-break: break-word !important; overflow-wrap: anywhere !important; }
 .message.user {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-    color: #fff !important; border-radius: 18px 18px 4px 18px !important;
-    box-shadow: 0 2px 10px rgba(99,102,241,.25);
+    background: linear-gradient(135deg, #7c89f7, #96a0fa) !important;
+    color: #fff !important; border-radius: 16px 16px 4px 16px !important;
+    box-shadow: 0 1px 5px rgba(124, 137, 247, .28); font-size: 14.5px;
 }
 .message.bot {
-    background: #ffffff !important; color: #1f2937 !important;
-    border: 1px solid #e8eaf3 !important; border-radius: 18px 18px 18px 4px !important;
-    box-shadow: 0 2px 8px rgba(30, 41, 59, .05); line-height: 1.75;
+    background: #ffffff !important; color: #293241 !important;
+    border: 1px solid #eceef6 !important; border-radius: 16px 16px 16px 4px !important;
+    box-shadow: 0 1px 4px rgba(30, 41, 59, .04); line-height: 1.8; font-size: 14.5px;
+    padding: 14px 18px !important;
 }
-.message-row { margin-bottom: 10px !important; }
+.message-row { margin-bottom: 8px !important; }
+
+/* AI 回答内的思考过程区块：浅色底独立成块，与正文分层 */
+.message.bot hr { border: none !important; border-top: 1px dashed #e4e8f2 !important; margin: 12px 0 10px !important; }
+.message.bot blockquote {
+    background: #f7f9fd !important; border-left: 3px solid #c7d2fe !important;
+    margin: 6px 0 !important; padding: 8px 12px !important; border-radius: 8px !important;
+    color: #5a6478 !important; font-size: 13px !important; line-height: 1.7 !important;
+}
 
 /* 输入区 */
 #input-box textarea {
-    border-radius: 14px !important; border: 1.5px solid #e2e5f1 !important;
-    box-shadow: 0 2px 8px rgba(30,41,59,.04); font-size: 15px;
+    border-radius: 12px !important; border: 1.5px solid #e6e9f4 !important;
+    box-shadow: 0 1px 3px rgba(30,41,59,.03); font-size: 14.5px; background: #fff;
 }
-#input-box textarea:focus { border-color: #8b5cf6 !important; box-shadow: 0 0 0 3px rgba(139,92,246,.15) !important; }
+#input-box textarea:focus { border-color: #a5b4fc !important; box-shadow: 0 0 0 3px rgba(129,140,248,.14) !important; }
 #send-btn {
-    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-    border: none !important; border-radius: 14px !important; color: #fff !important;
-    font-weight: 600; box-shadow: 0 4px 12px rgba(99,102,241,.3);
+    background: linear-gradient(135deg, #7c89f7, #96a0fa) !important;
+    border: none !important; border-radius: 12px !important; color: #fff !important;
+    font-weight: 600; box-shadow: 0 2px 8px rgba(124,137,247,.3);
 }
-#send-btn:hover { filter: brightness(1.08); }
+#send-btn:hover { filter: brightness(1.06); }
 #clear-btn {
-    background: #ffffff !important; border: 1.5px solid #e2e5f1 !important;
-    border-radius: 14px !important; color: #64748b !important;
+    background: #ffffff !important; border: 1.5px solid #e6e9f4 !important;
+    border-radius: 12px !important; color: #8a94a6 !important;
 }
-#clear-btn:hover { border-color: #c7b9f5 !important; color: #7c3aed !important; }
+#clear-btn:hover { border-color: #c7d2fe !important; color: #6366f1 !important; }
 
 /* 示例问题 */
-.examples .example-btn { border-radius: 999px !important; font-size: 13px !important; }
+.examples .example-btn { border-radius: 999px !important; font-size: 12.5px !important; }
 
 /* 隐藏 Gradio 默认页脚 */
 footer { display: none !important; }
+
+/* 移动端适配 */
+@media (max-width: 640px) {
+    .gradio-container { padding: 8px 10px !important; }
+    .dm-header { padding: 11px 14px; border-radius: 12px; }
+    .dm-title { font-size: 17px; }
+    .dm-sub { font-size: 11.5px; }
+    .dm-chip { font-size: 10.5px; padding: 2px 8px; }
+    .message { max-width: 94% !important; }
+    /* 手机上隐藏示例区，确保对话+输入一屏完整 */
+    #examples-area { display: none !important; }
+    #chatbot { height: calc(100dvh - 290px) !important; min-height: 300px; }
+    #send-btn, #clear-btn { min-width: 64px !important; }
+}
 """
 
 HEADER_HTML = f"""
 <div class="dm-header">
-  <div class="dm-title">🧠 DocMind</div>
+  <div class="dm-title">
+    <span>🧠 DocMind</span>
+    <span class="dm-badge">手写 ReAct · RAG · MCP</span>
+  </div>
   <div class="dm-sub">
-    从零实现的知识助理 Agent —— 手写 ReAct 推理循环 · RAG 知识库检索 · MCP 工具调用<br>
-    回答带来源标注：<b>[来源: 文件名]</b> = 知识库 · <b>【模型通识】</b> = 库外兜底 · <b>🔧 工具</b> = 实时数据
+    回答来源标注：<b>[来源: 文件名]</b> 知识库 · <b>【模型通识】</b> 库外兜底 · <b>🔧 工具</b> 实时数据
   </div>
   <div class="dm-chips">
     {''.join(f'<span class="dm-chip">{t}</span>' for t in tool_names)}
@@ -137,9 +176,8 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     gr.HTML(HEADER_HTML)
 
     chatbot = gr.Chatbot(
-        height=520,
         show_label=False,
-        placeholder="💬 在下方输入问题，试试右侧的示例～",
+        placeholder="💬 在下方输入问题，试试下面的示例～",
         elem_id="chatbot",
     )
 
@@ -154,7 +192,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         send = gr.Button("发送", scale=1, min_width=80, elem_id="send-btn")
         clear = gr.Button("🗑️ 新对话", scale=1, min_width=110, elem_id="clear-btn")
 
-    gr.Examples(examples=EXAMPLES, inputs=msg, label="✨ 示例问题", examples_per_page=8)
+    gr.Examples(examples=EXAMPLES, inputs=msg, label="✨ 示例问题", examples_per_page=8, elem_id="examples-area")
 
     def submit(question: str, history: list):
         if not question.strip():
