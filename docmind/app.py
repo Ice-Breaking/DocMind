@@ -127,20 +127,36 @@ body, .gradio-container, .main {
 }
 #clear-btn:hover { border-color: #a5b4fc !important; background: #f4f6ff !important; }
 
-/* 示例问题：PC 端自动换行，移动端单行横向滑动，任何分辨率都可见 */
+/* 示例问题：PC 端自动换行，移动端单行横向滑动，任何分辨率都可见；不显示标题 */
 #examples-area .gallery-item { border-radius: 999px !important; font-size: 12.5px !important; white-space: nowrap; }
+#examples-area .label { display: none !important; }
+
+/* 输入区：+ 按钮与输入框垂直居中对齐 */
+#input-row { align-items: center !important; }
+#clear-btn { align-self: center !important; }
 
 /* 隐藏 Gradio 默认页脚 */
 footer { display: none !important; }
+"""
 
-/* 移动端适配（基准 375×667）：全屏弹性布局，一屏完整展示，AI 内容内部滚动 */
+# 移动端适配 CSS（基准 375×667）：必须经 launch(head=...) 注入。
+# 原因：launch(css=) 的样式会被 Gradio 重写并限定到 .contain 作用域内，
+# 带 .gradio-container 前缀的选择器（锁定容器、块排序等）会永远失配。
+MOBILE_CSS = """
 @media (max-width: 640px) {
-    /* 容器锁定一屏高度，禁止页面级滚动 */
+    /* 容器锁定一屏高度，禁止页面级滚动与横向溢出 */
     gradio-app, .gradio-container {
         height: 100dvh !important; max-height: 100dvh !important;
         overflow: hidden !important; box-sizing: border-box;
     }
+    body { overflow-x: hidden !important; }
     .gradio-container { padding: 6px 8px !important; }
+    /* 块顺序重排：头部 → 示例区（垂直居中偏上）→ 对话区 → 输入区。
+       examples/chatbot/input 的 elem_id 直接挂在块自身，按 ID 直接定位 */
+    .gradio-container .column > .block:has(.dm-header) { order: 1; }
+    .gradio-container .column > #examples-area { order: 2; }
+    .gradio-container .column > #chatbot { order: 3; }
+    .gradio-container .column > #input-row { order: 4; }
     /* 逐层贯通 flex，让对话区自动占满剩余空间 */
     .gradio-container .main,
     .gradio-container .wrap,
@@ -152,32 +168,31 @@ footer { display: none !important; }
     .gradio-container .main { padding: 0 !important; }
     .gradio-container .column { gap: 6px !important; }
     .gradio-container .column > .block { flex: 0 0 auto; }
-    /* 对话区所在块拉伸填满；不支持 :has 的浏览器回退到固定高度 */
-    #chatbot { height: calc(100dvh - 300px) !important; min-height: 160px; }
-    .gradio-container .column > .block:has(#chatbot) {
-        flex: 1 1 auto !important; min-height: 0 !important;
+    /* 对话区拉伸填满剩余空间，消息在内部滚动 */
+    .gradio-container .column > #chatbot {
+        flex: 1 1 auto !important; min-height: 0 !important; height: auto !important;
         display: flex !important; flex-direction: column !important;
     }
-    .gradio-container .column > .block:has(#chatbot) #chatbot {
-        flex: 1 1 auto !important; height: auto !important;
-    }
+    .gradio-container .column > #chatbot > * { flex: 1 1 auto !important; min-height: 0 !important; }
+    .gradio-container .column > #chatbot { min-height: 160px; }
+    /* 头部压缩 */
     .dm-header { padding: 8px 12px; border-radius: 12px; margin: 0; }
     .dm-title { font-size: 16px; }
     .dm-sub { font-size: 10px; margin-top: 2px; }
     .dm-chips { margin-top: 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
     .dm-chip { font-size: 9px; padding: 1px 6px; }
     .message { max-width: 94% !important; }
-    /* 示例区单行横滑（Gradio 6 结构：.gallery > .gallery-item），任何分辨率都可见 */
-    #examples-area .label { font-size: 10px !important; margin-bottom: 1px !important; }
+    /* 示例区：无标题，单行横滑 */
+    #examples-area { margin: 0 !important; }
     #examples-area .gallery {
         display: flex !important; flex-wrap: nowrap !important;
         overflow-x: auto !important; scrollbar-width: none !important;
     }
     #examples-area .gallery::-webkit-scrollbar { display: none !important; }
-    #examples-area .gallery-item { flex: 0 0 auto !important; font-size: 11.5px !important; }
-    #examples-area { margin: 0 !important; }
-    #input-row { gap: 6px !important; }
-    #clear-btn { max-width: 42px !important; min-width: 42px !important; }
+    #examples-area .gallery-item { flex: 0 0 auto !important; font-size: 11px !important; padding: 4px 10px !important; }
+    /* 输入区：+ 按钮与输入框严格垂直居中 */
+    #input-row { gap: 6px !important; display: flex !important; align-items: center !important; }
+    #clear-btn { max-width: 42px !important; min-width: 42px !important; height: 42px !important; padding: 0 !important; }
 }
 """
 
@@ -306,7 +321,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         )
         send = gr.Button("发送", scale=1, min_width=80, elem_id="send-btn")
 
-    gr.Examples(examples=EXAMPLES, inputs=msg, label="✨ 示例问题", examples_per_page=8, elem_id="examples-area")
+    gr.Examples(examples=EXAMPLES, inputs=msg, label=None, examples_per_page=8, elem_id="examples-area")
 
     def submit(question: str, history: list):
         if not question.strip():
@@ -320,5 +335,6 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 
 
 if __name__ == "__main__":
-    # Gradio 6：theme / css 移到 launch()；折叠脚本经 head 参数注入页面
-    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT)
+    # Gradio 6：theme / css 移到 launch()；折叠脚本与移动端样式经 head 注入
+    # （head 注入的内容不会被 Gradio 的 CSS 作用域重写）
+    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT + f"<style>{MOBILE_CSS}</style>")
