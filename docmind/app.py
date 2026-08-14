@@ -193,23 +193,23 @@ body { overflow-x: hidden !important; }
     .dm-chips { margin-top: 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
     .dm-chip { font-size: 9px; padding: 1px 6px; }
     .message { max-width: 94% !important; }
-    /* 示例区：无标题，2×2 等宽网格，四个示例全部可见，超长文本省略号 */
+    /* 示例区：无标题，2×2 等宽网格，文字完整显示（自动换行），内容水平居中 */
     #examples-area { margin: 0 !important; }
     #examples-area .gallery {
         display: grid !important;
         grid-template-columns: 1fr 1fr !important;
-        gap: 6px !important;
+        gap: 6px !important; width: 100% !important;
     }
     #examples-area .gallery-item {
         min-width: 0 !important; font-size: 11px !important;
-        padding: 6px 10px !important; text-align: center !important;
+        padding: 6px 8px !important; line-height: 1.45 !important;
+        display: flex !important; align-items: center !important; justify-content: center !important;
     }
-    /* 胶囊内嵌套层也要同步截断，否则省略号不生效 */
-    #examples-area .gallery-item,
+    /* 胶囊嵌套层：取消截断，允许换行，文字居中 */
     #examples-area .gallery-item span,
     #examples-area .gallery-item span > div {
-        max-width: 100% !important; overflow: hidden !important;
-        text-overflow: ellipsis !important; white-space: nowrap !important;
+        max-width: 100% !important; white-space: normal !important;
+        word-break: break-word !important; text-align: center !important;
     }
     /* 输入区：+ 按钮与输入框严格垂直居中 */
     #input-row { gap: 6px !important; display: flex !important; align-items: center !important; }
