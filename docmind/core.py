@@ -59,30 +59,69 @@ def build_agent():
         handler=lambda args: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
-    # ---- 联网搜索：时效性信息的唯一可靠来源（免 Key，DuckDuckGo）----
+    # ---- 联网搜索：多引擎降级（博查 → DDG news → DDG text）----
+    def _search_bocha(query: str) -> list[dict]:
+        """博查 AI 搜索：国内稳定、新鲜度高；需 BOCHA_API_KEY"""
+        import requests
+
+        resp = requests.post(
+            "https://api.bochaai.com/v1/web-search",
+            headers={"Authorization": f"Bearer {config.BOCHA_API_KEY}"},
+            json={"query": query, "freshness": "noLimit", "summary": True, "count": 6},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        pages = resp.json().get("data", {}).get("webPages", {}).get("value", [])
+        return [
+            {"title": p.get("name", ""), "body": p.get("snippet", ""),
+             "href": p.get("url", ""), "date": p.get("datePublished", "")}
+            for p in pages
+        ]
+
+    def _search_ddg(query: str) -> list[dict]:
+        """DuckDuckGo：免 Key 兜底，先试 news 通道再退 text 通道"""
+        from ddgs import DDGS
+
+        try:
+            results = DDGS().news(query, region="cn-zh", max_results=5, timeout=12)
+        except Exception:  # noqa: BLE001 - news 通道不通则退 text
+            results = DDGS().text(query, region="cn-zh", max_results=5, timeout=20)
+        return [
+            {"title": r.get("title", ""), "body": r.get("body", ""),
+             "href": r.get("url") or r.get("href", ""), "date": r.get("date", "")}
+            for r in (results or [])
+        ]
+
     def web_search(args: dict) -> str:
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        try:
-            from ddgs import DDGS
-
-            results = DDGS().text(query, region="cn-zh", max_results=5, timeout=15)
-        except Exception as e:  # noqa: BLE001 - 搜索不可用时让 LLM 降级处理
-            return f"[错误] 联网搜索暂不可用: {e}"
+        errors = []
+        engines = []
+        if config.BOCHA_API_KEY:
+            engines.append(("博查", _search_bocha))
+        engines.append(("DuckDuckGo", _search_ddg))
+        results = []
+        for name, fn in engines:
+            try:
+                results = fn(query)
+                if results:
+                    break
+            except Exception as e:  # noqa: BLE001 - 逐引擎降级
+                errors.append(f"{name}: {type(e).__name__}")
         if not results:
-            return "未搜索到相关结果。"
+            detail = f"（{'; '.join(errors)}）" if errors else ""
+            return f"[错误] 联网搜索暂不可用{detail}，请如实告知用户无法获取实时信息。"
         lines = []
         for i, r in enumerate(results, 1):
-            lines.append(
-                f"[{i}] {r.get('title', '')}\n{r.get('body', '')}\n链接: {r.get('href', '')}"
-            )
+            date = f" ({r['date'][:10]})" if r.get("date") else ""
+            lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
         return "\n\n".join(lines)
 
     registry.register(
         name="web_search",
         description="联网搜索实时信息与最新新闻报道。涉及新闻、时事、最新动态等"
-                    "时效性问题时必须调用此工具，不要依赖自身知识。",
+                    "时效性问题时必须先调用此工具，严禁先凭自身知识作答。",
         parameters={
             "type": "object",
             "properties": {

@@ -37,6 +37,10 @@ RERANK_RELATIVE_RATIO = 0.15
 # 混合检索：Rerank 模型（百炼原生 rerank API）
 RERANK_MODEL = os.getenv("RERANK_MODEL", "gte-rerank-v2")
 
+# 联网搜索：配置博查 API Key 后优先用博查（国内稳定、新鲜度高，有免费额度）；
+# 未配置则回退 DuckDuckGo（免 Key，国内网络下时好时坏）
+BOCHA_API_KEY = os.getenv("BOCHA_API_KEY", "")
+
 # 调用链追踪：配置了 Langfuse 凭证则上报 Langfuse，否则降级写本地 JSONL
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
