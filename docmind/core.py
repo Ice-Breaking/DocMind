@@ -59,6 +59,40 @@ def build_agent():
         handler=lambda args: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
+    # ---- 联网搜索：时效性信息的唯一可靠来源（免 Key，DuckDuckGo）----
+    def web_search(args: dict) -> str:
+        query = args.get("query", "")
+        if not query:
+            return "[错误] 缺少 query 参数"
+        try:
+            from ddgs import DDGS
+
+            results = DDGS().text(query, region="cn-zh", max_results=5, timeout=15)
+        except Exception as e:  # noqa: BLE001 - 搜索不可用时让 LLM 降级处理
+            return f"[错误] 联网搜索暂不可用: {e}"
+        if not results:
+            return "未搜索到相关结果。"
+        lines = []
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"[{i}] {r.get('title', '')}\n{r.get('body', '')}\n链接: {r.get('href', '')}"
+            )
+        return "\n\n".join(lines)
+
+    registry.register(
+        name="web_search",
+        description="联网搜索实时信息与最新新闻报道。涉及新闻、时事、最新动态等"
+                    "时效性问题时必须调用此工具，不要依赖自身知识。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+            },
+            "required": ["query"],
+        },
+        handler=web_search,
+    )
+
     # ---- MCP 远程工具 ----
     from docmind.config import MCP_SERVERS
     connections = register_mcp_tools(registry, MCP_SERVERS)

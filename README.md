@@ -17,6 +17,7 @@ ReActAgent（手写推理循环）──────────► 通义千问
    ▼
 ToolRegistry（统一工具注册表）
    ├── knowledge_search   ──► 混合检索：BM25 + 向量 → RRF 融合 → gte-rerank 精排 → 引用溯源
+   ├── web_search         ──► 联网搜索（DuckDuckGo，免 Key，时效性信息补位）
    ├── get_current_time   ──► 本地工具示例
    └── get_weather        ──► MCP Server（stdio，官方 SDK）
 ```
