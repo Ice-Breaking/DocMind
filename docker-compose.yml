@@ -1,0 +1,17 @@
+# DocMind 一键部署：docker compose up -d
+# 需要先在项目根目录准备好 .env（参考 .env.example）
+services:
+  docmind:
+    build: .
+    image: docmind:latest
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env                     # 百炼 API Key 等（不进镜像、不进仓库）
+    volumes:
+      - docmind-data:/app/data                   # 向量索引缓存 + 调用链日志持久化
+      - ./docs/knowledge:/app/docs/knowledge     # 知识库热更新：改文档重启容器即可
+    restart: unless-stopped
+
+volumes:
+  docmind-data:

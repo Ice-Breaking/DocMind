@@ -52,6 +52,23 @@ python -m docmind.cli
 python -m docmind.app
 ```
 
+## Docker 一键部署
+
+```bash
+# 前提：项目根目录已有 .env（参考 .env.example）
+docker compose up -d --build
+
+# 访问 http://localhost:7860
+# 查看日志：docker compose logs -f
+# 停止：docker compose down
+```
+
+设计要点：
+- API Key 通过 `env_file` 注入，**不进镜像、不进仓库**
+- 向量索引缓存/调用链日志用命名卷持久化（重启不重建索引）
+- 知识库目录挂载到宿主机：改文档后 `docker compose restart` 即生效，无需重新构建镜像
+- 依赖层与代码层分离，改代码重建镜像不重装依赖
+
 试试这些问题：
 
 - `DocMind 的检索流程是怎样的？`（触发 RAG 检索）
@@ -122,7 +139,7 @@ $ python scripts/view_traces.py
 - [x] PDF / Word 文档支持（pypdf + python-docx，坏文件容错跳过）
 - [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
 - [x] 对话调用链追踪（Langfuse / 本地 JSONL 双后端，覆盖 LLM 调用 + 工具执行 + token 用量）
-- [ ] Docker 一键部署
+- [x] Docker 一键部署（compose 编排，Key 注入不进镜像，索引缓存/知识库卷持久化）
 
 ## License
 

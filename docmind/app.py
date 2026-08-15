@@ -1,7 +1,11 @@
 """DocMind Web 界面（Gradio）：展示 Agent 思考过程 + 引用来源。
 
 启动：python -m docmind.app
+监听地址/端口可用环境变量 GRADIO_SERVER_NAME / GRADIO_SERVER_PORT 覆盖
+（Docker 部署时容器内需要 0.0.0.0）。
 """
+import os
+
 import gradio as gr
 
 from docmind.core import build_agent
@@ -377,4 +381,10 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 if __name__ == "__main__":
     # Gradio 6：theme / css 移到 launch()；折叠脚本与全局布局样式经 head 注入
     # （head 注入的内容不会被 Gradio 的 CSS 作用域重写）
-    demo.launch(theme=theme, css=CUSTOM_CSS, head=FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>")
+    demo.launch(
+        theme=theme,
+        css=CUSTOM_CSS,
+        head=FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>",
+        server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+        server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+    )

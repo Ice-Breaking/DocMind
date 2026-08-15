@@ -1,0 +1,17 @@
+# Git / 环境 / 缓存不进镜像
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.env
+data
+scripts
+README.md
+
+# IDE / 系统
+.idea
+.vscode
+.DS_Store
+.aicoding-chat-workspace
