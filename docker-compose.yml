@@ -7,10 +7,26 @@ services:
     ports:
       - "7860:7860"
     env_file:
-      - .env                     # 百炼 API Key 等（不进镜像、不进仓库）
+      - .env                     # 百炼 API Key / Tavily Key 等（不进镜像、不进仓库）
+    environment:
+      - SEARXNG_URL=http://searxng:8080   # 容器网络内直连 SearXNG，覆盖 .env 中的地址
     volumes:
       - docmind-data:/app/data                   # 向量索引缓存 + 调用链日志持久化
       - ./docs/knowledge:/app/docs/knowledge     # 知识库热更新：改文档重启容器即可
+    depends_on:
+      - searxng
+    restart: unless-stopped
+
+  # 自托管元搜索引擎：免费无限量，作为 Tavily 的降级兜底
+  # 浏览器也可直接访问 http://localhost:8080 手动搜索
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
     restart: unless-stopped
 
 volumes:

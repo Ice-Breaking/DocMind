@@ -1,0 +1,30 @@
+# SearXNG 配置（挂载到容器 /etc/searxng/settings.yml）
+# 关键改动：开启 json 输出格式供 DocMind 的 web_search 调用
+use_default_settings: true
+
+server:
+  # 本地演示用固定密钥；生产环境请换成随机值
+  secret_key: "docmind-searxng-demo-secret"
+  # 关闭限流（供本机 Agent 调用；公网部署务必重新开启）
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json    # DocMind web_search 依赖此格式
+
+# 引擎取舍：优先国内网络可稳定访问的源
+engines:
+  - name: bing
+    disabled: false
+  - name: bing news
+    disabled: false
+  - name: bing videos
+    disabled: true
+  - name: duckduckgo
+    disabled: false
+  - name: google
+    disabled: true     # 国内直连不稳定，避免拖慢聚合
+  - name: wikipedia
+    disabled: false

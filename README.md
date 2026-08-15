@@ -17,7 +17,7 @@ ReActAgent（手写推理循环）──────────► 通义千问
    ▼
 ToolRegistry（统一工具注册表）
    ├── knowledge_search   ──► 混合检索：BM25 + 向量 → RRF 融合 → gte-rerank 精排 → 引用溯源
-   ├── web_search         ──► 联网搜索（DuckDuckGo，免 Key，时效性信息补位）
+   ├── web_search         ──► 联网搜索（Tavily → SearXNG 自托管，逐级降级）
    ├── get_current_time   ──► 本地工具示例
    └── get_weather        ──► MCP Server（stdio，官方 SDK）
 ```
@@ -59,7 +59,7 @@ python -m docmind.app
 # 前提：项目根目录已有 .env（参考 .env.example）
 docker compose up -d --build
 
-# 访问 http://localhost:7860
+# 访问 http://localhost:7860（应用）/ http://localhost:8080（SearXNG）
 # 查看日志：docker compose logs -f
 # 停止：docker compose down
 ```
@@ -69,6 +69,17 @@ docker compose up -d --build
 - 向量索引缓存/调用链日志用命名卷持久化（重启不重建索引）
 - 知识库目录挂载到宿主机：改文档后 `docker compose restart` 即生效，无需重新构建镜像
 - 依赖层与代码层分离，改代码重建镜像不重装依赖
+- **SearXNG 自托管搜索引擎**随 compose 一起编排：容器内自动经
+  `http://searxng:8080` 直连，作为 Tavily 的免费无限量兜底
+
+## 联网搜索（时效性信息）
+
+`web_search` 工具多引擎逐级降级：
+
+1. **Tavily**（配置 `TAVILY_API_KEY`）：专为 AI Agent 设计，新鲜度/摘要质量最佳，免费 1000 次/月
+2. **SearXNG**（配置 `SEARXNG_URL` 或 compose 自动注入）：自托管元搜索引擎，聚合 Bing/DDG 等，免费无限量
+
+两者都未配置时，工具返回明确错误，Agent 会如实告知用户无法获取实时信息（不编造）。
 
 试试这些问题：
 

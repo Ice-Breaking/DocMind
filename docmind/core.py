@@ -59,48 +59,52 @@ def build_agent():
         handler=lambda args: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
-    # ---- 联网搜索：多引擎降级（博查 → DDG news → DDG text）----
-    def _search_bocha(query: str) -> list[dict]:
-        """博查 AI 搜索：国内稳定、新鲜度高；需 BOCHA_API_KEY"""
+    # ---- 联网搜索：多引擎降级（Tavily → SearXNG）----
+    def _search_tavily(query: str) -> list[dict]:
+        """Tavily：专为 AI Agent 设计的搜索 API，新鲜度/摘要质量最佳；需 TAVILY_API_KEY"""
         import requests
 
         resp = requests.post(
-            "https://api.bochaai.com/v1/web-search",
-            headers={"Authorization": f"Bearer {config.BOCHA_API_KEY}"},
-            json={"query": query, "freshness": "noLimit", "summary": True, "count": 6},
-            timeout=15,
+            "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"},
+            json={"query": query, "max_results": 5, "search_depth": "basic"},
+            timeout=20,
         )
         resp.raise_for_status()
-        pages = resp.json().get("data", {}).get("webPages", {}).get("value", [])
         return [
-            {"title": p.get("name", ""), "body": p.get("snippet", ""),
-             "href": p.get("url", ""), "date": p.get("datePublished", "")}
-            for p in pages
+            {"title": r.get("title", ""), "body": r.get("content", ""),
+             "href": r.get("url", ""), "date": r.get("published_date") or ""}
+            for r in resp.json().get("results", [])
         ]
 
-    def _search_ddg(query: str) -> list[dict]:
-        """DuckDuckGo：免 Key 兜底，先试 news 通道再退 text 通道"""
-        from ddgs import DDGS
+    def _search_searxng(query: str) -> list[dict]:
+        """SearXNG：自托管元搜索引擎（免费无限量）；需 SEARXNG_URL"""
+        import requests
 
-        try:
-            results = DDGS().news(query, region="cn-zh", max_results=5, timeout=12)
-        except Exception:  # noqa: BLE001 - news 通道不通则退 text
-            results = DDGS().text(query, region="cn-zh", max_results=5, timeout=20)
+        resp = requests.get(
+            f"{config.SEARXNG_URL.rstrip('/')}/search",
+            params={"q": query, "format": "json", "language": "zh"},
+            timeout=20,
+        )
+        resp.raise_for_status()
         return [
-            {"title": r.get("title", ""), "body": r.get("body", ""),
-             "href": r.get("url") or r.get("href", ""), "date": r.get("date", "")}
-            for r in (results or [])
+            {"title": r.get("title", ""), "body": r.get("content", ""),
+             "href": r.get("url", ""), "date": ""}
+            for r in resp.json().get("results", [])[:5]
         ]
 
     def web_search(args: dict) -> str:
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        errors = []
         engines = []
-        if config.BOCHA_API_KEY:
-            engines.append(("博查", _search_bocha))
-        engines.append(("DuckDuckGo", _search_ddg))
+        if config.TAVILY_API_KEY:
+            engines.append(("Tavily", _search_tavily))
+        if config.SEARXNG_URL:
+            engines.append(("SearXNG", _search_searxng))
+        if not engines:
+            return "[错误] 未配置搜索引擎（TAVILY_API_KEY / SEARXNG_URL），请如实告知用户无法获取实时信息。"
+        errors = []
         results = []
         for name, fn in engines:
             try:
@@ -110,11 +114,10 @@ def build_agent():
             except Exception as e:  # noqa: BLE001 - 逐引擎降级
                 errors.append(f"{name}: {type(e).__name__}")
         if not results:
-            detail = f"（{'; '.join(errors)}）" if errors else ""
-            return f"[错误] 联网搜索暂不可用{detail}，请如实告知用户无法获取实时信息。"
+            return f"[错误] 联网搜索暂不可用（{'; '.join(errors)}），请如实告知用户无法获取实时信息。"
         lines = []
         for i, r in enumerate(results, 1):
-            date = f" ({r['date'][:10]})" if r.get("date") else ""
+            date = f" ({str(r['date'])[:10]})" if r.get("date") else ""
             lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
         return "\n\n".join(lines)
 
