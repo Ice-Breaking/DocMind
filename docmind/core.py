@@ -10,6 +10,7 @@ from docmind import config
 from docmind.agent.react_agent import ReActAgent
 from docmind.agent.tools import ToolRegistry
 from docmind.mcp_client import register_mcp_tools
+from docmind.rag.hybrid import HybridRetriever
 from docmind.rag.vector_store import VectorStore
 
 
@@ -17,19 +18,20 @@ def build_agent():
     """装配 Agent，返回 (agent, vector_store, mcp_connections)"""
     registry = ToolRegistry()
 
-    # ---- RAG 知识库 ----
+    # ---- RAG 知识库：向量库 + 混合检索（BM25+RRF+Rerank）----
     store = VectorStore()
     n = store.build()
-    print(f"[DocMind] 知识库加载完成：{n} 个切片")
+    retriever = HybridRetriever(store)
+    retriever.build()
+    print(f"[DocMind] 知识库加载完成：{n} 个切片，混合索引已构建")
 
     def knowledge_search(args: dict) -> str:
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        # 阈值过滤：低于 RETRIEVE_MIN_SCORE 的切片视为无关，避免噪音进入上下文
-        hits = [h for h in store.search(query) if h.score >= config.RETRIEVE_MIN_SCORE]
+        hits = retriever.search(query, top_k=config.TOP_K, rerank=True)
         if not hits:
-            return "知识库中没有找到与问题相关的内容（均未通过相关性阈值）。"
+            return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
         lines = []
         for i, h in enumerate(hits, 1):
             lines.append(f"[{i}] (来源: {h.source}, 相关度: {h.score:.2f})\n{h.text}")
@@ -37,7 +39,7 @@ def build_agent():
 
     registry.register(
         name="knowledge_search",
-        description="在本地知识库中语义检索，返回最相关的文档片段及来源。"
+        description="在本地知识库中混合检索（BM25+向量+Rerank），返回最相关的文档片段及来源。"
                     "回答事实性问题前必须先调用此工具。",
         parameters={
             "type": "object",

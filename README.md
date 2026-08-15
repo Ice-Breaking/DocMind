@@ -16,10 +16,23 @@ ReActAgent（手写推理循环）──────────► 通义千问
    │  function calling
    ▼
 ToolRegistry（统一工具注册表）
-   ├── knowledge_search   ──► RAG：切片 → Embedding → 余弦检索 → 引用溯源
+   ├── knowledge_search   ──► 混合检索：BM25 + 向量 → RRF 融合 → gte-rerank 精排 → 引用溯源
    ├── get_current_time   ──► 本地工具示例
    └── get_weather        ──► MCP Server（stdio，官方 SDK）
 ```
+
+## 检索质量评测（scripts/eval_retrieval.py）
+
+42 条评测问题（基础集 30 + 困难集 12：口语化/英文/换说法）：
+
+| 方案 | 基础集 Recall@4 | 困难集 Recall@4 | 困难集 MRR |
+|---|---|---|---|
+| 纯向量 | 100% | 100% | 0.903 |
+| 混合（BM25+向量+RRF） | 100% | 100% | 0.903 |
+| 混合 + Rerank（gte-rerank-v2） | 100% | 100% | **0.944** |
+
+小规模知识库下 Recall 容易饱和，混合检索的价值主要体现在排序质量（MRR）
+与大规模语料下的召回鲁棒性；架构上检索接口保持不变，可平滑扩展。
 
 ## 快速开始
 
@@ -56,12 +69,17 @@ docmind/
 │   ├── tools.py           # 工具注册表（统一本地/MCP 工具）
 │   └── react_agent.py     # 手写 ReAct 循环（核心）
 ├── rag/
-│   ├── chunker.py         # 文档加载与切片
-│   └── vector_store.py    # 内存向量库（numpy 余弦检索）
+│   ├── chunker.py         # 文档加载与切片（Markdown 语义切片）
+│   ├── vector_store.py    # 内存向量库（numpy 余弦检索）
+│   ├── hybrid.py          # 混合检索：BM25 + 向量 → RRF → Rerank
+│   └── eval_set.py        # 检索评测集
 └── mcp_client.py          # MCP 客户端（stdio 连接 + 工具转发）
 
 mcp_servers/
 └── weather_server.py      # 示例 MCP Server（FastMCP，天气查询）
+
+scripts/
+└── eval_retrieval.py      # 检索质量评测（纯向量 vs 混合 vs +Rerank）
 
 docs/knowledge/            # 知识库文档（.md/.txt，启动时自动建索引）
 ```
@@ -79,7 +97,7 @@ docs/knowledge/            # 知识库文档（.md/.txt，启动时自动建索�
 
 ## 路线图
 
-- [ ] 混合检索（BM25 + 向量）与 Rerank
+- [x] 混合检索（BM25 + 向量 + RRF）与 Rerank（gte-rerank-v2，带评测脚本）
 - [ ] PDF / Word 文档支持
 - [ ] 向量索引持久化缓存
 - [ ] 对话日志与调用链追踪（Langfuse）

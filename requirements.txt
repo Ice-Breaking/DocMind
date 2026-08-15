@@ -4,6 +4,11 @@ openai>=1.40.0
 # RAG 向量检索（轻量实现，仅用 numpy 算余弦相似度）
 numpy>=1.26.0
 
+# 混合检索：BM25 关键词路 + 中文分词；Rerank 调用用 requests（自带证书）
+rank-bm25>=0.2.2
+jieba>=0.42.1
+requests>=2.31.0
+
 # MCP 官方 Python SDK（钉住 1.x：2.0 移除了 FastMCP，接口不兼容）
 mcp>=1.2.0,<2.0.0
 
