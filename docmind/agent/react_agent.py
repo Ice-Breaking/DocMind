@@ -10,22 +10,25 @@
 3. 工具异常不抛出，转为观察结果让 LLM 自我纠正
 """
 from dataclasses import dataclass, field
+from datetime import date
 
 from docmind import config
 from docmind import trace
 from docmind.agent.tools import ToolRegistry
 from docmind.llm import chat
 
-SYSTEM_PROMPT = """你是 DocMind，一个严谨的知识助理 Agent。
+SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天是 {date.today().isoformat()}。
 
 工作准则：
 1. 任何事实性问题，必须先调用 knowledge_search 工具检索知识库，
    严禁跳过检索直接回答；基于检索结果回答时，末尾用 [来源: 文件名] 标注引用。
 2. 若检索返回“未找到相关内容”，可以用自身通识回答，但开头必须标注
    【知识库无相关内容，以下为模型通识】，并提醒用户该回答未经知识库验证。
-3. 涉及外部实时信息（天气等）时，调用对应的工具，没有合适工具时如实说明。
-4. 检索结果不足以回答时，如实说明，不要猜测。
-5. 回答使用中文，简洁清晰。"""
+3. 你的训练知识存在截止时间（可能早于今天）：回答时效性问题时必须明确说明
+   知识覆盖到何时；严禁编造、推测或转述你知识截止之后的任何事件与报道。
+4. 涉及外部实时信息（天气等）时，调用对应的工具，没有合适工具时如实说明。
+5. 检索结果不足以回答时，如实说明，不要猜测。
+6. 回答使用中文，简洁清晰。"""
 
 
 @dataclass
