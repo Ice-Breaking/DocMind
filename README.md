@@ -23,16 +23,18 @@ ToolRegistry（统一工具注册表）
 
 ## 检索质量评测（scripts/eval_retrieval.py）
 
-42 条评测问题（基础集 30 + 困难集 12：口语化/英文/换说法）：
+47 条评测问题（基础集 30 + 困难集 17：口语化/英文/换说法/PDF/Word 内容）：
 
 | 方案 | 基础集 Recall@4 | 困难集 Recall@4 | 困难集 MRR |
 |---|---|---|---|
-| 纯向量 | 100% | 100% | 0.903 |
-| 混合（BM25+向量+RRF） | 100% | 100% | 0.903 |
-| 混合 + Rerank（gte-rerank-v2） | 100% | 100% | **0.944** |
+| 纯向量 | 100% | 94.1% | 0.865 |
+| 混合（BM25+向量+RRF） | 100% | **100%** | 0.902 |
+| 混合 + Rerank（gte-rerank-v2） | 100% | 94.1% | **0.920** |
 
-小规模知识库下 Recall 容易饱和，混合检索的价值主要体现在排序质量（MRR）
-与大规模语料下的召回鲁棒性；架构上检索接口保持不变，可平滑扩展。
+知识库扩充到 4 种格式 25 个切片后，纯向量在困难集出现真实漏召回，
+混合检索将召回拉回 100%，Rerank 进一步提升排序质量（MRR 0.865 → 0.920）。
+Rerank 结果采用“绝对下限 + 相对头部比例”自适应过滤，代替固定阈值
+（固定阈值在语料变化后会把正确答案误杀，实测从 23.5% 修复回 94.1%）。
 
 ## 快速开始
 
@@ -79,9 +81,10 @@ mcp_servers/
 └── weather_server.py      # 示例 MCP Server（FastMCP，天气查询）
 
 scripts/
-└── eval_retrieval.py      # 检索质量评测（纯向量 vs 混合 vs +Rerank）
+├── eval_retrieval.py      # 检索质量评测（纯向量 vs 混合 vs +Rerank）
+└── gen_sample_docs.py     # 示例 PDF/Word 文档生成工具
 
-docs/knowledge/            # 知识库文档（.md/.txt，启动时自动建索引）
+docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx，启动时自动建索引）
 ```
 
 ## 关键设计（面试讲解点）
@@ -98,7 +101,7 @@ docs/knowledge/            # 知识库文档（.md/.txt，启动时自动建索�
 ## 路线图
 
 - [x] 混合检索（BM25 + 向量 + RRF）与 Rerank（gte-rerank-v2，带评测脚本）
-- [ ] PDF / Word 文档支持
+- [x] PDF / Word 文档支持（pypdf + python-docx，坏文件容错跳过）
 - [ ] 向量索引持久化缓存
 - [ ] 对话日志与调用链追踪（Langfuse）
 - [ ] Docker 一键部署

@@ -23,6 +23,22 @@ def tokenize(text: str) -> list[str]:
     return [t.lower() for t in jieba.cut(text) if t.strip()]
 
 
+def filter_reranked(ranked: list[SearchHit]) -> list[SearchHit]:
+    """Rerank 结果过滤：绝对下限 + 相对头部比例，代替固定阈值。
+
+    固定阈值会因语料/模型不同而失准：真实相关的 relevance_score
+    可能在 0.1～0.9 全区间分布，而无关内容一般 < 0.08。
+    因此：头部候选过低→整体无关；其余候选跟头部比较而非跟固定线比较。
+    """
+    if not ranked:
+        return []
+    top = ranked[0].score
+    if top < config.RERANK_MIN_TOP_SCORE:
+        return []
+    floor = max(config.RERANK_ABS_FLOOR, top * config.RERANK_RELATIVE_RATIO)
+    return [h for h in ranked if h.score >= floor]
+
+
 class HybridRetriever:
     def __init__(self, store: VectorStore):
         self.store = store
@@ -103,9 +119,9 @@ class HybridRetriever:
         if rerank and candidates:
             try:
                 ranked = self._rerank(query, candidates, top_n=k)
-                # relevance_score 有真实语义（0~1），可按阈值过滤无关内容；
+                # relevance_score 有真实语义（0~1），用“绝对下限+相对头部”过滤；
                 # RRF 分数只是排名融合值，无阈值语义，不过滤
-                return [h for h in ranked if h.score >= config.RETRIEVE_MIN_SCORE]
+                return filter_reranked(ranked)
             except Exception as e:  # noqa: BLE001 - Rerank 失败降级为 RRF
                 print(f"[警告] Rerank 调用失败，降级为 RRF 结果: {e}")
         return candidates[:k]

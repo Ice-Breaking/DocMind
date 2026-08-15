@@ -1,21 +1,62 @@
-"""文档加载与切片：把 docs/knowledge 下的文本切成可检索的片段。
+"""文档加载与切片：把 docs/knowledge 下的文本/PDF/Word 切成可检索的片段。
 
-切片策略（面试可讲）：
+格式支持（面试可讲）：
+- .md / .txt：直接读取
+- .pdf：pypdf 逐页提取（纯 Python，无系统依赖）
+- .docx：python-docx 提取正文段落 + 表格
+- 单个文件解析失败只告警跳过，不影响其余文档建库
+
+切片策略：
 - Markdown 文档优先按标题（# ~ ####）切分成语义完整的段落，再合并小段、
   拆分超长段，让每个切片尽量是一个完整的 QA 或主题
-- 纯文本退回滑窗切片：CHUNK_SIZE 窗口 + CHUNK_OVERLAP 重叠，优先换行处断开
+- 纯文本/PDF/Word 退回滑窗切片：CHUNK_SIZE 窗口 + CHUNK_OVERLAP 重叠，优先换行处断开
 """
 import os
 import re
 
 from docmind import config
 
-SUPPORTED_EXTS = {".md", ".txt"}
+SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx"}
 _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切分但保留标题文本
 
 
+# ---------------- 格式提取器 ----------------
+def _extract_pdf(path: str) -> str:
+    """pypdf 逐页提取文本，页间用空行分隔"""
+    from pypdf import PdfReader
+
+    reader = PdfReader(path)
+    pages = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            pages.append(text.strip())
+    return "\n\n".join(pages)
+
+
+def _extract_docx(path: str) -> str:
+    """python-docx 提取正文段落与表格（表格按行拼接）"""
+    import docx
+
+    d = docx.Document(path)
+    parts = [p.text.strip() for p in d.paragraphs if p.text.strip()]
+    for table in d.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+    return "\n\n".join(parts)
+
+
+# 二进制格式的提取器映射（懒导入，不用时不加载库）
+_EXTRACTORS = {
+    ".pdf": _extract_pdf,
+    ".docx": _extract_docx,
+}
+
+
 def load_documents(knowledge_dir: str | None = None) -> list[dict]:
-    """读取知识库目录，返回 [{source, text}]"""
+    """读取知识库目录，返回 [{source, text}]；单文件失败跳过不阻断"""
     root = knowledge_dir or config.KNOWLEDGE_DIR
     docs = []
     if not os.path.isdir(root):
@@ -25,8 +66,17 @@ def load_documents(knowledge_dir: str | None = None) -> list[dict]:
         if ext not in SUPPORTED_EXTS:
             continue
         path = os.path.join(root, name)
-        with open(path, encoding="utf-8") as f:
-            docs.append({"source": name, "text": f.read().strip()})
+        try:
+            if ext in _EXTRACTORS:
+                text = _EXTRACTORS[ext](path)
+            else:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+        except Exception as e:  # noqa: BLE001 - 坏文件不能阻断整个建库流程
+            print(f"[警告] 文档解析失败，已跳过 {name}: {e}")
+            continue
+        if text.strip():
+            docs.append({"source": name, "text": text.strip()})
     return docs
 
 

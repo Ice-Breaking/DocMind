@@ -56,6 +56,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
     return _with_retry(lambda: get_client().chat.completions.create(
         model=config.CHAT_MODEL,
         messages=messages,
+        temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
         **kwargs,
     )).choices[0].message
 

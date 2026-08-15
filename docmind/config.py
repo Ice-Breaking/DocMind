@@ -27,7 +27,12 @@ KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "docs", "knowledge")
 CHUNK_SIZE = 280          # 每片最大字符数（中文 QA 类文档不宜过大，避免关键内容被稀释）
 CHUNK_OVERLAP = 40        # 相邻切片重叠字符数
 TOP_K = 4                 # 检索返回条数
-RETRIEVE_MIN_SCORE = 0.45  # 相关性阈值：低于此值的切片视为无关，不进入上下文
+
+# Rerank 过滤策略（绝对下限 + 相对头部比例，代替固定阈值）：
+# 最优候选低于 MIN_TOP_SCORE 视为整体无关；其余候选需达到 max(绝对下限, 头部×比例)
+RERANK_MIN_TOP_SCORE = 0.08
+RERANK_ABS_FLOOR = 0.05
+RERANK_RELATIVE_RATIO = 0.15
 
 # 混合检索：Rerank 模型（百炼原生 rerank API）
 RERANK_MODEL = os.getenv("RERANK_MODEL", "gte-rerank-v2")
