@@ -1,5 +1,6 @@
 # SearXNG 配置（挂载到容器 /etc/searxng/settings.yml）
-# 关键改动：开启 json 输出格式供 DocMind 的 web_search 调用
+# 策略：保留默认引擎集，用 override 禁用国内不可达的、启用国内可通的
+# （不用 remove 列表——引用默认集之外的引擎名会导致 KeyError 崩溃）
 use_default_settings: true
 
 server:
@@ -14,17 +15,44 @@ search:
     - html
     - json    # DocMind web_search 依赖此格式
 
-# 引擎取舍：优先国内网络可稳定访问的源
 engines:
-  - name: bing
-    disabled: false
-  - name: bing news
-    disabled: false
-  - name: bing videos
+  # ---- 禁用：国内网络不可达的引擎 ----
+  - name: brave
     disabled: true
   - name: duckduckgo
-    disabled: false
-  - name: google
-    disabled: true     # 国内直连不稳定，避免拖慢聚合
+    disabled: true
+  - name: startpage
+    disabled: true
   - name: wikipedia
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: google
+    disabled: true
+  - name: google_news
+    disabled: true
+  - name: google_cse
+    disabled: true
+  - name: qwant
+    disabled: true
+  - name: mojeek
+    disabled: true
+  - name: swisscows
+    disabled: true
+  # ---- 启用：国内可稳定访问的引擎 ----
+  - name: bing
     disabled: false
+    timeout: 10
+  - name: bing_news
+    disabled: false
+    timeout: 10
+  - name: bing_images
+    disabled: true
+  - name: bing_videos
+    disabled: true
+  - name: baidu
+    disabled: false
+    timeout: 10
+  - name: quark
+    disabled: false
+    timeout: 10
