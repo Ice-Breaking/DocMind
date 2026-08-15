@@ -72,7 +72,8 @@ docmind/
 │   └── react_agent.py     # 手写 ReAct 循环（核心）
 ├── rag/
 │   ├── chunker.py         # 文档加载与切片（Markdown 语义切片）
-│   ├── vector_store.py    # 内存向量库（numpy 余弦检索）
+│   ├── vector_store.py    # 内存向量库（numpy 余弦检索 + 磁盘缓存）
+│   ├── cache.py           # 向量索引缓存（文件指纹失效策略）
 │   ├── hybrid.py          # 混合检索：BM25 + 向量 → RRF → Rerank
 │   └── eval_set.py        # 检索评测集
 └── mcp_client.py          # MCP 客户端（stdio 连接 + 工具转发）
@@ -102,7 +103,7 @@ docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx，启动时�
 
 - [x] 混合检索（BM25 + 向量 + RRF）与 Rerank（gte-rerank-v2，带评测脚本）
 - [x] PDF / Word 文档支持（pypdf + python-docx，坏文件容错跳过）
-- [ ] 向量索引持久化缓存
+- [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
 - [ ] 对话日志与调用链追踪（Langfuse）
 - [ ] Docker 一键部署
 
