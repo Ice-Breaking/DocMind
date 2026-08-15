@@ -12,6 +12,7 @@
 from dataclasses import dataclass, field
 
 from docmind import config
+from docmind import trace
 from docmind.agent.tools import ToolRegistry
 from docmind.llm import chat
 
@@ -92,7 +93,9 @@ class ReActAgent:
                     recent_signatures.clear()
                 else:
                     recent_signatures.append(sig)
-                    result = self.registry.execute(name, args)
+                    with trace.span(f"tool:{name}", input=args) as tctx:
+                        result = self.registry.execute(name, args)
+                        tctx["output"] = result[:300]
 
                 yield AgentStep("tool_result", f"`{name}` 返回: {result}")
                 self.history.append({

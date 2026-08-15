@@ -67,6 +67,7 @@ docmind/
 ├── core.py                # 应用装配（接线图）
 ├── cli.py                 # 命令行入口
 ├── app.py                 # Gradio Web 界面
+├── trace.py               # 调用链追踪（Langfuse / 本地 JSONL 双后端）
 ├── agent/
 │   ├── tools.py           # 工具注册表（统一本地/MCP 工具）
 │   └── react_agent.py     # 手写 ReAct 循环（核心）
@@ -83,9 +84,25 @@ mcp_servers/
 
 scripts/
 ├── eval_retrieval.py      # 检索质量评测（纯向量 vs 混合 vs +Rerank）
-└── gen_sample_docs.py     # 示例 PDF/Word 文档生成工具
+├── gen_sample_docs.py     # 示例 PDF/Word 文档生成工具
+└── view_traces.py         # 本地调用链日志查看器
 
 docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx，启动时自动建索引）
+```
+
+## 调用链追踪（可观测性）
+
+每次 LLM 调用与工具执行自动记录：延迟、输入输出摘要、token 用量。
+
+- 配置 `.env` 中的 `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` → 上报 Langfuse（云或 docker 自托管均可）
+- 未配置 → 自动降级写本地 `data/trace_log.jsonl`，用 `python scripts/view_traces.py` 查看
+- 追踪故障不影响主链路（全兜底 try/except）；日志轻量化（只记最近 3 条消息、截断 200 字）
+
+```
+$ python scripts/view_traces.py
+13:22:51 🤖 llm-chat              1403ms  tokens=475+35  | 需要先检索 LoRA 相关信息
+13:22:53 🔧 tool:knowledge_search  561ms                | [1] (来源: AI大模型知识问答.md...)
+13:22:53 🤖 llm-chat              2523ms  tokens=960+100 | LoRA 是参数高效微调方法...
 ```
 
 ## 关键设计（面试讲解点）
@@ -104,7 +121,7 @@ docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx，启动时�
 - [x] 混合检索（BM25 + 向量 + RRF）与 Rerank（gte-rerank-v2，带评测脚本）
 - [x] PDF / Word 文档支持（pypdf + python-docx，坏文件容错跳过）
 - [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
-- [ ] 对话日志与调用链追踪（Langfuse）
+- [x] 对话调用链追踪（Langfuse / 本地 JSONL 双后端，覆盖 LLM 调用 + 工具执行 + token 用量）
 - [ ] Docker 一键部署
 
 ## License

@@ -10,6 +10,7 @@ from openai import (
 )
 
 from docmind import config
+from docmind import trace
 
 _client: OpenAI | None = None
 
@@ -43,6 +44,15 @@ def _with_retry(fn):
             time.sleep(2 * (attempt + 1))
 
 
+def _brief_messages(messages: list[dict]) -> list[dict]:
+    """追踪日志轻量化：只保留最近 3 条，每条截断 200 字"""
+    out = []
+    for m in messages[-3:]:
+        content = m.get("content") or ""
+        out.append({"role": m.get("role"), "content": content[:200]})
+    return out
+
+
 def chat(messages: list[dict], tools: list[dict] | None = None):
     """发起一次对话，返回 ChatCompletion 的 message 对象。
 
@@ -53,12 +63,19 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
-    return _with_retry(lambda: get_client().chat.completions.create(
-        model=config.CHAT_MODEL,
-        messages=messages,
-        temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
-        **kwargs,
-    )).choices[0].message
+    with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
+                    input=_brief_messages(messages)) as ctx:
+        resp = _with_retry(lambda: get_client().chat.completions.create(
+            model=config.CHAT_MODEL,
+            messages=messages,
+            temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
+            **kwargs,
+        ))
+        msg = resp.choices[0].message
+        ctx["output"] = (msg.content or f"[调用工具: {[tc.function.name for tc in msg.tool_calls]}]")[:300] if msg.tool_calls or msg.content else ""
+        if getattr(resp, "usage", None):
+            ctx["usage"] = {"input": resp.usage.prompt_tokens, "output": resp.usage.completion_tokens}
+        return msg
 
 
 def embed(texts: list[str]) -> list[list[float]]:

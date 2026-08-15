@@ -37,6 +37,12 @@ RERANK_RELATIVE_RATIO = 0.15
 # 混合检索：Rerank 模型（百炼原生 rerank API）
 RERANK_MODEL = os.getenv("RERANK_MODEL", "gte-rerank-v2")
 
+# 调用链追踪：配置了 Langfuse 凭证则上报 Langfuse，否则降级写本地 JSONL
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+TRACE_LOG_PATH = os.path.join(PROJECT_ROOT, "data", "trace_log.jsonl")
+
 # MCP Server 配置：name -> 启动命令（stdio 模式）
 # 用当前解释器启动子进程，保证虚拟环境里的 mcp 包可用
 _PYTHON = sys.executable
