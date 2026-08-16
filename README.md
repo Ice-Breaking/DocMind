@@ -170,6 +170,7 @@ $ python scripts/view_traces.py
 | 向量库选型 | 小规模用内存 numpy 暴力检索；`search()` 接口稳定，可平滑换 Chroma/Milvus |
 | 切片策略 | 500 字滑窗 + 80 字重叠，优先段落边界，防语义截断 |
 | 防幻觉 | Prompt 强制"先检索后回答"，回答附来源标注 |
+| 深度思考 | `enable_thinking` 请求真实思维链，GUI 实时流式展示；思维链不回传 history（百炼多轮限制），模型不支持自动降级 |
 
 ## 路线图
 
@@ -178,6 +179,7 @@ $ python scripts/view_traces.py
 - [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
 - [x] 对话调用链追踪（Langfuse / 本地 JSONL 双后端，覆盖 LLM 调用 + 工具执行 + token 用量）
 - [x] Docker 一键部署（compose 编排，Key 注入不进镜像，索引缓存/知识库卷持久化）
+- [x] 深度思考·真实思维链（百炼 enable_thinking → reasoning_content 流式展示，完成后折叠摘要，模型不支持自动降级）
 
 ## License
 

@@ -4,6 +4,7 @@ import time
 from openai import (
     APIConnectionError,
     APITimeoutError,
+    BadRequestError,
     InternalServerError,
     OpenAI,
     RateLimitError,
@@ -78,25 +79,35 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
         return msg
 
 
-def chat_stream(messages: list[dict], tools: list[dict] | None = None):
+def chat_stream(messages: list[dict], tools: list[dict] | None = None,
+                enable_thinking: bool = False):
     """流式对话：yield ChatCompletionChunk，调用方自行累积内容与 tool_calls。
 
     带 usage 统计（stream_options）；创建阶段的瞬时错误同样退避重试。
+    enable_thinking=True 时请求百炼思维链（delta.reasoning_content 逐段返回），
+    仅部分模型支持：不支持的模型报参数错误，自动去掉该参数重试（降级不影响主链路）。
     """
     kwargs = {"stream": True, "stream_options": {"include_usage": True}}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
-    def _create():
+    def _create(thinking: bool):
         return get_client().chat.completions.create(
             model=config.CHAT_MODEL,
             messages=messages,
-            temperature=0.1,
+            # 百炼建议：开启思维链时温度不宜过低（0.1 易陷入重复推理）
+            temperature=0.6 if thinking else 0.1,
+            extra_body={"enable_thinking": True} if thinking else None,
             **kwargs,
         )
 
-    yield from _with_retry(_create)
+    try:
+        yield from _with_retry(lambda: _create(enable_thinking))
+    except BadRequestError:
+        if not enable_thinking:
+            raise
+        yield from _with_retry(lambda: _create(False))
 
 
 def embed(texts: list[str]) -> list[list[float]]:

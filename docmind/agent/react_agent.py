@@ -39,7 +39,7 @@ SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天�
 @dataclass
 class AgentStep:
     """单步轨迹，用于 GUI 展示思考过程"""
-    kind: str        # tool_call / tool_result / final
+    kind: str        # thinking / token / tool_call / tool_result / final
     text: str
 
 
@@ -65,7 +65,8 @@ class ReActAgent:
             try:
                 with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
                                 input=_brief_messages(self.history)) as ctx:
-                    for chunk in chat_stream(self.history, tools=openai_tools):
+                    for chunk in chat_stream(self.history, tools=openai_tools,
+                                             enable_thinking=config.ENABLE_THINKING):
                         if getattr(chunk, "usage", None):
                             usage = chunk.usage
                         if not chunk.choices:
@@ -73,6 +74,10 @@ class ReActAgent:
                         delta = chunk.choices[0].delta
                         if delta is None:
                             continue
+                        # 思维链增量：不进 history（百炼多轮要求 assistant 只含正文）
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            yield AgentStep("thinking", reasoning)
                         if delta.content:
                             content_parts.append(delta.content)
                             yield AgentStep("token", delta.content)

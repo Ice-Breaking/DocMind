@@ -8,6 +8,7 @@ import os
 
 import gradio as gr
 
+from docmind import config
 from docmind.core import build_agent
 
 print("[DocMind] 正在装配 Agent（加载知识库、连接 MCP Server）...")
@@ -275,7 +276,7 @@ HEADER_HTML = f"""
 <div class="dm-header">
   <div class="dm-title">
     <span>🧠 DocMind</span>
-    <span class="dm-badge">手写 ReAct · RAG · MCP</span>
+    <span class="dm-badge">{'手写 ReAct · RAG · MCP' + (' · 深度思考' if config.ENABLE_THINKING else '')}</span>
   </div>
   <div class="dm-sub">
     回答来源标注：<b>[来源: 文件名]</b> 知识库 · <b>【模型通识】</b> 库外兜底 · <b>🔧 工具</b> 实时数据
@@ -300,20 +301,30 @@ def _render_trace(lines: list[str]) -> str:
 
 
 def respond_simple(question: str, history: list):
-    """流式渲染：深度思考指示 → 逐 token 打字效果 → 思考轨迹。
+    """流式渲染：模型思维链实时展示 → 逐 token 打字效果 → 工具轨迹。
     任何异常都兼底为一条完整消息，避免界面停留在“思考中”"""
     trace_lines = []
+    reasoning_parts = []   # 模型真实思维链（reasoning_content）增量累积
     final_answer = ""
     partial = ""           # 流式累积的回答正文
-    thinking = True        # 是否处于“深度思考中”状态
+    thinking = True        # 是否处于“深度思考中”状态（收到正文 token 即结束）
     user_msg = {"role": "user", "content": question}
+
+    def reasoning_quote() -> str:
+        """思维链渲染：思考中实时全文；完成后截断，避免淹没正文"""
+        if not reasoning_parts:
+            return ""
+        text = "".join(reasoning_parts)
+        if not thinking and len(text) > 300:
+            text = text[:300] + "…"
+        return f"\n> 💭 **模型思维链**：{text}\n"
 
     def render() -> str:
         head = "🤔 深度思考中…" if thinking else "<sub>✓ 深度思考已完成</sub>\n\n"
         tail = ""
         if trace_lines:
             tail = "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
-        return head + partial + tail
+        return head + reasoning_quote() + partial + tail
 
     try:
         yield history + [user_msg, {"role": "assistant", "content": "🤔 深度思考中…"}]
@@ -321,6 +332,9 @@ def respond_simple(question: str, history: list):
             if step.kind == "token":
                 thinking = False
                 partial += step.text
+                yield history + [user_msg, {"role": "assistant", "content": render()}]
+            elif step.kind == "thinking":
+                reasoning_parts.append(step.text)
                 yield history + [user_msg, {"role": "assistant", "content": render()}]
             elif step.kind == "final":
                 final_answer = step.text
@@ -333,7 +347,8 @@ def respond_simple(question: str, history: list):
         final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
     if not final_answer:
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
-    full = f"<sub>✓ 深度思考已完成</sub>\n\n{final_answer}"
+    thinking = False   # 思考结束，让思维链按截断策略渲染
+    full = f"<sub>✓ 深度思考已完成</sub>\n\n{reasoning_quote()}{final_answer}"
     if trace_lines:
         full += "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
     yield history + [user_msg, {"role": "assistant", "content": full}]
@@ -375,6 +390,14 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     with gr.Row(elem_id="examples-area"):
         example_buttons = [gr.Button(ex, elem_classes="ex-chip", scale=1) for ex in EXAMPLES]
 
+    # 注意：必须绑定真正的 generator function（yield 在函数体内）。
+    # Gradio 6 用 isgeneratorfunction 识别流式，lambda 返回 generator 对象不满足，
+    # 会被当普通值 postprocess 而报 messages format 错误。
+    def make_example_handler(ex):
+        def handler(history):
+            yield from respond_simple(ex, history)
+        return handler
+
     def submit(question: str, history: list):
         if not question.strip():
             yield history
@@ -385,7 +408,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     send.click(submit, [msg, chatbot], chatbot).then(lambda: "", None, msg)
     clear.click(reset_chat, None, chatbot)
     for btn, ex in zip(example_buttons, EXAMPLES):
-        btn.click(lambda h, q=ex: respond_simple(q, h), inputs=chatbot, outputs=chatbot)
+        btn.click(make_example_handler(ex), inputs=chatbot, outputs=chatbot)
 
 
 if __name__ == "__main__":

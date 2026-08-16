@@ -22,6 +22,10 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 # Agent 配置
 MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "8"))
 
+# 深度思考（百炼思维链 enable_thinking）：开启后流式返回 reasoning_content，
+# GUI 实时展示模型真实推理过程；模型不支持时自动降级关闭，不影响主链路
+ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").strip().lower() in ("1", "true", "yes")
+
 # RAG 配置
 KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "docs", "knowledge")
 CHUNK_SIZE = 280          # 每片最大字符数（中文 QA 类文档不宜过大，避免关键内容被稀释）
