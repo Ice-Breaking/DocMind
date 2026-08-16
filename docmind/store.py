@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS messages(
     seq INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    raw TEXT DEFAULT '',
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -51,13 +52,20 @@ def _conn() -> sqlite3.Connection:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)")]
+        if "raw" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN raw TEXT DEFAULT ''")
         conn.commit()
         _local.conn = conn
     return conn
 
 
-def append_message(session_id: str, role: str, content: str) -> int:
-    """追加一条消息，返回其在会话内的序号（从 0 起）"""
+def append_message(session_id: str, role: str, content: str, raw: str | None = None) -> int:
+    """追加一条消息，返回其在会话内的序号（从 0 起）。
+
+    content 为展示内容（含思维链/引用标记等渲染格式）；
+    raw 为干净文本（assistant 的纯净回答），用于切换会话时恢复 LLM 多轮上下文。
+    """
     c = _conn()
     now = time.time()
     seq = c.execute(
@@ -65,8 +73,8 @@ def append_message(session_id: str, role: str, content: str) -> int:
         (session_id,),
     ).fetchone()[0]
     c.execute(
-        "INSERT INTO messages(session_id, seq, role, content, created_at) VALUES(?,?,?,?,?)",
-        (session_id, seq, role, content, now),
+        "INSERT INTO messages(session_id, seq, role, content, raw, created_at) VALUES(?,?,?,?,?,?)",
+        (session_id, seq, role, content, raw if raw is not None else content, now),
     )
     row = c.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if row is None:
@@ -112,3 +120,35 @@ def get_feedback(session_id: str) -> dict:
         "SELECT seq, rating FROM feedback WHERE session_id = ?", (session_id,)
     ).fetchall()
     return {str(r["seq"]): r["rating"] for r in rows}
+
+
+def load_raw_pairs(session_id: str) -> list[tuple[str, str]]:
+    """按序返回 [(role, raw)]，供恢复 LLM 多轮上下文（过滤空 raw）"""
+    c = _conn()
+    rows = c.execute(
+        "SELECT role, raw FROM messages WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchall()
+    return [(r["role"], r["raw"]) for r in rows if r["raw"]]
+
+
+def list_sessions(limit: int = 50) -> list[dict]:
+    """会话列表（按最近活跃倒序）：id/标题/消息数/更新时间，供侧边栏渲染"""
+    c = _conn()
+    rows = c.execute(
+        """SELECT s.id, s.title, s.updated_at, COUNT(m.id) AS msg_count
+           FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
+           GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [{"id": r["id"], "title": r["title"], "msg_count": r["msg_count"],
+             "updated_at": r["updated_at"]} for r in rows]
+
+
+def delete_session(session_id: str) -> None:
+    """删除会话及其消息与反馈"""
+    c = _conn()
+    c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    c.execute("DELETE FROM feedback WHERE session_id = ?", (session_id,))
+    c.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+    c.commit()

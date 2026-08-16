@@ -10,6 +10,7 @@ import gradio as gr
 
 from docmind import config
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
+from docmind.agent.react_agent import SYSTEM_PROMPT
 from docmind.core import build_agent
 
 print("[DocMind] 正在装配 Agent（加载知识库、连接 MCP Server）...")
@@ -265,6 +266,36 @@ footer { display: none !important; }
 
 /* 会话持久化的隐藏组件（需留在 DOM 里供 JS 读写，故用 CSS 隐藏而非 visible=False） */
 #session-id, #load-history-btn { display: none !important; }
+
+/* 多会话侧边栏：标题栏入口按钮 + 左侧抽屉 */
+#dm-sessions-toggle {
+    background: transparent; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer; color: #475569; margin-right: 8px;
+}
+#dm-sessions-toggle:hover { background: #eef2ff; border-color: #c7d2fe; color: #6366f1; }
+#dm-sessions-drawer {
+    position: fixed; top: 0; left: 0; bottom: 0; width: 292px; z-index: 1100;
+    background: #fff; box-shadow: 2px 0 16px rgba(15,23,42,.14);
+    transform: translateX(-105%); transition: transform .22s ease;
+    display: flex; flex-direction: column;
+}
+#dm-sessions-drawer.dm-open { transform: translateX(0); }
+.dm-sd-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e9ecf7; flex: none; }
+.dm-sd-head-title { font-weight: 600; font-size: 14px; flex: 1; color: #1e293b; }
+#dm-sd-new { border: none; background: #6366f1; color: #fff; border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+#dm-sd-new:hover { background: #4f46e5; }
+#dm-sd-close { border: none; background: transparent; cursor: pointer; font-size: 14px; color: #64748b; padding: 2px 6px; border-radius: 6px; }
+#dm-sd-close:hover { background: #f1f5f9; }
+#dm-sd-list { flex: 1; overflow-y: auto; padding: 8px; }
+.dm-sd-item { position: relative; padding: 10px 34px 10px 12px; border-radius: 10px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
+.dm-sd-item:hover { background: #f4f6ff; }
+.dm-sd-item.dm-active { background: #eef2ff; border-color: #c7d2fe; }
+.dm-sd-title { font-size: 13px; color: #1e293b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-sd-meta { font-size: 11px; color: #94a3b8; margin-top: 3px; }
+.dm-sd-del { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: none; background: transparent; cursor: pointer; opacity: 0; font-size: 13px; padding: 2px 5px; border-radius: 6px; }
+.dm-sd-item:hover .dm-sd-del { opacity: .7; }
+.dm-sd-del:hover { opacity: 1 !important; background: #fee2e2; }
+.dm-sd-empty { color: #94a3b8; font-size: 12px; text-align: center; padding: 24px 0; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -1060,11 +1091,129 @@ FOLD_SCRIPT = """
   });
 })();
 </script>
+<script>
+// 多会话侧边栏：标题栏「☰ 会话」打开左侧抽屉，支持切换/新建/删除会话。
+// 切换 = 更新 session_id（localStorage + 隐藏框）→ 程序化点击 load-history-btn，
+// 服务端 load_history 会重置 Agent 并用 raw 干净文本重建该会话的多轮上下文。
+(() => {
+  if (window.__dmSessionsInstalled) return;
+  window.__dmSessionsInstalled = true;
+  let sessions = [];
+
+  const fmtTime = (ts) => {
+    const d = new Date(ts * 1000);
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
+  const sidBox = () => document.querySelector('#session-id textarea, #session-id input');
+
+  function render() {
+    const list = document.getElementById('dm-sd-list');
+    if (!list) return;
+    list.innerHTML = '';
+    const cur = localStorage.getItem('dm_session_id');
+    if (!sessions.length) {
+      list.innerHTML = '<div class="dm-sd-empty">暂无会话记录</div>';
+      return;
+    }
+    sessions.forEach((item) => {
+      const div = document.createElement('div');
+      div.className = 'dm-sd-item' + (item.id === cur ? ' dm-active' : '');
+      const title = document.createElement('div');
+      title.className = 'dm-sd-title';
+      title.textContent = item.title || '新会话';
+      const meta = document.createElement('div');
+      meta.className = 'dm-sd-meta';
+      meta.textContent = Math.floor((item.msg_count || 0) / 2) + ' 轮对话 · ' + fmtTime(item.updated_at);
+      const del = document.createElement('button');
+      del.className = 'dm-sd-del';
+      del.textContent = '🗑';
+      del.title = '删除该会话';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm('删除该会话及其全部消息与反馈？')) return;
+        try { await fetch('/api/sessions/' + encodeURIComponent(item.id), { method: 'DELETE' }); } catch (err) { console.error(err); }
+        if (item.id === localStorage.getItem('dm_session_id')) {
+          const clearBtn = document.querySelector('#clear-btn');
+          if (clearBtn) clearBtn.click();   // 删的是当前会话 → 开新会话
+        }
+        refresh();
+      };
+      div.onclick = () => switchTo(item.id);
+      div.appendChild(title);
+      div.appendChild(meta);
+      div.appendChild(del);
+      list.appendChild(div);
+    });
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/sessions');
+      sessions = r.ok ? await r.json() : [];
+    } catch (e) { sessions = []; }
+    render();
+  }
+
+  function switchTo(id) {
+    closeDrawer();
+    if (id === localStorage.getItem('dm_session_id')) return;
+    localStorage.setItem('dm_session_id', id);
+    const box = sidBox();
+    if (box) {
+      box.value = id;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    window.__dmFeedback = {};
+    window.__dmFeedbackRestored = false;
+    setTimeout(() => {
+      const b = document.querySelector('#load-history-btn');
+      if (b) b.click();
+      setTimeout(refresh, 800);   // 刷新 active 高亮
+    }, 400);
+  }
+
+  function openDrawer() {
+    document.getElementById('dm-sessions-drawer').classList.add('dm-open');
+    refresh();
+  }
+  function closeDrawer() {
+    document.getElementById('dm-sessions-drawer').classList.remove('dm-open');
+  }
+
+  // 抽屉 DOM（入口按钮在 HEADER_HTML 里，此处只建抽屉本体）
+  let tries = 0;
+  function mount() {
+    if (document.getElementById('dm-sessions-drawer')) return;
+    if (!document.body) { if (++tries < 25) setTimeout(mount, 400); return; }
+    const drawer = document.createElement('div');
+    drawer.id = 'dm-sessions-drawer';
+    drawer.innerHTML = '<div class="dm-sd-head">'
+      + '<span class="dm-sd-head-title">💬 会话历史</span>'
+      + '<button id="dm-sd-new">＋ 新会话</button>'
+      + '<button id="dm-sd-close" title="关闭">✕</button></div>'
+      + '<div id="dm-sd-list"></div>';
+    document.body.appendChild(drawer);
+    drawer.querySelector('#dm-sd-new').onclick = () => {
+      const clearBtn = document.querySelector('#clear-btn');
+      if (clearBtn) clearBtn.click();
+      closeDrawer();
+      setTimeout(refresh, 800);
+    };
+    drawer.querySelector('#dm-sd-close').onclick = closeDrawer;
+  }
+  mount();
+
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#dm-sessions-toggle')) openDrawer();
+  });
+})();
+</script>
 """
 
 HEADER_HTML = f"""
 <div class="dm-header">
   <div class="dm-title">
+    <button id="dm-sessions-toggle" title="会话历史">☰ 会话</button>
     <span>🧠 DocMind</span>
     <span class="dm-badge">{'手写 ReAct · RAG · MCP' + (' · 深度思考' if config.ENABLE_THINKING else '')}</span>
   </div>
@@ -1192,12 +1341,20 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     # Gradio 6 用 isgeneratorfunction 识别流式，lambda 返回 generator 对象不满足，
     # 会被当普通值 postprocess 而报 messages format 错误。
     def persist_pair(session_id, question, final_history):
-        """本轮用户问题 + 最终回答落库（失败不影响主链路）"""
+        """本轮用户问题 + 最终回答落库（失败不影响主链路）。
+
+        assistant 同时存渲染版 content（展示）与 raw（agent.history 末尾的纯净终答，
+        供切换会话时恢复 LLM 多轮上下文）。
+        """
         if not session_id or not final_history:
             return
         try:
+            clean = ""
+            if agent.history and agent.history[-1].get("role") == "assistant":
+                clean = agent.history[-1].get("content", "")
             chatstore.append_message(session_id, "user", question)
-            chatstore.append_message(session_id, "assistant", final_history[-1]["content"])
+            chatstore.append_message(session_id, "assistant",
+                                     final_history[-1]["content"], raw=clean)
         except Exception as e:  # noqa: BLE001
             print(f"[警告] 会话持久化失败: {e}")
 
@@ -1221,11 +1378,21 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         persist_pair(session_id, question, last)
 
     def load_history(session_id):
-        """页面加载：从 SQLite 恢复历史对话（session_id 由前端 JS 先行初始化）"""
+        """恢复历史对话（页面加载/侧边栏切换均走这里）。
+
+        除回填 Chatbot 展示内容外，同步用 raw 干净文本重建 Agent 多轮上下文，
+        并先 reset——保证切换会话不会把上一会话的上下文串进来。
+        """
+        agent.reset()
         if not session_id:
             return []
         try:
-            return chatstore.load_session(session_id)
+            msgs = chatstore.load_session(session_id)
+            pairs = chatstore.load_raw_pairs(session_id)
+            if pairs:
+                agent.history.append({"role": "system", "content": SYSTEM_PROMPT})
+                agent.history.extend({"role": r, "content": c} for r, c in pairs)
+            return msgs
         except Exception as e:  # noqa: BLE001
             print(f"[警告] 会话恢复失败: {e}")
             return []
@@ -1367,6 +1534,22 @@ if __name__ == "__main__":
     @demo.app.get("/api/feedback/{session_id}", include_in_schema=False)
     async def _get_feedback(session_id: str):
         return chatstore.get_feedback(session_id)
+
+    # ---- 多会话侧边栏：会话列表 + 删除 ----
+    @demo.app.get("/api/sessions", include_in_schema=False)
+    async def _list_sessions():
+        try:
+            return chatstore.list_sessions()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"会话列表获取失败: {e}")
+
+    @demo.app.delete("/api/sessions/{session_id}", include_in_schema=False)
+    async def _delete_session(session_id: str):
+        try:
+            chatstore.delete_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"会话删除失败: {e}")
+        return {"ok": True}
 
     # 阻塞主线程（保持服务运行）
     try:
