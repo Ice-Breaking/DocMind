@@ -148,6 +148,29 @@ body, .gradio-container, .main {
 
 /* 隐藏 Gradio 默认页脚 */
 footer { display: none !important; }
+
+/* 追问建议区：淡紫底 + 圆角按钮 */
+.dm-suggestions {
+    margin-top: 14px !important; padding: 10px 12px !important;
+    background: #f7f9fd !important; border-radius: 10px !important;
+    border: 1px solid #eef2ff !important;
+}
+.dm-suggest-title {
+    font-size: 12.5px !important; color: #6366f1 !important;
+    font-weight: 600 !important; margin-bottom: 8px !important;
+}
+.dm-suggest-btn {
+    display: block !important; width: 100% !important;
+    text-align: left !important; margin: 4px 0 !important;
+    background: #ffffff !important; border: 1px solid #e4e9fb !important;
+    color: #475569 !important; border-radius: 8px !important;
+    padding: 8px 12px !important; font-size: 13px !important;
+    cursor: pointer !important; transition: all 0.15s !important;
+}
+.dm-suggest-btn:hover {
+    background: #f4f6ff !important; border-color: #c7d2fe !important;
+    color: #6366f1 !important;
+}
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -270,6 +293,55 @@ FOLD_SCRIPT = """
   setInterval(scan, 600);
 })();
 </script>
+<script>
+// 引导追问按钮：扫描 <!--suggest:问题--> 标记，渲染为可点击按钮
+(() => {
+  if (window.__dmSuggestInstalled) return;
+  window.__dmSuggestInstalled = true;
+  const SUGGEST_RE = /<!--suggest:([^>]+)-->/g;
+  function renderSuggestions() {
+    document.querySelectorAll('.message.bot').forEach((el) => {
+      if (el.dataset.dmSuggestRendered) return;
+      const html = el.innerHTML;
+      if (!html.includes('<!--suggest:')) return;
+      const suggestions = [];
+      let m;
+      while ((m = SUGGEST_RE.exec(html)) !== null) {
+        suggestions.push(m[1]);
+      }
+      if (!suggestions.length) return;
+      // 移除原始标记
+      el.innerHTML = html.replace(/<!--suggest:[^>]+-->/g, '');
+      // 渲染追问按钮区
+      const wrap = document.createElement('div');
+      wrap.className = 'dm-suggestions';
+      const title = document.createElement('div');
+      title.className = 'dm-suggest-title';
+      title.textContent = ' 你可能还想问：';
+      wrap.appendChild(title);
+      suggestions.forEach((q) => {
+        const btn = document.createElement('button');
+        btn.className = 'dm-suggest-btn';
+        btn.textContent = q;
+        btn.onclick = () => {
+          const input = document.querySelector('#input-box textarea');
+          if (input) {
+            input.value = q;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            const sendBtn = document.querySelector('#send-btn');
+            if (sendBtn) sendBtn.click();
+          }
+        };
+        wrap.appendChild(btn);
+      });
+      el.appendChild(wrap);
+      el.dataset.dmSuggestRendered = '1';
+    });
+  }
+  renderSuggestions();
+  setInterval(renderSuggestions, 800);
+})();
+</script>
 """
 
 HEADER_HTML = f"""
@@ -350,7 +422,15 @@ def respond_simple(question: str, history: list):
     thinking = False   # 思考结束，让思维链按截断策略渲染
     full = f"<sub>✓ 深度思考已完成</sub>\n\n{reasoning_quote()}{final_answer}"
     if trace_lines:
-        full += "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
+        full += "\n\n---\n** Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
+    # 追问建议：用特殊标记 <!--suggest:问题--> 让 JS 渲染为可点击按钮
+    suggestions = [
+        "能详细解释一下吗？",
+        "有哪些实际应用场景？",
+        "与其他技术相比有什么优势？",
+    ]
+    for s in suggestions:
+        full += f"\n<!--suggest:{s}-->"
     yield history + [user_msg, {"role": "assistant", "content": full}]
 
 
