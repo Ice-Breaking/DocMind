@@ -60,7 +60,8 @@ def _extract_docx(path: str) -> str:
 
 
 def _extract_xlsx(path: str) -> str:
-    """openpyxl 逐 Sheet 提取：Sheet 名作段首标记，行内单元格管道符拼接"""
+    """openpyxl 逐 Sheet 提取：行内单元格管道符拼接；大 Sheet 预分组，
+    每组带 [Sheet: 名] 标记并重复表头——切片后每个分片都保有完整列语义"""
     import openpyxl
 
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -72,8 +73,19 @@ def _extract_xlsx(path: str) -> str:
                 cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
                 if cells:
                     rows.append(" | ".join(cells))
-            if rows:
-                parts.append(f"[Sheet: {ws.title}]\n" + "\n".join(rows))
+            if not rows:
+                continue
+            marker = f"[Sheet: {ws.title}]"
+            header = rows[0]
+            groups, cur, used = [], [marker, header], len(marker) + len(header)
+            for r in rows[1:]:
+                if used + len(r) + 1 > config.CHUNK_SIZE and len(cur) > 2:
+                    groups.append("\n".join(cur))
+                    cur, used = [marker, header], len(marker) + len(header)
+                cur.append(r)
+                used += len(r) + 1
+            groups.append("\n".join(cur))
+            parts.extend(groups)
     finally:
         wb.close()
     return "\n\n".join(parts)
@@ -175,8 +187,88 @@ def _window_split(text: str) -> list[str]:
     return chunks
 
 
+def _is_table_row(line: str) -> bool:
+    """表格行判定：≥2 个竖线（至少 3 列），覆盖 docx 表格/xlsx 行/Markdown 表格"""
+    return line.count("|") >= 2
+
+
+def _split_structural_blocks(text: str) -> list[str]:
+    """把文本拆成结构块：连续表格行整体成块（不切断），其余按空行分段落"""
+    blocks: list[str] = []
+    para: list[str] = []
+    table: list[str] = []
+
+    def flush_para():
+        if para:
+            blocks.append("\n".join(para))
+            para.clear()
+
+    def flush_table():
+        if table:
+            blocks.append("\n".join(table))
+            table.clear()
+
+    for line in text.split("\n"):
+        if _is_table_row(line):
+            flush_para()
+            table.append(line.strip())
+        else:
+            flush_table()
+            if line.strip():
+                para.append(line.strip())
+            else:
+                flush_para()
+    flush_para()
+    flush_table()
+    return [b for b in blocks if b.strip()]
+
+
+def _split_table_block(table: str) -> list[str]:
+    """超大表格按行分组，每组重复首行（表头），保住列语义不丢"""
+    rows = [r for r in table.split("\n") if r.strip()]
+    if len(rows) <= 1:
+        return [table]
+    header = rows[0]
+    size, chunks, group = config.CHUNK_SIZE, [], [header]
+    used = len(header)
+    for r in rows[1:]:
+        if used + len(r) + 1 > size and len(group) > 1:
+            chunks.append("\n".join(group))
+            group, used = [header], len(header)
+        group.append(r)
+        used += len(r) + 1
+    if len(group) > 1:
+        chunks.append("\n".join(group))
+    return chunks
+
+
+def _chunk_structured(text: str) -> list[str]:
+    """结构化装箱：结构块贪心合并至 CHUNK_SIZE；超大表格行分组、超大段落滑窗兜底"""
+    size = config.CHUNK_SIZE
+    chunks: list[str] = []
+    cur = ""
+    for block in _split_structural_blocks(text):
+        if len(block) > size:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            if _is_table_row(block.split("\n")[0]):
+                chunks.extend(_split_table_block(block))
+            else:
+                chunks.extend(_window_split(block))
+        elif len(cur) + len(block) + 2 <= size:
+            cur = f"{cur}\n\n{block}" if cur else block
+        else:
+            chunks.append(cur)
+            cur = block
+    if cur:
+        chunks.append(cur)
+    return [c.strip() for c in chunks if c.strip()]
+
+
 def chunk_text(text: str) -> list[str]:
-    """语义切片：先按标题分段落，小段合并、超长段再滑窗拆分"""
+    """结构化切片：Markdown 先按标题分段；各段内表格整体保留（超大表格行分组
+    重复表头），段落贪心装箱；无结构文本直接结构化装箱（滑窗仅作超大段落兜底）"""
     if _HEADING_RE.search(text):
         sections = [p.strip() for p in _HEADING_RE.split(text) if p.strip()]
         chunks: list[str] = []
@@ -186,7 +278,7 @@ def chunk_text(text: str) -> list[str]:
                 if buffer:
                     chunks.append(buffer)
                     buffer = ""
-                chunks.extend(_window_split(sec))
+                chunks.extend(_chunk_structured(sec))
             elif len(buffer) + len(sec) + 1 <= config.CHUNK_SIZE:
                 buffer = f"{buffer}\n\n{sec}" if buffer else sec
             else:
@@ -195,7 +287,7 @@ def chunk_text(text: str) -> list[str]:
         if buffer:
             chunks.append(buffer)
         return [c for c in chunks if c.strip()]
-    return _window_split(text)
+    return _chunk_structured(text)
 
 
 def load_chunks(knowledge_dir: str | None = None) -> list[dict]:

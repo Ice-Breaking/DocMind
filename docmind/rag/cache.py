@@ -23,8 +23,8 @@ from docmind.rag.chunker import SUPPORTED_EXTS
 CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "index")
 
 # chunk 结构/切片逻辑版本：变化时强制缓存失效
-# v2 = 切片携带页码元数据；v3 = 支持 xlsx/图片 OCR 入库
-SCHEMA_VERSION = "v3"
+# v2 = 页码元数据；v3 = xlsx/图片入库；v4 = 结构化切片（表格保整/行分组重复表头）
+SCHEMA_VERSION = "v4"
 
 
 def compute_fingerprint(knowledge_dir: str | None = None) -> str:
