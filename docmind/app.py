@@ -280,15 +280,21 @@ FOLD_SCRIPT = """
     const btn = document.createElement('button');
     btn.className = 'dm-toggle';
     btn.textContent = '⌄ 展开全文';
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const wasCollapsed = el.classList.contains('dm-collapsed');
-      el.classList.toggle('dm-collapsed');
-      el.dataset.dmExpanded = wasCollapsed ? '1' : '';
-      btn.textContent = wasCollapsed ? '⌃ 收起' : '⌄ 展开全文';
-    };
     el.appendChild(btn);
   }
+  // 事件委托：追问脚本的 el.innerHTML= 重建会把按钮节点换掉、丢失 onclick，
+  // 故在 document 层统一监听点击，任何 DOM 重建后按钮依然可用
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.dm-toggle');
+    if (!btn) return;
+    e.stopPropagation();
+    const el = btn.closest('.message.bot');
+    if (!el) return;
+    const wasCollapsed = el.classList.contains('dm-collapsed');
+    el.classList.toggle('dm-collapsed');
+    el.dataset.dmExpanded = wasCollapsed ? '1' : '';
+    btn.textContent = wasCollapsed ? '⌃ 收起' : '⌄ 展开全文';
+  });
   function scan() {
     document.querySelectorAll('.message.bot').forEach((el) => {
       if (el.scrollHeight > MAX_H) {
