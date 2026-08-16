@@ -22,6 +22,9 @@ from docmind.rag.chunker import SUPPORTED_EXTS
 
 CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "index")
 
+# chunk 结构/切片逻辑版本：变化时强制缓存失效（如 v2 = 切片携带页码元数据）
+SCHEMA_VERSION = "v2"
+
 
 def compute_fingerprint(knowledge_dir: str | None = None) -> str:
     """知识库文件状态 + 影响切片/向量的配置 → 指纹"""
@@ -34,7 +37,7 @@ def compute_fingerprint(knowledge_dir: str | None = None) -> str:
             st = os.stat(os.path.join(root, name))
             entries.append(f"{name}:{st.st_size}:{int(st.st_mtime)}")
     basis = "|".join(entries) + f"##chunk={config.CHUNK_SIZE},{config.CHUNK_OVERLAP}" \
-            f"##model={config.EMBEDDING_MODEL}"
+            f"##model={config.EMBEDDING_MODEL}##schema={SCHEMA_VERSION}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
 

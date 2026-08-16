@@ -34,7 +34,8 @@ def build_agent():
             return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
         lines = []
         for i, h in enumerate(hits, 1):
-            lines.append(f"[{i}] (来源: {h.source}, 相关度: {h.score:.2f})\n{h.text}")
+            loc = f"来源: {h.source}" + (f", 第{h.page}页" if h.page else "")
+            lines.append(f"[{i}] ({loc}, 相关度: {h.score:.2f})\n{h.text}")
         return "\n\n".join(lines)
 
     registry.register(

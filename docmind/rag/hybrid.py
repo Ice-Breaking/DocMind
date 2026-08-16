@@ -81,7 +81,8 @@ class HybridRetriever:
         ranked = []
         for r in sorted(results, key=lambda x: x["relevance_score"], reverse=True):
             src = candidates[r["index"]]
-            ranked.append(SearchHit(text=src.text, source=src.source, score=r["relevance_score"]))
+            ranked.append(SearchHit(text=src.text, source=src.source, score=r["relevance_score"],
+                                    page=src.page))
         return ranked
 
     # ---------------- 对外：检索入口 ----------------
@@ -112,6 +113,7 @@ class HybridRetriever:
                 text=self.store.chunks[i]["text"],
                 source=self.store.chunks[i]["source"],
                 score=s,
+                page=self.store.chunks[i].get("page"),
             )
             for i, s in merged
         ]

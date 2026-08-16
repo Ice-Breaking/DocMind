@@ -203,6 +203,39 @@ footer { display: none !important; }
     cursor: pointer;
 }
 .dm-to-bottom.dm-show { display: flex; }
+
+/* 引用可点击：[来源: 文件名 · 第N页] → 点击打开原文预览弹窗 */
+.dm-source-link {
+    color: #6366f1 !important; cursor: pointer;
+    text-decoration: underline dotted !important; text-underline-offset: 2px;
+    border-radius: 4px; transition: background .15s;
+}
+.dm-source-link:hover { background: #eef2ff !important; }
+
+/* 原文预览弹窗 */
+#dm-preview-overlay {
+    display: none; position: fixed; inset: 0; z-index: 1000;
+    background: rgba(15,23,42,.45); align-items: center; justify-content: center;
+}
+.dm-preview-modal {
+    width: min(860px, 92vw); height: min(86vh, 900px);
+    background: #fff; border-radius: 12px; overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(15,23,42,.25);
+}
+.dm-preview-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid #e9ecf7; flex: none;
+}
+.dm-preview-title { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-preview-pager { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #475569; }
+.dm-pv-btn, .dm-pv-close { border: none; background: #f1f5f9; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; color: #334155; }
+.dm-pv-btn:hover, .dm-pv-close:hover { background: #e2e8f0; }
+.dm-preview-body { flex: 1; overflow: auto; padding: 12px; text-align: center; background: #f8fafc; }
+.dm-preview-body canvas { box-shadow: 0 2px 10px rgba(15,23,42,.12); background: #fff; }
+.dm-preview-text { text-align: left; white-space: pre-wrap; font-size: 12px; line-height: 1.7; background: #fff; padding: 14px; border-radius: 8px; margin: 0; }
+.dm-preview-loading, .dm-preview-error { color: #64748b; font-size: 13px; padding: 24px; }
+.dm-preview-error { color: #ef4444; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -477,34 +510,30 @@ FOLD_SCRIPT = """
 })();
 </script>
 <script>
-// 引导追问按钮：扫描 <!--suggest:问题--> 标记，渲染为可点击按钮
+// 引导追问按钮：对每条「已完成」的 bot 消息追加固定追问建议（点击自动填入输入框并发送）。
+// 历史方案是把 <!--suggest:...--> 标记写进回答再前端替换，但标记经 markdown 渲染
+// 常被转义或被代码围栏吞没导致失效；追问建议本身是固定列表，故改为无标记纯追加，
+// 且不再重建 innerHTML（从根上避免与折叠按钮等 DOM 加工的冲突）。
 (() => {
   if (window.__dmSuggestInstalled) return;
   window.__dmSuggestInstalled = true;
-  const SUGGEST_RE = /<!--suggest:([^>]+)-->/g;
+  const SUGGESTIONS = [
+    "能详细解释一下吗？",
+    "有哪些实际应用场景？",
+    "与其他技术相比有什么优势？",
+  ];
   function renderSuggestions() {
     document.querySelectorAll('.message.bot').forEach((el) => {
       if (el.dataset.dmSuggestRendered) return;
-      if (window.__dmIsStable && !window.__dmIsStable(el)) return; // 流式中不加工
-
-      const html = el.innerHTML;
-      if (!html.includes('<!--suggest:')) return;
-      const suggestions = [];
-      let m;
-      while ((m = SUGGEST_RE.exec(html)) !== null) {
-        suggestions.push(m[1]);
-      }
-      if (!suggestions.length) return;
-      // 移除原始标记
-      el.innerHTML = html.replace(/<!--suggest:[^>]+-->/g, '');
-      // 渲染追问按钮区
+      // 稳定性闸门：流式中不追加，避免用户误以为回答已完成
+      if (window.__dmIsStable && !window.__dmIsStable(el)) return;
       const wrap = document.createElement('div');
       wrap.className = 'dm-suggestions';
       const title = document.createElement('div');
       title.className = 'dm-suggest-title';
       title.textContent = ' 你可能还想问：';
       wrap.appendChild(title);
-      suggestions.forEach((q) => {
+      SUGGESTIONS.forEach((q) => {
         const btn = document.createElement('button');
         btn.className = 'dm-suggest-btn';
         btn.textContent = q;
@@ -555,6 +584,226 @@ FOLD_SCRIPT = """
   }
   scan();
   setInterval(scan, 600);
+})();
+</script>
+<script>
+// 文档预览（引用溯源直达）：回答里的 [来源: 文件名 · 第N页] 渲染为可点击链接，
+// 点击弹窗预览原文——PDF 用 pdf.js 定位到页；md/txt 展示正文；
+// docx 优先 LibreOffice 转 PDF 复用 PDF 通道（?as=pdf），未安装降级文本预览（?as=text）。
+// 链接化只操作文本节点（TreeWalker），不碰 innerHTML——不会破坏 aria-label 属性、
+// 不与 fold/suggest 的 DOM 重建冲突；点击用 document 级事件委托。
+(() => {
+  if (window.__dmPreviewInstalled) return;
+  window.__dmPreviewInstalled = true;
+  const SOURCE_RE = /\[来源: ([^\]\\n]+?\.(?:md|txt|pdf|docx))(?: · 第(\d+)页)?\]/g;
+  const SOURCE_TEST = /\[来源: [^\]\\n]+?\.(?:md|txt|pdf|docx)(?: · 第\d+页)?\]/;
+  let pdfDoc = null, pdfPage = 1, pdfTotal = 0, pdfRendering = false;
+
+  // ---------- 引用链接化（仅稳定消息；文本节点级替换） ----------
+  function linkify(el) {
+    if (window.__dmIsStable && !window.__dmIsStable(el)) return;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest(".dm-source-link, .dm-suggestions, .dm-toggle, script, style")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return SOURCE_TEST.test(node.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    const targets = [];
+    while (walker.nextNode()) targets.push(walker.currentNode);
+    targets.forEach((node) => {
+      const frag = document.createDocumentFragment();
+      const text = node.data;
+      let last = 0, m;
+      SOURCE_RE.lastIndex = 0;
+      while ((m = SOURCE_RE.exec(text)) !== null) {
+        frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const span = document.createElement("span");
+        span.className = "dm-source-link";
+        span.dataset.file = m[1];
+        if (m[2]) span.dataset.page = m[2];
+        span.title = "点击预览原文" + (m[2] ? "（第 " + m[2] + " 页）" : "");
+        span.textContent = "[📄 来源: " + m[1] + (m[2] ? " · 第" + m[2] + "页" : "") + "]";
+        frag.appendChild(span);
+        last = m.index + m[0].length;
+      }
+      frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    });
+  }
+  function scanLinks() {
+    document.querySelectorAll(".message.bot").forEach(linkify);
+  }
+  scanLinks();
+  setInterval(scanLinks, 800);
+
+  // ---------- 弹窗 ----------
+  function ensureModal() {
+    let ov = document.getElementById("dm-preview-overlay");
+    if (ov) return ov;
+    ov = document.createElement("div");
+    ov.id = "dm-preview-overlay";
+    const modal = document.createElement("div");
+    modal.className = "dm-preview-modal";
+    const head = document.createElement("div");
+    head.className = "dm-preview-head";
+    head.innerHTML = '<span class="dm-preview-title"></span>'
+      + '<span class="dm-preview-pager" style="display:none">'
+      + '<button class="dm-pv-btn" data-act="prev">‹ 上一页</button>'
+      + '<span class="dm-pv-label"></span>'
+      + '<button class="dm-pv-btn" data-act="next">下一页 ›</button></span>'
+      + '<button class="dm-pv-close">✕ 关闭</button>';
+    const body = document.createElement("div");
+    body.className = "dm-preview-body";
+    modal.appendChild(head);
+    modal.appendChild(body);
+    ov.appendChild(modal);
+    document.body.appendChild(ov);
+    ov.addEventListener("click", (e) => { if (e.target === ov) closePreview(); });
+    head.querySelector(".dm-pv-close").addEventListener("click", closePreview);
+    head.querySelector('[data-act="prev"]').addEventListener("click", () => showPdfPage(pdfPage - 1));
+    head.querySelector('[data-act="next"]').addEventListener("click", () => showPdfPage(pdfPage + 1));
+    return ov;
+  }
+
+  function closePreview() {
+    const ov = document.getElementById("dm-preview-overlay");
+    if (ov) ov.style.display = "none";
+    if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
+  }
+  document.addEventListener("keydown", (e) => {
+    const ov = document.getElementById("dm-preview-overlay");
+    if (!ov || ov.style.display === "none") return;
+    if (e.key === "Escape") closePreview();
+    if (e.key === "ArrowLeft") showPdfPage(pdfPage - 1);
+    if (e.key === "ArrowRight") showPdfPage(pdfPage + 1);
+  });
+
+  function bodyEl() { return document.querySelector("#dm-preview-overlay .dm-preview-body"); }
+  function showLoading(text) {
+    const b = bodyEl();
+    b.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "dm-preview-loading";
+    d.textContent = text || "加载中…";
+    b.appendChild(d);
+  }
+  function showError(e) {
+    const b = bodyEl();
+    b.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "dm-preview-error";
+    d.textContent = "⚠️ 预览失败：" + ((e && e.message) || e);
+    b.appendChild(d);
+  }
+  function showText(text) {
+    const b = bodyEl();
+    b.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.className = "dm-preview-text";
+    pre.textContent = text;
+    b.appendChild(pre);
+  }
+
+  // ---------- PDF 渲染（pdf.js 懒加载，首次预览 PDF 时才拉取） ----------
+  function loadPdfLib() {
+    return new Promise((resolve, reject) => {
+      if (window.pdfjsLib) return resolve();
+      const sc = document.createElement("script");
+      sc.src = "/vendor/pdf.min.js";
+      sc.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+        resolve();
+      };
+      sc.onerror = () => reject(new Error("pdf.js 加载失败"));
+      document.head.appendChild(sc);
+    });
+  }
+
+  async function renderPdf(url, page) {
+    const ov = document.getElementById("dm-preview-overlay");
+    try {
+      showLoading("PDF 加载中…");
+      await loadPdfLib();
+      if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
+      pdfDoc = await window.pdfjsLib.getDocument(url).promise;
+      pdfTotal = pdfDoc.numPages;
+      pdfPage = Math.min(Math.max(page || 1, 1), pdfTotal);
+      ov.querySelector(".dm-preview-pager").style.display = pdfTotal > 1 ? "" : "none";
+      await showPdfPage(pdfPage);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function showPdfPage(n) {
+    if (!pdfDoc || pdfRendering) return;
+    n = Math.min(Math.max(n, 1), pdfTotal);
+    pdfRendering = true;
+    pdfPage = n;
+    const ov = document.getElementById("dm-preview-overlay");
+    ov.querySelector(".dm-pv-label").textContent = n + " / " + pdfTotal;
+    try {
+      const page = await pdfDoc.getPage(n);
+      const b = bodyEl();
+      b.innerHTML = "";
+      const canvas = document.createElement("canvas");
+      b.appendChild(canvas);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.max(Math.min((b.clientWidth - 28) / base.width, 2), 0.5);
+      const vp = page.getViewport({ scale });
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = vp.width * dpr;
+      canvas.height = vp.height * dpr;
+      canvas.style.width = vp.width + "px";
+      canvas.style.height = vp.height + "px";
+      await page.render({
+        canvasContext: canvas.getContext("2d"),
+        viewport: vp,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+      }).promise;
+    } catch (e) {
+      showError(e);
+    } finally {
+      pdfRendering = false;
+    }
+  }
+
+  // ---------- 打开预览（按格式分流） ----------
+  function openPreview(file, page) {
+    const ov = ensureModal();
+    ov.style.display = "flex";
+    ov.querySelector(".dm-preview-title").textContent = "📄 " + file;
+    ov.querySelector(".dm-preview-pager").style.display = "none";
+    const ext = file.split(".").pop().toLowerCase();
+    const url = "/files/" + encodeURIComponent(file);
+    if (ext === "pdf") {
+      renderPdf(url, page);
+    } else if (ext === "docx") {
+      showLoading("Word 文档加载中…");
+      fetch(url + "?as=pdf", { method: "HEAD" }).then((r) => {
+        const ct = r.headers.get("content-type") || "";
+        if (r.ok && ct.includes("pdf")) return renderPdf(url + "?as=pdf", 1);
+        return fetch(url + "?as=text").then((r2) => r2.ok ? r2.text()
+          : Promise.reject(new Error("HTTP " + r2.status))).then(showText);
+      }).catch(showError);
+    } else {
+      showLoading("加载中…");
+      fetch(url).then((r) => r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status)))
+        .then(showText).catch(showError);
+    }
+  }
+
+  // 点击委托：引用链接 → 打开预览
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest(".dm-source-link");
+    if (!link) return;
+    e.stopPropagation();
+    openPreview(link.dataset.file, parseInt(link.dataset.page || "0", 10));
+  });
 })();
 </script>
 """
@@ -638,14 +887,6 @@ def respond_simple(question: str, history: list):
     full = f"<sub>✓ 深度思考已完成</sub>\n\n{reasoning_quote()}{final_answer}"
     if trace_lines:
         full += "\n\n---\n** Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
-    # 追问建议：用特殊标记 <!--suggest:问题--> 让 JS 渲染为可点击按钮
-    suggestions = [
-        "能详细解释一下吗？",
-        "有哪些实际应用场景？",
-        "与其他技术相比有什么优势？",
-    ]
-    for s in suggestions:
-        full += f"\n<!--suggest:{s}-->"
     yield history + [user_msg, {"role": "assistant", "content": full}]
 
 
@@ -735,6 +976,65 @@ if __name__ == "__main__":
     async def _serve_mermaid():
         return FileResponse(os.path.join(_mermaid_dir, "mermaid.min.js"),
                             media_type="application/javascript")
+
+    # ---- 文档预览：vendored pdf.js + 知识库原文（引用溯源直达） ----
+    from fastapi import HTTPException, Query
+    from fastapi.responses import PlainTextResponse
+
+    _vendor_dir = os.path.join(_mermaid_dir, "vendor")
+    _knowledge_dir = config.KNOWLEDGE_DIR
+
+    @demo.app.get("/vendor/{name}", include_in_schema=False)
+    async def _serve_vendor(name: str):
+        safe = os.path.basename(name)  # 防路径穿越
+        path = os.path.join(_vendor_dir, safe)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404)
+        return FileResponse(path, media_type="application/javascript"
+                            if safe.endswith(".js") else "application/octet-stream")
+
+    @demo.app.get("/files/{name}", include_in_schema=False)
+    async def _serve_file(name: str, as_: str = Query(default=None, alias="as")):
+        safe = os.path.basename(name)  # 防路径穿越：只允许知识库目录内文件名
+        path = os.path.join(_knowledge_dir, safe)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404)
+        if as_ == "text":
+            # 提取正文文本（docx 无 LibreOffice 时的预览降级通道）
+            from docmind.rag.chunker import _EXTRACTORS
+            ext = os.path.splitext(safe)[1].lower()
+            try:
+                if ext in _EXTRACTORS:
+                    text = _EXTRACTORS[ext](path)
+                else:
+                    with open(path, encoding="utf-8") as f:
+                        text = f.read()
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=f"文本提取失败: {e}")
+            return PlainTextResponse(text)
+        if as_ == "pdf" and safe.lower().endswith(".docx"):
+            # LibreOffice headless 转 PDF（按源文件 mtime 缓存）；未安装 → 409，前端降级文本预览
+            import shutil
+            import subprocess
+            soffice = shutil.which("soffice") or (
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+                if os.path.exists("/Applications/LibreOffice.app/Contents/MacOS/soffice") else None)
+            if not soffice:
+                raise HTTPException(status_code=409, detail="LibreOffice 未安装")
+            cache_dir = os.path.join(config.PROJECT_ROOT, "data", "preview_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            out_pdf = os.path.join(cache_dir, os.path.splitext(safe)[0] + ".pdf")
+            if not os.path.isfile(out_pdf) or os.path.getmtime(out_pdf) < os.path.getmtime(path):
+                try:
+                    r = subprocess.run(
+                        [soffice, "--headless", "--convert-to", "pdf", "--outdir", cache_dir, path],
+                        capture_output=True, timeout=120)
+                except Exception as e:  # noqa: BLE001
+                    raise HTTPException(status_code=500, detail=f"转换失败: {e}")
+                if r.returncode != 0 or not os.path.isfile(out_pdf):
+                    raise HTTPException(status_code=500, detail="PDF 转换失败")
+            return FileResponse(out_pdf, media_type="application/pdf")
+        return FileResponse(path)
 
     # 阻塞主线程（保持服务运行）
     try:

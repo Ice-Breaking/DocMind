@@ -16,3 +16,4 @@ data/index/
 .vscode/
 .DS_Store
 .aicoding-chat-workspace
+data/preview_cache/

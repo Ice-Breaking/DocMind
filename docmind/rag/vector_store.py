@@ -21,6 +21,7 @@ class SearchHit:
     text: str
     source: str
     score: float
+    page: int | None = None   # PDF 切片携带的页码（引用溯源/原文预览定位用）
 
 
 @dataclass

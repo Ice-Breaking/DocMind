@@ -21,17 +21,22 @@ _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切�
 
 
 # ---------------- 格式提取器 ----------------
-def _extract_pdf(path: str) -> str:
-    """pypdf 逐页提取文本，页间用空行分隔"""
+def _extract_pdf_pages(path: str) -> list[tuple[int, str]]:
+    """pypdf 逐页提取文本，返回 [(页号, 文本)]（页号从 1 起），供切片携带页码元数据"""
     from pypdf import PdfReader
 
     reader = PdfReader(path)
     pages = []
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        if text.strip():
-            pages.append(text.strip())
-    return "\n\n".join(pages)
+    for i, page in enumerate(reader.pages, 1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append((i, text))
+    return pages
+
+
+def _extract_pdf(path: str) -> str:
+    """pypdf 逐页提取文本，页间用空行分隔"""
+    return "\n\n".join(t for _, t in _extract_pdf_pages(path))
 
 
 def _extract_docx(path: str) -> str:
@@ -125,9 +130,29 @@ def chunk_text(text: str) -> list[str]:
 
 
 def load_chunks(knowledge_dir: str | None = None) -> list[dict]:
-    """加载并切片，返回 [{source, text}]（text 为切片）"""
+    """加载并切片，返回 [{source, text, page?}]（text 为切片）。
+
+    PDF 按页独立切片并携带 page 元数据（引用溯源/原文预览定位的地基）；
+    其余格式不带页码。单文件失败不阻断（与 load_documents 策略一致）。
+    """
+    root = knowledge_dir or config.KNOWLEDGE_DIR
     result = []
     for doc in load_documents(knowledge_dir):
-        for piece in chunk_text(doc["text"]):
-            result.append({"source": doc["source"], "text": piece})
+        ext = os.path.splitext(doc["source"])[1].lower()
+        if ext == ".pdf":
+            path = os.path.join(root, doc["source"])
+            try:
+                pages = _extract_pdf_pages(path)
+            except Exception as e:  # noqa: BLE001
+                print(f"[警告] PDF 按页切片失败，退回整篇切片 {doc['source']}: {e}")
+                pages = [(0, doc["text"])]
+            for page_no, page_text in pages:
+                for piece in chunk_text(page_text):
+                    item = {"source": doc["source"], "text": piece}
+                    if page_no:
+                        item["page"] = page_no
+                    result.append(item)
+        else:
+            for piece in chunk_text(doc["text"]):
+                result.append({"source": doc["source"], "text": piece})
     return result
