@@ -181,6 +181,28 @@ footer { display: none !important; }
     overflow-x: auto !important; text-align: center !important;
 }
 .message.bot div.mermaid svg { max-width: 100% !important; height: auto !important; display: inline-block !important; }
+
+/* 流式生成中：末尾闪烁光标 + 顶部"生成中"徽标（由消息稳定性检测维护 dm-streaming 类） */
+.message.bot.dm-streaming [data-testid="bot"]::after {
+    content: "▍"; color: #6366f1; margin-left: 1px;
+    animation: dm-blink 1s steps(2, start) infinite;
+}
+.message.bot.dm-streaming::before {
+    content: "⏳ 生成中…"; display: block;
+    font-size: 11px; color: #6366f1; opacity: .85; margin-bottom: 4px;
+}
+@keyframes dm-blink { 50% { opacity: 0; } }
+
+/* 回到底部悬浮按钮：用户上滑阅读期间有新内容时出现 */
+.dm-to-bottom {
+    position: fixed; right: 30px; bottom: 96px; z-index: 999;
+    display: none; align-items: center; gap: 4px;
+    padding: 7px 14px !important; border-radius: 999px !important;
+    background: #6366f1 !important; color: #fff !important; border: none !important;
+    font-size: 12px !important; box-shadow: 0 4px 14px rgba(99,102,241,.35) !important;
+    cursor: pointer;
+}
+.dm-to-bottom.dm-show { display: flex; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -270,6 +292,150 @@ body { overflow-x: hidden !important; }
 #  因 gr.HTML 会过滤 script、js 参数在 SSR 模式下不可靠）
 FOLD_SCRIPT = """
 <script>
+// 消息稳定性检测（共享基础设施）：
+// MutationObserver 记录每条 bot 消息的最近内容变化时间，暴露 window.__dmIsStable(el)。
+// 用途：① 流式生成指示（dm-streaming 类 → 光标/徽标）
+//       ② fold/suggest/mermaid 等后处理的"稳定性闸门"（流式中不做任何 DOM 加工，
+//          既避免半成品被误当成终态，也避免流式期间高频读写 DOM 造成滚动卡顿）
+(() => {
+  if (window.__dmMsgStateInstalled) return;
+  window.__dmMsgStateInstalled = true;
+  const STABLE_MS = 1200;
+  const lastChange = new WeakMap();
+
+  function mark(el, t) {
+    if (el && el.classList && el.classList.contains("message") && el.classList.contains("bot")) {
+      lastChange.set(el, t);
+    }
+  }
+
+  const obs = new MutationObserver((muts) => {
+    const now = Date.now();
+    for (const m of muts) {
+      // 变化的目标节点：向上找所属 bot 消息
+      const t = m.target;
+      if (t && t.nodeType === 1) {
+        if (t.matches && t.matches(".message.bot")) mark(t, now);
+        else if (t.closest) mark(t.closest(".message.bot"), now);
+      } else if (t && t.nodeType === 3 && t.parentElement && t.parentElement.closest) {
+        mark(t.parentElement.closest(".message.bot"), now);
+      }
+      // 新增节点：本身或其子孙是 bot 消息
+      if (m.addedNodes) {
+        for (const n of m.addedNodes) {
+          if (n.nodeType !== 1) continue;
+          mark(n, now);
+          if (n.querySelectorAll) n.querySelectorAll(".message.bot").forEach((x) => mark(x, now));
+        }
+      }
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+  window.__dmIsStable = (el) => {
+    const t = lastChange.get(el);
+    return !t || Date.now() - t > STABLE_MS;
+  };
+
+  // 维护 dm-streaming 类：CSS 据此渲染末尾闪烁光标 + 顶部"生成中"徽标
+  function refresh() {
+    document.querySelectorAll(".message.bot").forEach((el) => {
+      el.classList.toggle("dm-streaming", !window.__dmIsStable(el));
+    });
+  }
+  refresh();
+  setInterval(refresh, 300);
+})();
+</script>
+<script>
+// 智能滚动（P0）：关闭 Gradio 原生 autoscroll 后由此接管
+// 规则：用户贴底（距底 ≤100px）→ 新内容自动跟随滚底；
+//       用户上滑阅读 → 绝不打扰，仅显示"↓ 回到底部"悬浮按钮
+(() => {
+  if (window.__dmScrollInstalled) return;
+  window.__dmScrollInstalled = true;
+  const STICK_PX = 100;
+  let scroller = null;
+  let stick = true;
+
+  function findScroller() {
+    if (scroller && document.body.contains(scroller)) return scroller;
+    scroller = document.querySelector("#chatbot .bubble-wrap");
+    return scroller;
+  }
+
+  // 悬浮"回到底部"按钮
+  const fab = document.createElement("button");
+  fab.className = "dm-to-bottom";
+  fab.textContent = "↓ 回到底部";
+  fab.addEventListener("click", () => {
+    const sc = findScroller();
+    if (!sc) return;
+    stick = true;
+    sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+    fab.classList.remove("dm-show");
+  });
+  document.body.appendChild(fab);
+
+  const isAtBottom = (sc) => sc.scrollHeight - sc.scrollTop - sc.clientHeight <= STICK_PX;
+
+  function onScroll() {
+    const sc = findScroller();
+    if (!sc) return;
+    const atBottom = isAtBottom(sc);
+    const delta = sc.scrollTop - (onScroll._last || 0);
+    onScroll._last = sc.scrollTop;
+    if (atBottom) {
+      stick = true;
+    } else if (delta < -4) {
+      // 明确上滑：用户想阅读历史，停止跟随
+      stick = false;
+    } else if (delta > 60) {
+      // 大幅下跳（折叠/展开引起的内容高度变化），以当前位置为准
+      stick = false;
+    }
+    if (stick) fab.classList.remove("dm-show");
+  }
+  document.addEventListener("scroll", (e) => {
+    const sc = findScroller();
+    if (sc && (e.target === sc || sc.contains(e.target))) onScroll();
+  }, true);
+
+  function toBottom() {
+    const sc = findScroller();
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  }
+
+  // 内容变化：贴底 → 跟随；上滑中 → 显示回到底部按钮
+  let rafPending = false;
+  const obs = new MutationObserver(() => {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      if (stick) toBottom();
+      else fab.classList.add("dm-show");
+    });
+  });
+  obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+  // 用户发送新问题（新 .message.user 出现）：无条件回到底部并恢复跟随
+  const userObs = new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (n.nodeType === 1 && n.querySelector && n.querySelector(".message.user")) {
+          stick = true;
+          fab.classList.remove("dm-show");
+          requestAnimationFrame(toBottom);
+          return;
+        }
+      }
+    }
+  });
+  userObs.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+<script>
 (() => {
   if (window.__dmFoldInstalled) return;
   window.__dmFoldInstalled = true;
@@ -297,6 +463,7 @@ FOLD_SCRIPT = """
   });
   function scan() {
     document.querySelectorAll('.message.bot').forEach((el) => {
+      if (window.__dmIsStable && !window.__dmIsStable(el)) return; // 流式中不加工
       if (el.scrollHeight > MAX_H) {
         if (!el.querySelector('.dm-toggle')) attachToggle(el);
         if (!el.classList.contains('dm-collapsed') && el.dataset.dmExpanded !== '1') {
@@ -318,6 +485,8 @@ FOLD_SCRIPT = """
   function renderSuggestions() {
     document.querySelectorAll('.message.bot').forEach((el) => {
       if (el.dataset.dmSuggestRendered) return;
+      if (window.__dmIsStable && !window.__dmIsStable(el)) return; // 流式中不加工
+
       const html = el.innerHTML;
       if (!html.includes('<!--suggest:')) return;
       const suggestions = [];
@@ -378,6 +547,7 @@ FOLD_SCRIPT = """
     // 找出 Gradio 已生成、但尚未被 mermaid 处理的 .mermaid 容器（流式结束后才稳定出现）
     const nodes = Array.from(document.querySelectorAll(".message.bot div.mermaid")).filter(
       (n) => n.getAttribute("data-processed") !== "true" && n.textContent.trim()
+        && (!window.__dmIsStable || window.__dmIsStable(n.closest(".message.bot")))
     );
     if (!nodes.length) return;
     // mermaid.run 原地渲染并自动打上 data-processed 标记，天然去重、无重复图表
@@ -498,6 +668,9 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         show_label=False,
         placeholder="💬 在下方输入问题，试试下面的示例～",
         elem_id="chatbot",
+        # 关闭原生自动滚动：流式每帧强制滚底会把正在上滑阅读的用户拽回去，
+        # 改由前端智能滚动接管（贴底才跟随，上滑不打扰 + 回到底部悬浮按钮）
+        autoscroll=False,
     )
 
     with gr.Row(elem_id="input-row"):
