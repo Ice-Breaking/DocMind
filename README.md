@@ -20,7 +20,7 @@ flowchart TD
     TR --> MCPP[MCP 工具 get_weather]
     TR --> TIME[get_current_time]
 
-    KS --> KB[(知识库\n.md/.txt/.pdf/.docx)]
+    KS --> KB[(知识库\n.md/.txt/.pdf/.docx/.xlsx/图片OCR)]
     KB --> H[混合检索\nBM25 + 向量双路召回]
     H --> RRF[RRF 排名融合]
     RRF --> RK[gte-rerank 精排\n自适应过滤]
@@ -142,7 +142,7 @@ scripts/
 ├── gen_sample_docs.py     # 示例 PDF/Word 文档生成工具
 └── view_traces.py         # 本地调用链日志查看器
 
-docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx，启动时自动建索引）
+docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx/.xlsx/图片，启动时自动建索引；图片走 OCR）
 ```
 
 ## 调用链追踪（可观测性）
@@ -172,12 +172,14 @@ $ python scripts/view_traces.py
 | 防幻觉 | Prompt 强制"先检索后回答"，回答附来源标注 |
 | 深度思考 | `enable_thinking` 请求真实思维链，GUI 实时流式展示；思维链不回传 history（百炼多轮限制），模型不支持自动降级 |
 | 数据可视化 | Prompt 引导模型对流程/架构类问题输出 ` ```mermaid ` 图表；内联 vendored mermaid.min.js（避 CDN），前端用 `mermaid.run` 对 Gradio 生成的 `.mermaid` 容器原地渲染为 SVG |
-| 引用溯源预览 | PDF 切片携带页码元数据 → 检索结果带页码 → 模型引用写成 `[来源: 文件 · 第N页]` → 前端链接化，点击弹窗预览原文（vendored pdf.js 定位到页，支持缩放/翻页/页码跳转/键盘导航；docx 经 LibreOffice 转 PDF 复用 PDF 通道，未安装降级文本预览） |
+| 引用溯源预览 | PDF 切片携带页码元数据 → 检索结果带页码 → 模型引用写成 `[来源: 文件 · 第N页]` → 前端链接化，点击弹窗预览原文（vendored pdf.js 定位到页，支持缩放/翻页/页码跳转/键盘导航；docx 经 LibreOffice 转 PDF 复用 PDF 通道，未安装降级文本预览；xlsx 解析为 Sheet 表格预览；图片预览原图 + OCR 识别文本（百炼 qwen-vl，结果磁盘缓存并入库可检索） |
 
 ## 路线图
 
 - [x] 混合检索（BM25 + 向量 + RRF）与 Rerank（gte-rerank-v2，带评测脚本）
 - [x] PDF / Word 文档支持（pypdf + python-docx，坏文件容错跳过）
+- [x] Excel 解析 + 图片 OCR 入库（openpyxl 按 Sheet 切块；百炼 qwen-vl OCR 抽文字，磁盘缓存免重复调 API）
+- [x] Excel/图片预览（xlsx Sheet 页签表格；图片原图 + OCR 文本对照，点击引用直达）
 - [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
 - [x] 对话调用链追踪（Langfuse / 本地 JSONL 双后端，覆盖 LLM 调用 + 工具执行 + token 用量）
 - [x] Docker 一键部署（compose 编排，Key 注入不进镜像，索引缓存/知识库卷持久化）

@@ -1,9 +1,11 @@
-"""文档加载与切片：把 docs/knowledge 下的文本/PDF/Word 切成可检索的片段。
+"""文档加载与切片：把 docs/knowledge 下的文档切成可检索的片段。
 
 格式支持（面试可讲）：
 - .md / .txt：直接读取
 - .pdf：pypdf 逐页提取（纯 Python，无系统依赖）
 - .docx：python-docx 提取正文段落 + 表格
+- .xlsx：openpyxl 按 Sheet 提取，行数据管道符拼接（与 docx 表格策略一致）
+- .png/.jpg/.jpeg/.webp：百炼多模态 OCR 抽取图中文字（结果磁盘缓存，避免重复调 API）
 - 单个文件解析失败只告警跳过，不影响其余文档建库
 
 切片策略：
@@ -11,12 +13,16 @@
   拆分超长段，让每个切片尽量是一个完整的 QA 或主题
 - 纯文本/PDF/Word 退回滑窗切片：CHUNK_SIZE 窗口 + CHUNK_OVERLAP 重叠，优先换行处断开
 """
+import base64
+import hashlib
 import os
 import re
 
 from docmind import config
 
-SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx"}
+SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+OCR_CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "ocr_cache")
 _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切分但保留标题文本
 
 
@@ -53,10 +59,73 @@ def _extract_docx(path: str) -> str:
     return "\n\n".join(parts)
 
 
+def _extract_xlsx(path: str) -> str:
+    """openpyxl 逐 Sheet 提取：Sheet 名作段首标记，行内单元格管道符拼接"""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    parts = []
+    try:
+        for ws in wb.worksheets:
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+                if cells:
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append(f"[Sheet: {ws.title}]\n" + "\n".join(rows))
+    finally:
+        wb.close()
+    return "\n\n".join(parts)
+
+
+def _ocr_image(path: str) -> str:
+    """图片 OCR：百炼多模态抽取图中文字。按「文件名+大小+mtime」磁盘缓存，
+    索引重建时不重复调 API；OCR 文本为空视为失败（抛错由建库流程告警跳过）"""
+    st = os.stat(path)
+    fp = hashlib.sha256(
+        f"{os.path.basename(path)}:{st.st_size}:{int(st.st_mtime)}".encode()
+    ).hexdigest()[:16]
+    os.makedirs(OCR_CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(OCR_CACHE_DIR, fp + ".txt")
+    if os.path.isfile(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            return f.read()
+
+    import requests
+
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    ext = os.path.splitext(path)[1].lstrip(".").lower()
+    mime = "jpeg" if ext == "jpg" else ext
+    resp = requests.post(
+        config.DASHSCOPE_BASE_URL.rstrip("/") + "/chat/completions",
+        headers={"Authorization": f"Bearer {config.DASHSCOPE_API_KEY}"},
+        json={
+            "model": config.OCR_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/{mime};base64,{b64}"}},
+                {"type": "text", "text": "请读取图片中的全部文字并原样输出，不要添加解释。"},
+            ]}],
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    text = (resp.json()["choices"][0]["message"]["content"] or "").strip()
+    if not text:
+        raise ValueError("OCR 未识别到文字")
+    with open(cache_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
+
+
 # 二进制格式的提取器映射（懒导入，不用时不加载库）
 _EXTRACTORS = {
     ".pdf": _extract_pdf,
     ".docx": _extract_docx,
+    ".xlsx": _extract_xlsx,
+    **{ext: _ocr_image for ext in IMAGE_EXTS},
 }
 
 

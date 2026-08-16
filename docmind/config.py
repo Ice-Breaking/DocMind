@@ -18,6 +18,8 @@ DASHSCOPE_BASE_URL = os.getenv(
 # 模型配置
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-turbo")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+# 图片 OCR：百炼多模态模型（入库时抽取图中文字，结果磁盘缓存避免重复调用）
+OCR_MODEL = os.getenv("OCR_MODEL", "qwen-vl-ocr")
 
 # Agent 配置
 MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "8"))

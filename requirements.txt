@@ -9,9 +9,10 @@ rank-bm25>=0.2.2
 jieba>=0.42.1
 requests>=2.31.0
 
-# 二进制文档提取：PDF / Word（纯 Python，无系统依赖）
+# 二进制文档提取：PDF / Word / Excel（纯 Python，无系统依赖）
 pypdf>=4.0.0
 python-docx>=1.1.0
+openpyxl>=3.1.0
 
 # 调用链追踪（未配置凭证时自动降级本地 JSONL，不影响运行）
 langfuse>=4.0.0

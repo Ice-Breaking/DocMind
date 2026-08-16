@@ -239,6 +239,22 @@ footer { display: none !important; }
 .dm-preview-text { text-align: left; white-space: pre-wrap; font-size: 12px; line-height: 1.7; background: #fff; padding: 14px; border-radius: 8px; margin: 0; }
 .dm-preview-loading, .dm-preview-error { color: #64748b; font-size: 13px; padding: 24px; }
 .dm-preview-error { color: #ef4444; }
+
+/* Excel 预览：Sheet 页签 + 表格 */
+.dm-xlsx { text-align: left; }
+.dm-xlsx-tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; justify-content: center; }
+.dm-xlsx-tab { border: 1px solid #e2e8f0; background: #fff; border-radius: 8px; padding: 5px 12px; font-size: 12px; cursor: pointer; color: #475569; }
+.dm-xlsx-tab.dm-active { background: #6366f1; color: #fff; border-color: #6366f1; }
+.dm-xlsx-table { border-collapse: collapse; font-size: 12px; background: #fff; margin: 0 auto; }
+.dm-xlsx-table th, .dm-xlsx-table td { border: 1px solid #e2e8f0; padding: 6px 10px; text-align: left; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-xlsx-table th { background: #eef2ff; color: #4338ca; font-weight: 600; }
+.dm-xlsx-table tr:nth-child(even) td { background: #f8fafc; }
+
+/* 图片预览：原图 + OCR 识别文本 */
+.dm-img-preview img { max-width: 100%; max-height: 52vh; border-radius: 8px; box-shadow: 0 2px 10px rgba(15,23,42,.12); background: #fff; }
+.dm-ocr-box { margin-top: 12px; text-align: left; background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 12px; }
+.dm-ocr-box summary { cursor: pointer; color: #6366f1; font-weight: 600; }
+.dm-ocr-text { white-space: pre-wrap; line-height: 1.7; margin: 8px 0 0; color: #334155; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -598,8 +614,8 @@ FOLD_SCRIPT = """
 (() => {
   if (window.__dmPreviewInstalled) return;
   window.__dmPreviewInstalled = true;
-  const SOURCE_RE = /\[来源: ([^\]\\n]+?\.(?:md|txt|pdf|docx))(?: · 第(\d+)页)?\]/g;
-  const SOURCE_TEST = /\[来源: [^\]\\n]+?\.(?:md|txt|pdf|docx)(?: · 第\d+页)?\]/;
+  const SOURCE_RE = /\[来源: ([^\]\\n]+?\.(?:md|txt|pdf|docx|xlsx|png|jpg|jpeg|webp))(?: · 第(\d+)页)?\]/g;
+  const SOURCE_TEST = /\[来源: [^\]\\n]+?\.(?:md|txt|pdf|docx|xlsx|png|jpg|jpeg|webp)(?: · 第\d+页)?\]/;
   let pdfDoc = null, pdfPage = 1, pdfTotal = 0, pdfRendering = false;
   let zoomFactor = 1, pendingPage = null;
 
@@ -802,6 +818,82 @@ FOLD_SCRIPT = """
     }
   }
 
+  // ---------- Excel 预览（Sheet 页签 + 表格） ----------
+  async function renderXlsx(url) {
+    try {
+      showLoading("Excel 加载中…");
+      const r = await fetch(url + "?as=sheets");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      const b = bodyEl();
+      b.innerHTML = "";
+      const box = document.createElement("div");
+      box.className = "dm-xlsx";
+      const tabs = document.createElement("div");
+      tabs.className = "dm-xlsx-tabs";
+      const panes = [];
+      data.sheets.forEach((sh, i) => {
+        const tab = document.createElement("button");
+        tab.className = "dm-xlsx-tab" + (i === 0 ? " dm-active" : "");
+        tab.textContent = sh.name;
+        tab.onclick = () => {
+          panes.forEach((p, j) => { p.style.display = j === i ? "" : "none"; });
+          tabs.querySelectorAll(".dm-xlsx-tab").forEach((t, j) => t.classList.toggle("dm-active", j === i));
+        };
+        tabs.appendChild(tab);
+        const table = document.createElement("table");
+        table.className = "dm-xlsx-table";
+        sh.rows.forEach((row, ri) => {
+          const tr = document.createElement("tr");
+          row.forEach((cell) => {
+            const td = document.createElement(ri === 0 ? "th" : "td");
+            td.textContent = cell;
+            tr.appendChild(td);
+          });
+          table.appendChild(tr);
+        });
+        const pane = document.createElement("div");
+        pane.className = "dm-xlsx-pane";
+        pane.style.display = i === 0 ? "" : "none";
+        pane.appendChild(table);
+        panes.push(pane);
+      });
+      box.appendChild(tabs);
+      panes.forEach((p) => box.appendChild(p));
+      b.appendChild(box);
+    } catch (e) { showError(e); }
+  }
+
+  // ---------- 图片预览（原图 + OCR 识别文本，OCR 结果已入库可检索） ----------
+  async function renderImage(url) {
+    try {
+      showLoading("图片加载中…");
+      const b = bodyEl();
+      b.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "dm-img-preview";
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "预览图片";
+      wrap.appendChild(img);
+      const det = document.createElement("details");
+      det.className = "dm-ocr-box";
+      det.open = true;
+      const sum = document.createElement("summary");
+      sum.textContent = "🔍 OCR 识别文本（已入库，可被检索）";
+      const pre = document.createElement("pre");
+      pre.className = "dm-ocr-text";
+      pre.textContent = "识别中…";
+      det.appendChild(sum);
+      det.appendChild(pre);
+      wrap.appendChild(det);
+      b.appendChild(wrap);
+      fetch(url + "?as=text").then((r) => r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status)))
+        .then((t) => { pre.textContent = t || "（未识别到文字）"; })
+        .catch((e) => { pre.textContent = "OCR 文本获取失败：" + e.message; });
+    } catch (e) { showError(e); }
+  }
+
   // ---------- 打开预览（按格式分流） ----------
   function openPreview(file, page) {
     const ov = ensureModal();
@@ -812,6 +904,10 @@ FOLD_SCRIPT = """
     const url = "/files/" + encodeURIComponent(file);
     if (ext === "pdf") {
       renderPdf(url, page);
+    } else if (ext === "xlsx") {
+      renderXlsx(url);
+    } else if (["png", "jpg", "jpeg", "webp"].indexOf(ext) !== -1) {
+      renderImage(url);
     } else if (ext === "docx") {
       showLoading("Word 文档加载中…");
       fetch(url + "?as=pdf", { method: "HEAD" }).then((r) => {
@@ -1031,7 +1127,7 @@ if __name__ == "__main__":
         if not os.path.isfile(path):
             raise HTTPException(status_code=404)
         if as_ == "text":
-            # 提取正文文本（docx 无 LibreOffice 时的预览降级通道）
+            # 提取正文文本（docx 无 LibreOffice 时的降级通道；图片走 OCR 缓存）
             from docmind.rag.chunker import _EXTRACTORS
             ext = os.path.splitext(safe)[1].lower()
             try:
@@ -1043,6 +1139,25 @@ if __name__ == "__main__":
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=500, detail=f"文本提取失败: {e}")
             return PlainTextResponse(text)
+        if as_ == "sheets" and safe.lower().endswith(".xlsx"):
+            # Excel 预览数据：各 Sheet 的行列 JSON（限量防超大表格拖垮前端）
+            from fastapi.responses import JSONResponse
+            import openpyxl
+            MAX_ROWS, MAX_COLS = 500, 60
+            try:
+                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+                sheets = []
+                for ws in wb.worksheets:
+                    rows = []
+                    for i, row in enumerate(ws.iter_rows(values_only=True)):
+                        if i >= MAX_ROWS:
+                            break
+                        rows.append(["" if c is None else str(c) for c in row[:MAX_COLS]])
+                    sheets.append({"name": ws.title, "rows": rows})
+                wb.close()
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=f"Excel 解析失败: {e}")
+            return JSONResponse({"sheets": sheets})
         if as_ == "pdf" and safe.lower().endswith(".docx"):
             # LibreOffice headless 转 PDF（按源文件 mtime 缓存）；未安装 → 409，前端降级文本预览
             import shutil

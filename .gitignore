@@ -17,3 +17,4 @@ data/index/
 .DS_Store
 .aicoding-chat-workspace
 data/preview_cache/
+data/ocr_cache/
