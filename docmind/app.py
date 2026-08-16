@@ -9,6 +9,7 @@ import os
 import gradio as gr
 
 from docmind import config
+from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
 from docmind.core import build_agent
 
 print("[DocMind] 正在装配 Agent（加载知识库、连接 MCP Server）...")
@@ -255,6 +256,15 @@ footer { display: none !important; }
 .dm-ocr-box { margin-top: 12px; text-align: left; background: #fff; border-radius: 8px; padding: 8px 12px; font-size: 12px; }
 .dm-ocr-box summary { cursor: pointer; color: #6366f1; font-weight: 600; }
 .dm-ocr-text { white-space: pre-wrap; line-height: 1.7; margin: 8px 0 0; color: #334155; }
+
+/* 反馈闭环：回答下方 👍/👎 评价按钮 */
+.dm-feedback { display: flex; gap: 4px; justify-content: flex-end; margin-top: 6px; }
+.dm-fb-btn { border: none; background: transparent; cursor: pointer; font-size: 14px; opacity: .5; padding: 2px 6px; border-radius: 6px; line-height: 1; }
+.dm-fb-btn:hover { background: #eef2ff; opacity: 1; }
+.dm-fb-btn.dm-fb-active { opacity: 1; background: #eef2ff; }
+
+/* 会话持久化的隐藏组件（需留在 DOM 里供 JS 读写，故用 CSS 隐藏而非 visible=False） */
+#session-id, #load-history-btn { display: none !important; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -932,6 +942,124 @@ FOLD_SCRIPT = """
   });
 })();
 </script>
+<script>
+// 反馈闭环：完成的 bot 消息追加 👍/👎，点击上报 /api/feedback（session_id + 消息序号）。
+// 序号约定：后端按 user/assistant 交替落库，第 N 个 bot 消息（0 起）seq = 2N+1。
+// 页面刷新后 GET /api/feedback/{sid} 恢复选中态；重复点击以后次为准（后端覆盖）。
+(() => {
+  if (window.__dmFeedbackInstalled) return;
+  window.__dmFeedbackInstalled = true;
+  window.__dmFeedback = {};
+
+  const sid = () => localStorage.getItem("dm_session_id") || "";
+  const seqOf = (el) => Array.from(document.querySelectorAll(".message.bot")).indexOf(el) * 2 + 1;
+
+  function markActive(el, seq) {
+    el.querySelectorAll(".dm-fb-btn").forEach((b) =>
+      b.classList.toggle("dm-fb-active", b.dataset.rating === window.__dmFeedback[String(seq)]));
+  }
+
+  function addFeedback(el) {
+    if (el.dataset.dmFeedbackAdded) return;
+    // 稳定性闸门：流式中不追加，避免误认为回答已完成
+    if (window.__dmIsStable && !window.__dmIsStable(el)) return;
+    const seq = seqOf(el);
+    const wrap = document.createElement("div");
+    wrap.className = "dm-feedback";
+    [["👍", "up", "回答有帮助"], ["👎", "down", "回答有问题（收集 badcase）"]].forEach(([icon, rating, tip]) => {
+      const b = document.createElement("button");
+      b.className = "dm-fb-btn";
+      b.dataset.rating = rating;
+      b.textContent = icon;
+      b.title = tip;
+      b.onclick = async () => {
+        try {
+          const r = await fetch("/api/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sid(), seq: seq, rating: rating }),
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          window.__dmFeedback[String(seq)] = rating;
+          markActive(el, seq);
+        } catch (e) {
+          console.error("[DocMind] 反馈上报失败", e);
+        }
+      };
+      wrap.appendChild(b);
+    });
+    el.appendChild(wrap);
+    el.dataset.dmFeedbackAdded = "1";
+    markActive(el, seq);
+  }
+
+  function restore() {
+    const s = sid();
+    if (!s || window.__dmFeedbackRestored) return;
+    window.__dmFeedbackRestored = true;
+    fetch("/api/feedback/" + encodeURIComponent(s))
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((map) => {
+        Object.assign(window.__dmFeedback, map || {});
+        document.querySelectorAll(".message.bot").forEach((el) => {
+          if (el.dataset.dmFeedbackAdded) markActive(el, seqOf(el));
+        });
+      })
+      .catch(() => {});
+  }
+
+  function scan() {
+    restore();
+    document.querySelectorAll(".message.bot").forEach(addFeedback);
+  }
+  scan();
+  setInterval(scan, 800);
+})();
+</script>
+<script>
+// 会话引导：session_id 的 localStorage 初始化、写入隐藏框、触发历史恢复、清空开新会话。
+// 不用 Gradio 的 js 事件链（纯 JS 事件对隐藏组件写值不可靠），改用 DOM 直写 + 程序化点击。
+(() => {
+  if (window.__dmSessionBootInstalled) return;
+  window.__dmSessionBootInstalled = true;
+
+  const newId = () => 'sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  const sidBox = () => document.querySelector('#session-id textarea, #session-id input');
+
+  function writeSid(id) {
+    const box = sidBox();
+    if (!box) return false;
+    if (box.value !== id) {
+      box.value = id;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return true;
+  }
+
+  let tries = 0;
+  function boot() {
+    let id = localStorage.getItem('dm_session_id');
+    if (!id) { id = newId(); localStorage.setItem('dm_session_id', id); }
+    if (!writeSid(id)) { if (++tries < 25) setTimeout(boot, 400); return; }
+    // 等 Gradio 同步完状态再触发历史恢复
+    setTimeout(() => {
+      const b = document.querySelector('#load-history-btn');
+      if (b) b.click();
+    }, 500);
+  }
+  boot();
+
+  // 清空对话 = 开新会话：换新 session_id（清空逻辑本身由 Gradio 事件处理）
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#clear-btn')) return;
+    const id = newId();
+    localStorage.setItem('dm_session_id', id);
+    writeSid(id);
+    window.__dmFeedback = {};
+    window.__dmFeedbackRestored = false;
+  });
+})();
+</script>
 """
 
 HEADER_HTML = f"""
@@ -1040,6 +1168,11 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         autoscroll=False,
     )
 
+    # 会话 ID：前端引导脚本从 localStorage 生成/读取并写入此框（CSS 隐藏，
+    # 不用 visible=False——它不渲染 DOM，JS 无法写值）
+    session_box = gr.Textbox(elem_id="session-id")
+    load_history_btn = gr.Button("load", elem_id="load-history-btn")
+
     with gr.Row(elem_id="input-row"):
         clear = gr.Button("+", scale=0, elem_id="clear-btn")
         msg = gr.Textbox(
@@ -1058,22 +1191,53 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     # 注意：必须绑定真正的 generator function（yield 在函数体内）。
     # Gradio 6 用 isgeneratorfunction 识别流式，lambda 返回 generator 对象不满足，
     # 会被当普通值 postprocess 而报 messages format 错误。
+    def persist_pair(session_id, question, final_history):
+        """本轮用户问题 + 最终回答落库（失败不影响主链路）"""
+        if not session_id or not final_history:
+            return
+        try:
+            chatstore.append_message(session_id, "user", question)
+            chatstore.append_message(session_id, "assistant", final_history[-1]["content"])
+        except Exception as e:  # noqa: BLE001
+            print(f"[警告] 会话持久化失败: {e}")
+
     def make_example_handler(ex):
-        def handler(history):
-            yield from respond_simple(ex, history)
+        def handler(history, session_id):
+            last = history
+            for h in respond_simple(ex, history):
+                last = h
+                yield h
+            persist_pair(session_id, ex, last)
         return handler
 
-    def submit(question: str, history: list):
+    def submit(question: str, history: list, session_id: str):
         if not question.strip():
             yield history
             return
-        yield from respond_simple(question, history)
+        last = history
+        for h in respond_simple(question, history):
+            last = h
+            yield h
+        persist_pair(session_id, question, last)
 
-    msg.submit(submit, [msg, chatbot], chatbot).then(lambda: "", None, msg)
-    send.click(submit, [msg, chatbot], chatbot).then(lambda: "", None, msg)
-    clear.click(reset_chat, None, chatbot)
+    def load_history(session_id):
+        """页面加载：从 SQLite 恢复历史对话（session_id 由前端 JS 先行初始化）"""
+        if not session_id:
+            return []
+        try:
+            return chatstore.load_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[警告] 会话恢复失败: {e}")
+            return []
+
+    msg.submit(submit, [msg, chatbot, session_box], chatbot).then(lambda: "", None, msg)
+    send.click(submit, [msg, chatbot, session_box], chatbot).then(lambda: "", None, msg)
+    clear.click(reset_chat, None, chatbot)   # 新 session_id 由前端引导脚本接管
     for btn, ex in zip(example_buttons, EXAMPLES):
-        btn.click(make_example_handler(ex), inputs=chatbot, outputs=chatbot)
+        btn.click(make_example_handler(ex), inputs=[chatbot, session_box], outputs=chatbot)
+    # 页面加载：引导脚本写入 session_id 后程序化点击此按钮恢复历史
+    load_history_btn.click(load_history, session_box, chatbot)
+
 
 
 if __name__ == "__main__":
@@ -1181,6 +1345,28 @@ if __name__ == "__main__":
                     raise HTTPException(status_code=500, detail="PDF 转换失败")
             return FileResponse(out_pdf, media_type="application/pdf")
         return FileResponse(path)
+
+    # ---- 反馈闭环：👍/👎 评价（session_id + 消息序号唯一定位，重复点击覆盖） ----
+    from pydantic import BaseModel
+
+    class FeedbackIn(BaseModel):
+        session_id: str
+        seq: int
+        rating: str
+
+    @demo.app.post("/api/feedback", include_in_schema=False)
+    async def _save_feedback(fb: FeedbackIn):
+        if fb.rating not in ("up", "down"):
+            raise HTTPException(status_code=400, detail="rating 必须是 up/down")
+        try:
+            chatstore.save_feedback(fb.session_id, fb.seq, fb.rating)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"反馈保存失败: {e}")
+        return {"ok": True}
+
+    @demo.app.get("/api/feedback/{session_id}", include_in_schema=False)
+    async def _get_feedback(session_id: str):
+        return chatstore.get_feedback(session_id)
 
     # 阻塞主线程（保持服务运行）
     try:
