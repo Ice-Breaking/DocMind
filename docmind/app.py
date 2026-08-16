@@ -229,6 +229,9 @@ footer { display: none !important; }
 }
 .dm-preview-title { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dm-preview-pager { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #475569; }
+.dm-preview-zoom { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #475569; }
+.dm-pv-zoom-label { min-width: 42px; text-align: center; }
+.dm-pv-page-input { width: 48px; text-align: center; border: 1px solid #e2e8f0; border-radius: 6px; padding: 3px 4px; font-size: 12px; color: #334155; }
 .dm-pv-btn, .dm-pv-close { border: none; background: #f1f5f9; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; color: #334155; }
 .dm-pv-btn:hover, .dm-pv-close:hover { background: #e2e8f0; }
 .dm-preview-body { flex: 1; overflow: auto; padding: 12px; text-align: center; background: #f8fafc; }
@@ -598,6 +601,7 @@ FOLD_SCRIPT = """
   const SOURCE_RE = /\[来源: ([^\]\\n]+?\.(?:md|txt|pdf|docx))(?: · 第(\d+)页)?\]/g;
   const SOURCE_TEST = /\[来源: [^\]\\n]+?\.(?:md|txt|pdf|docx)(?: · 第\d+页)?\]/;
   let pdfDoc = null, pdfPage = 1, pdfTotal = 0, pdfRendering = false;
+  let zoomFactor = 1, pendingPage = null;
 
   // ---------- 引用链接化（仅稳定消息；文本节点级替换） ----------
   function linkify(el) {
@@ -651,9 +655,14 @@ FOLD_SCRIPT = """
     const head = document.createElement("div");
     head.className = "dm-preview-head";
     head.innerHTML = '<span class="dm-preview-title"></span>'
+      + '<span class="dm-preview-zoom">'
+      + '<button class="dm-pv-btn" data-act="zoom-out" title="缩小">−</button>'
+      + '<span class="dm-pv-zoom-label">100%</span>'
+      + '<button class="dm-pv-btn" data-act="zoom-in" title="放大">＋</button></span>'
       + '<span class="dm-preview-pager" style="display:none">'
       + '<button class="dm-pv-btn" data-act="prev">‹ 上一页</button>'
-      + '<span class="dm-pv-label"></span>'
+      + '<input class="dm-pv-page-input" type="number" min="1" value="1">'
+      + '<span class="dm-pv-total">/ 1</span>'
       + '<button class="dm-pv-btn" data-act="next">下一页 ›</button></span>'
       + '<button class="dm-pv-close">✕ 关闭</button>';
     const body = document.createElement("div");
@@ -666,7 +675,22 @@ FOLD_SCRIPT = """
     head.querySelector(".dm-pv-close").addEventListener("click", closePreview);
     head.querySelector('[data-act="prev"]').addEventListener("click", () => showPdfPage(pdfPage - 1));
     head.querySelector('[data-act="next"]').addEventListener("click", () => showPdfPage(pdfPage + 1));
+    head.querySelector('[data-act="zoom-in"]').addEventListener("click", () => {
+      zoomFactor = Math.min(zoomFactor * 1.2, 4); updateZoomLabel(); showPdfPage(pdfPage);
+    });
+    head.querySelector('[data-act="zoom-out"]').addEventListener("click", () => {
+      zoomFactor = Math.max(zoomFactor / 1.2, 0.4); updateZoomLabel(); showPdfPage(pdfPage);
+    });
+    const pageInput = head.querySelector(".dm-pv-page-input");
+    const jumpTo = () => showPdfPage(parseInt(pageInput.value || "1", 10));
+    pageInput.addEventListener("change", jumpTo);
+    pageInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); jumpTo(); } });
     return ov;
+  }
+
+  function updateZoomLabel() {
+    const ov = document.getElementById("dm-preview-overlay");
+    if (ov) ov.querySelector(".dm-pv-zoom-label").textContent = Math.round(zoomFactor * 100) + "%";
   }
 
   function closePreview() {
@@ -732,6 +756,7 @@ FOLD_SCRIPT = """
       pdfDoc = await window.pdfjsLib.getDocument(url).promise;
       pdfTotal = pdfDoc.numPages;
       pdfPage = Math.min(Math.max(page || 1, 1), pdfTotal);
+      zoomFactor = 1; updateZoomLabel();
       ov.querySelector(".dm-preview-pager").style.display = pdfTotal > 1 ? "" : "none";
       await showPdfPage(pdfPage);
     } catch (e) {
@@ -740,12 +765,14 @@ FOLD_SCRIPT = """
   }
 
   async function showPdfPage(n) {
-    if (!pdfDoc || pdfRendering) return;
+    if (!pdfDoc) return;
+    if (pdfRendering) { pendingPage = n; return; }   // 渲染中收到的翻页请求排队
     n = Math.min(Math.max(n, 1), pdfTotal);
     pdfRendering = true;
     pdfPage = n;
     const ov = document.getElementById("dm-preview-overlay");
-    ov.querySelector(".dm-pv-label").textContent = n + " / " + pdfTotal;
+    ov.querySelector(".dm-pv-page-input").value = n;
+    ov.querySelector(".dm-pv-total").textContent = "/ " + pdfTotal;
     try {
       const page = await pdfDoc.getPage(n);
       const b = bodyEl();
@@ -753,7 +780,9 @@ FOLD_SCRIPT = """
       const canvas = document.createElement("canvas");
       b.appendChild(canvas);
       const base = page.getViewport({ scale: 1 });
-      const scale = Math.max(Math.min((b.clientWidth - 28) / base.width, 2), 0.5);
+      // 适配宽度为基准，叠加用户缩放系数
+      const fitScale = Math.max(Math.min((b.clientWidth - 28) / base.width, 2), 0.5);
+      const scale = fitScale * zoomFactor;
       const vp = page.getViewport({ scale });
       const dpr = window.devicePixelRatio || 1;
       canvas.width = vp.width * dpr;
@@ -769,6 +798,7 @@ FOLD_SCRIPT = """
       showError(e);
     } finally {
       pdfRendering = false;
+      if (pendingPage !== null) { const q = pendingPage; pendingPage = null; showPdfPage(q); }
     }
   }
 
@@ -993,7 +1023,8 @@ if __name__ == "__main__":
         return FileResponse(path, media_type="application/javascript"
                             if safe.endswith(".js") else "application/octet-stream")
 
-    @demo.app.get("/files/{name}", include_in_schema=False)
+    # methods 含 HEAD：前端先 HEAD 探测 docx 能否转 PDF（此 App 的 .get 不自动挂 HEAD）
+    @demo.app.api_route("/files/{name}", methods=["GET", "HEAD"], include_in_schema=False)
     async def _serve_file(name: str, as_: str = Query(default=None, alias="as")):
         safe = os.path.basename(name)  # 防路径穿越：只允许知识库目录内文件名
         path = os.path.join(_knowledge_dir, safe)
