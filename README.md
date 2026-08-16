@@ -8,6 +8,32 @@
 
 ## 架构
 
+```mermaid
+flowchart TD
+    U[用户] --> GUI[Gradio GUI\n流式输出 · 深度思考指示]
+    GUI --> A[手写 ReAct Agent\n防死循环 · 低温度 · 异常兜底]
+    A --> LLM[qwen-plus（百炼 API）]
+    A --> TR[ToolRegistry 统一工具注册表]
+
+    TR --> KS[knowledge_search]
+    TR --> WS[web_search]
+    TR --> MCPP[MCP 工具 get_weather]
+    TR --> TIME[get_current_time]
+
+    KS --> KB[(知识库\n.md/.txt/.pdf/.docx)]
+    KB --> H[混合检索\nBM25 + 向量双路召回]
+    H --> RRF[RRF 排名融合]
+    RRF --> RK[gte-rerank 精排\n自适应过滤]
+
+    WS --> TV[Tavily API]
+    WS --> SX[SearXNG 自托管\nDocker 编排]
+
+    A --> TRACE[调用链追踪\nLangfuse / 本地 JSONL]
+    KB --> CACHE[向量索引缓存\n文件指纹失效策略]
+```
+
+文本版：
+
 ```
 用户提问
    │

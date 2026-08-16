@@ -129,9 +129,17 @@ body, .gradio-container, .main {
 }
 #clear-btn:hover { border-color: #a5b4fc !important; background: #f4f6ff !important; }
 
-/* 示例问题：PC 端自动换行，移动端单行横向滑动，任何分辨率都可见；不显示标题 */
-#examples-area .gallery-item { border-radius: 999px !important; font-size: 12.5px !important; white-space: nowrap; }
-#examples-area .label { display: none !important; }
+/* 示例问题：芯片按钮点击直发，常驻可见 */
+#examples-area { gap: 6px !important; flex-wrap: wrap !important; }
+#examples-area button.ex-chip {
+    border-radius: 999px !important; font-size: 12.5px !important; white-space: nowrap;
+    background: #ffffff !important; border: 1px solid #e8ebf6 !important;
+    color: #475569 !important; box-shadow: 0 1px 2px rgba(30, 41, 59, .03) !important;
+    padding: 6px 14px !important;
+}
+#examples-area button.ex-chip:hover {
+    border-color: #c7d2fe !important; color: #6366f1 !important; background: #f4f6ff !important;
+}
 
 /* 输入区：+ 按钮与输入框垂直居中对齐 */
 #input-row { align-items: center !important; }
@@ -207,26 +215,15 @@ body { overflow-x: hidden !important; }
     .dm-chips { margin-top: 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
     .dm-chip { font-size: 9px; padding: 1px 6px; }
     .message { max-width: 94% !important; }
-    /* 示例区：单列全宽列表，每条一行，emoji 引导，触控友好 */
-    #examples-area { margin: 0 !important; }
-    #examples-area .gallery {
-        display: flex !important; flex-direction: column !important;
-        gap: 6px !important; width: 100% !important;
+    /* 示例区：单列全宽芯片，点击直发，触控友好 */
+    #examples-area { margin: 0 !important; flex-direction: column !important; gap: 6px !important; }
+    #examples-area button.ex-chip {
+        width: 100% !important; text-align: left !important;
+        justify-content: flex-start !important; padding: 8px 12px !important;
+        font-size: 12px !important; border-radius: 10px !important;
     }
-    #examples-area .gallery-item {
-        width: 100% !important; min-width: 0 !important;
-        display: flex !important; align-items: center !important; justify-content: flex-start !important;
-        padding: 8px 12px !important; font-size: 12px !important; line-height: 1.4 !important;
-        background: #ffffff !important; border: 1px solid #e8ebf6 !important;
-        border-radius: 10px !important; box-shadow: 0 1px 2px rgba(30, 41, 59, .03);
-    }
-    #examples-area .gallery-item:active { background: #f4f6ff !important; border-color: #c7d2fe !important; }
-    /* 胶囊嵌套层：单行完整显示，不换行不截断 */
-    #examples-area .gallery-item span,
-    #examples-area .gallery-item span > div {
-        max-width: 100% !important; white-space: nowrap !important;
-        overflow: hidden !important; text-overflow: ellipsis !important;
-        text-align: left !important;
+    #examples-area button.ex-chip:active {
+        background: #f4f6ff !important; border-color: #c7d2fe !important;
     }
     /* 输入区：+ 按钮与输入框严格垂直居中 */
     #input-row { gap: 6px !important; display: flex !important; align-items: center !important; }
@@ -267,12 +264,6 @@ FOLD_SCRIPT = """
         }
       }
     });
-    /* 会话开始后隐藏示例区，把空间让给对话；新对话清空后自动恢复 */
-    const ex = document.querySelector('#examples-area');
-    if (ex) {
-      const hasMsg = !!document.querySelector('#chatbot .message');
-      ex.style.display = hasMsg ? 'none' : '';
-    }
   }
   scan();
   setInterval(scan, 600);
@@ -296,10 +287,10 @@ HEADER_HTML = f"""
 """
 
 EXAMPLES = [
-    ["💡 什么是 RAG？它解决了什么问题？"],
-    ["🛡️ Agent 如何防止死循环？"],
-    ["🔌 MCP 和 Function Calling 是什么关系？"],
-    ["🌤️ 北京天气怎么样？"],
+    "💡 什么是 RAG？它解决了什么问题？",
+    "🛡️ Agent 如何防止死循环？",
+    "🔌 MCP 和 Function Calling 是什么关系？",
+    "🌤️ 北京天气怎么样？",
 ]
 
 
@@ -380,7 +371,9 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         )
         send = gr.Button("发送", scale=1, min_width=80, elem_id="send-btn")
 
-    gr.Examples(examples=EXAMPLES, inputs=msg, label=None, examples_per_page=8, elem_id="examples-area")
+    # 示例问题芯片：点击直接发送（常驻可见，对话中也可快速追问）
+    with gr.Row(elem_id="examples-area"):
+        example_buttons = [gr.Button(ex, elem_classes="ex-chip", scale=1) for ex in EXAMPLES]
 
     def submit(question: str, history: list):
         if not question.strip():
@@ -391,6 +384,8 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     msg.submit(submit, [msg, chatbot], chatbot).then(lambda: "", None, msg)
     send.click(submit, [msg, chatbot], chatbot).then(lambda: "", None, msg)
     clear.click(reset_chat, None, chatbot)
+    for btn, ex in zip(example_buttons, EXAMPLES):
+        btn.click(lambda h, q=ex: respond_simple(q, h), inputs=chatbot, outputs=chatbot)
 
 
 if __name__ == "__main__":
