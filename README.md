@@ -199,6 +199,7 @@ $ python scripts/view_traces.py
 | 多会话侧边栏 | 标题栏「☰ 会话」抽屉：会话列表（标题/轮数/时间/当前高亮）、切换、新建、删除（带确认）。切换时服务端 reset Agent 并用 raw 干净文本重建多轮上下文——消息表 content 存渲染版、raw 存纯净终答，展示与 LLM 上下文分离 |
 | 认证权限 | Gradio 原生登录门禁（launch auth）+ users 表 pbkdf2 哈希（manage_users CLI 管理）；会话按用户隔离（sessions.user 归属 + /api 路由 cookie 鉴权 401/403）；无账号自动播种 admin（ADMIN_PASSWORD 环境变量） |
 | 端到端评测 | eval_e2e.py：真实链路跑评测集（来源命中 0.5 + 关键要点 0.3 + 引用格式 0.2，OOD 用例评诚实性），可选 --judge LLM 评审；报告落 data/eval/*.json |
+| OOD 透明度守卫 | 评测发现 LLM 偶发漏标【知识库无相关内容】（依从性非确定）→ Agent 终答处确定性兜底：循环内跟踪 knowledge_search 是否命中（格式锚点判定，多次调用任一命中即算）、web_search 是否使用；KB 空且终答无标注时自动前置补标，联网兜底用【…基于联网检索】、否则用【…模型通识】；history 与输出同步修正，展示/落库/多轮上下文三处一致 |
 
 ## 路线图
 
@@ -218,10 +219,10 @@ $ python scripts/view_traces.py
 - [x] 数据可视化·Mermaid 图表（system prompt 引导生成 + 前端原地渲染 SVG；本地内联 mermaid 库避 CDN，`mermaid.run` 去重无冲突）
 - [x] 文档预览·引用溯源直达（PDF 按页切片带页码元数据，引用可点击弹窗预览原文并定位到页；pdf.js vendored，docx 转 PDF/文本双通道降级）
 
-### 下一步优化方向（未开始）
+### 下一步优化方向
 
 **质量**
-- [ ] OOD 透明度标注加固：评测发现 LLM 偶发漏标【知识库无相关内容】，拟加后处理守卫（KB 空且无标注自动补）
+- [x] OOD 透明度标注守卫：Agent 侧确定性兜底——KB 检索为空且终答无标注时自动补标（区分通识/联网两种标注，见关键设计表）
 - [ ] 结构化切片：表格/标题边界感知（xlsx 行拼接、docx 表格目前偏粗）；多轮查询改写（指代消解后再检索）
 - [ ] 语义缓存：高频问题命中缓存秒回，省 token 降延迟
 

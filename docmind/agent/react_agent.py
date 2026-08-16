@@ -51,6 +51,16 @@ SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天�
    与正文互补而非重复；切勿输出裸的 mermaid 语法而漏掉代码围栏。"""
 
 
+# OOD 透明度标注守卫：评测发现 LLM 偶发漏标【知识库无相关内容】（依从性非确定），
+# 在 Agent 侧做确定性后处理兜底——KB 检索为空且终答无标注时自动补标。
+# 标注文本与 system prompt 规则 2 保持一致。
+_OOD_MARKER_KB_EMPTY = "【知识库无相关内容，以下为模型通识】"
+_OOD_MARKER_WEB = "【知识库无相关内容，以下基于联网检索】"
+_OOD_MARKER_KEY = "知识库无相关内容"      # 命中任一变体即视为已标注
+_KB_NO_HIT_KEY = "未通过相关性阈值"        # knowledge_search 空结果的判定锚点
+_KB_HIT_KEY = "[1] ("                    # knowledge_search 有结果的格式锚点
+
+
 @dataclass
 class AgentStep:
     """单步轨迹，用于 GUI 展示思考过程"""
@@ -71,6 +81,8 @@ class ReActAgent:
 
         openai_tools = self.registry.to_openai_tools() or None
         recent_signatures: list[str] = []   # 重复调用检测
+        # OOD 守卫状态：KB 是否被调用/是否命中、是否用过联网搜索
+        kb_called = kb_hit = web_used = False
 
         for _ in range(config.MAX_AGENT_STEPS):
             # 流式生成：边生成边 yield token 增量，结束后重建完整消息
@@ -121,6 +133,10 @@ class ReActAgent:
 
             # 模型给出最终回答（无工具调用）
             if not tool_calls_acc:
+                # OOD 透明度守卫：KB 检索过但为空、且终答未带任何标注 → 自动补标
+                if kb_called and not kb_hit and _OOD_MARKER_KEY not in answer:
+                    marker = _OOD_MARKER_WEB if web_used else _OOD_MARKER_KB_EMPTY
+                    answer = f"{marker}\n\n{answer}"
                 self.history.append({"role": "assistant", "content": answer})
                 yield AgentStep("final", answer)
                 return
@@ -161,6 +177,13 @@ class ReActAgent:
                     "tool_call_id": acc["id"] or f"call_{i}",
                     "content": result,
                 })
+                # OOD 守卫状态更新（多次调用时任一命中即算命中）
+                if name == "knowledge_search":
+                    kb_called = True
+                    if _KB_HIT_KEY in result and _KB_NO_HIT_KEY not in result:
+                        kb_hit = True
+                elif name == "web_search" and not result.startswith("[错误]"):
+                    web_used = True
 
         # 达到最大步数仍未收敛
         fallback = "抱歉，我尝试了多个步骤仍未能得出结论，请简化问题后重试。"
