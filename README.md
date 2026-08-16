@@ -30,6 +30,11 @@ flowchart TD
 
     A --> TRACE[调用链追踪\nLangfuse / 本地 JSONL]
     KB --> CACHE[向量索引缓存\n文件指纹失效策略]
+
+    GUI --> AUTH[登录门禁\npbkdf2 账号 · 会话按用户隔离]
+    GUI --> PV[引用溯源预览\npdf.js / Word转PDF / Sheet表格 / OCR]
+    AUTH --> DB[(SQLite\n会话 · 消息 · 反馈)]
+    A --> EVAL[端到端评测\neval_e2e.py 基线 0.956]
 ```
 
 文本版：
@@ -58,7 +63,7 @@ ToolRegistry（统一工具注册表）
 | 混合（BM25+向量+RRF） | 100% | **100%** | 0.902 |
 | 混合 + Rerank（gte-rerank-v2） | 100% | 94.1% | **0.920** |
 
-知识库扩充到 4 种格式 25 个切片后，纯向量在困难集出现真实漏召回，
+知识库扩充到 7 种格式（含 xlsx / 图片 OCR）28 个切片后，纯向量在困难集出现真实漏召回，
 混合检索将召回拉回 100%，Rerank 进一步提升排序质量（MRR 0.865 → 0.920）。
 Rerank 结果采用“绝对下限 + 相对头部比例”自适应过滤，代替固定阈值
 （固定阈值在语料变化后会把正确答案误杀，实测从 23.5% 修复回 94.1%）。
@@ -79,6 +84,15 @@ python -m docmind.cli
 python -m docmind.app
 ```
 
+首次启动自动创建账号 `admin`（密码取 `ADMIN_PASSWORD` 环境变量，默认 `admin123`），
+登录后访问。账号管理：
+
+```bash
+python -m docmind.manage_users add <用户名> <密码>     # 新增
+python -m docmind.manage_users reset <用户名> <密码>   # 改密
+python -m docmind.manage_users list                    # 列表
+```
+
 ## Docker 一键部署
 
 ```bash
@@ -97,6 +111,8 @@ docker compose up -d --build
 - 依赖层与代码层分离，改代码重建镜像不重装依赖
 - **SearXNG 自托管搜索引擎**随 compose 一起编排：容器内自动经
   `http://searxng:8080` 直连，作为 Tavily 的免费无限量兜底
+- Word 原文预览依赖 LibreOffice（镜像内安装 `libreoffice-core --no-install-recommends`）；
+  未安装时自动降级文本预览，不影响其余功能
 
 ## 联网搜索（时效性信息）
 
@@ -121,17 +137,22 @@ docmind/
 ├── llm.py                 # 百炼 LLM / Embedding 客户端封装
 ├── core.py                # 应用装配（接线图）
 ├── cli.py                 # 命令行入口
-├── app.py                 # Gradio Web 界面
+├── app.py                 # Gradio Web 界面（含预览弹窗/侧边栏等前端注入脚本）
+├── store.py               # SQLite 存储（用户/会话/消息/反馈，pbkdf2 认证）
+├── manage_users.py        # 账号管理 CLI
+├── eval_e2e.py            # 端到端评测（真实链路评分 + 报告）
 ├── trace.py               # 调用链追踪（Langfuse / 本地 JSONL 双后端）
+├── mermaid.min.js         # vendored mermaid（避 CDN）
+├── vendor/pdf*.js         # vendored pdf.js（预览用，避 CDN）
 ├── agent/
 │   ├── tools.py           # 工具注册表（统一本地/MCP 工具）
 │   └── react_agent.py     # 手写 ReAct 循环（核心）
 ├── rag/
-│   ├── chunker.py         # 文档加载与切片（Markdown 语义切片）
+│   ├── chunker.py         # 文档加载与切片（7 格式：md/txt/pdf/docx/xlsx/图片OCR）
 │   ├── vector_store.py    # 内存向量库（numpy 余弦检索 + 磁盘缓存）
-│   ├── cache.py           # 向量索引缓存（文件指纹失效策略）
+│   ├── cache.py           # 向量索引缓存（文件指纹 + schema 版本失效）
 │   ├── hybrid.py          # 混合检索：BM25 + 向量 → RRF → Rerank
-│   └── eval_set.py        # 检索评测集
+│   └── eval_set.py        # 检索评测集（47 题）
 └── mcp_client.py          # MCP 客户端（stdio 连接 + 工具转发）
 
 mcp_servers/
@@ -168,7 +189,7 @@ $ python scripts/view_traces.py
 | 防死循环 | ① `MAX_AGENT_STEPS` 步数上限 ② 连续重复调用检测并打断 |
 | 工具异常处理 | 异常不抛出，转为观察结果喂回 LLM，让模型自我纠正 |
 | 向量库选型 | 小规模用内存 numpy 暴力检索；`search()` 接口稳定，可平滑换 Chroma/Milvus |
-| 切片策略 | 500 字滑窗 + 80 字重叠，优先段落边界，防语义截断 |
+| 切片策略 | Markdown 按标题语义分段、小段合并超长段拆分；其余格式 280 字滑窗 + 40 字重叠优先换行断开；PDF 按页切片携带页码元数据 |
 | 防幻觉 | Prompt 强制"先检索后回答"，回答附来源标注 |
 | 深度思考 | `enable_thinking` 请求真实思维链，GUI 实时流式展示；思维链不回传 history（百炼多轮限制），模型不支持自动降级 |
 | 数据可视化 | Prompt 引导模型对流程/架构类问题输出 ` ```mermaid ` 图表；内联 vendored mermaid.min.js（避 CDN），前端用 `mermaid.run` 对 Gradio 生成的 `.mermaid` 容器原地渲染为 SVG |
@@ -196,6 +217,26 @@ $ python scripts/view_traces.py
 - [x] 引导追问按钮（回答末尾动态生成 3 个可点击追问建议，点击自动填入输入框并发送）
 - [x] 数据可视化·Mermaid 图表（system prompt 引导生成 + 前端原地渲染 SVG；本地内联 mermaid 库避 CDN，`mermaid.run` 去重无冲突）
 - [x] 文档预览·引用溯源直达（PDF 按页切片带页码元数据，引用可点击弹窗预览原文并定位到页；pdf.js vendored，docx 转 PDF/文本双通道降级）
+
+### 下一步优化方向（未开始）
+
+**质量**
+- [ ] OOD 透明度标注加固：评测发现 LLM 偶发漏标【知识库无相关内容】，拟加后处理守卫（KB 空且无标注自动补）
+- [ ] 结构化切片：表格/标题边界感知（xlsx 行拼接、docx 表格目前偏粗）；多轮查询改写（指代消解后再检索）
+- [ ] 语义缓存：高频问题命中缓存秒回，省 token 降延迟
+
+**安全合规**
+- [ ] Prompt 注入防护（知识库文档/网页内容中的恶意指令隔离）
+- [ ] 文档级 ACL：知识库按用户/角色授权（当前为登录隔离、知识库全员共享）
+- [ ] 管理后台：会话审计、👎 badcase 标注流转、用量看板
+
+**工程**
+- [ ] 单元测试 + CI 冒烟（当前零测试）
+- [ ] Docker 镜像补 LibreOffice、chat.db 卷挂载、健康检查
+
+**体验**
+- [ ] 动态追问：LLM 按回答内容生成针对性追问（当前为固定三问）
+- [ ] 引用锚点细化：预览定位到段落/表格级高亮
 
 ## License
 
