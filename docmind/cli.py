@@ -26,9 +26,16 @@ def main():
             continue
 
         print("DocMind > ", end="", flush=True)
+        streamed = False
         for step in agent.ask(question):
-            if step.kind == "final":
-                print(f"\n{step.text}\n")
+            if step.kind == "token":
+                streamed = True
+                print(step.text, end="", flush=True)
+            elif step.kind == "final":
+                if streamed:
+                    print("\n")
+                else:
+                    print(f"\n{step.text}\n")
             else:
                 print(f"\n  [{step.kind}] {step.text}", end="", flush=True)
 

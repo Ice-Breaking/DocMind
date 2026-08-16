@@ -309,25 +309,40 @@ def _render_trace(lines: list[str]) -> str:
 
 
 def respond_simple(question: str, history: list):
-    """流式输出思考过程，最后给出完整回答（Gradio messages 格式）。
+    """流式渲染：深度思考指示 → 逐 token 打字效果 → 思考轨迹。
     任何异常都兼底为一条完整消息，避免界面停留在“思考中”"""
     trace_lines = []
     final_answer = ""
+    partial = ""           # 流式累积的回答正文
+    thinking = True        # 是否处于“深度思考中”状态
     user_msg = {"role": "user", "content": question}
+
+    def render() -> str:
+        head = "🤔 深度思考中…" if thinking else "<sub>✓ 深度思考已完成</sub>\n\n"
+        tail = ""
+        if trace_lines:
+            tail = "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
+        return head + partial + tail
+
     try:
+        yield history + [user_msg, {"role": "assistant", "content": "🤔 深度思考中…"}]
         for step in agent.ask(question):
-            if step.kind == "final":
+            if step.kind == "token":
+                thinking = False
+                partial += step.text
+                yield history + [user_msg, {"role": "assistant", "content": render()}]
+            elif step.kind == "final":
                 final_answer = step.text
             else:
+                thinking = False
                 icon = "🔧" if step.kind == "tool_call" else "📥"
                 trace_lines.append(f"{icon} {step.text}")
-                partial = f"⏳ 思考中...\n\n{_render_trace(trace_lines)}"
-                yield history + [user_msg, {"role": "assistant", "content": partial}]
+                yield history + [user_msg, {"role": "assistant", "content": render()}]
     except Exception as e:  # noqa: BLE001
         final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
     if not final_answer:
-        final_answer = "⚠️ 未获得模型回复，请重试。"
-    full = final_answer
+        final_answer = partial or "⚠️ 未获得模型回复，请重试。"
+    full = f"<sub>✓ 深度思考已完成</sub>\n\n{final_answer}"
     if trace_lines:
         full += "\n\n---\n**🧠 Agent 思考过程：**\n\n" + "\n\n".join(trace_lines)
     yield history + [user_msg, {"role": "assistant", "content": full}]

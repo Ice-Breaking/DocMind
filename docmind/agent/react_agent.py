@@ -15,7 +15,7 @@ from datetime import date
 from docmind import config
 from docmind import trace
 from docmind.agent.tools import ToolRegistry
-from docmind.llm import chat
+from docmind.llm import _brief_messages, chat_stream
 
 SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天是 {date.today().isoformat()}。
 
@@ -30,7 +30,10 @@ SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天�
    获取联网信息交叉核对时效性，然后综合两方面结果作答；天气调用天气工具。
    引用搜索结果时注明来源链接与日期，并提醒用户自行核实。
 5. 检索结果不足以回答时，如实说明，不要猜测。
-6. 回答使用中文，简洁清晰。"""
+6. 回答使用中文，简洁清晰。
+7. 回答结构：先用一两句话给出核心结论；具体分析分条展开（有数据时附数值
+   与场景解读）；存在不确定性或风险时明确提示；最后用一个引导性问题结尾，
+   邀请用户继续深入。"""
 
 
 @dataclass
@@ -55,40 +58,70 @@ class ReActAgent:
         recent_signatures: list[str] = []   # 重复调用检测
 
         for _ in range(config.MAX_AGENT_STEPS):
+            # 流式生成：边生成边 yield token 增量，结束后重建完整消息
+            content_parts: list[str] = []
+            tool_calls_acc: dict[int, dict] = {}
+            usage = None
             try:
-                message = chat(self.history, tools=openai_tools)
+                with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
+                                input=_brief_messages(self.history)) as ctx:
+                    for chunk in chat_stream(self.history, tools=openai_tools):
+                        if getattr(chunk, "usage", None):
+                            usage = chunk.usage
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if delta is None:
+                            continue
+                        if delta.content:
+                            content_parts.append(delta.content)
+                            yield AgentStep("token", delta.content)
+                        if delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                acc = tool_calls_acc.setdefault(
+                                    tc.index, {"id": "", "name": "", "arguments": ""}
+                                )
+                                if tc.id:
+                                    acc["id"] = tc.id
+                                if tc.function:
+                                    if tc.function.name:
+                                        acc["name"] += tc.function.name
+                                    if tc.function.arguments:
+                                        acc["arguments"] += tc.function.arguments
+                    answer = "".join(content_parts)
+                    tool_names = [v["name"] for v in tool_calls_acc.values()]
+                    ctx["output"] = (answer or f"[调用工具: {tool_names}]")[:300]
+                    if usage:
+                        ctx["usage"] = {"input": usage.prompt_tokens, "output": usage.completion_tokens}
             except Exception as e:  # noqa: BLE001 - 模型调用失败不能弄崩生成器
                 error_msg = f"抱歉，模型调用失败（已自动重试过）：{e}\n请稍后重试。"
                 self.history.append({"role": "assistant", "content": error_msg})
                 yield AgentStep("final", error_msg)
                 return
 
-            # 模型给出最终回答
-            if not message.tool_calls:
-                answer = message.content or ""
+            # 模型给出最终回答（无工具调用）
+            if not tool_calls_acc:
                 self.history.append({"role": "assistant", "content": answer})
                 yield AgentStep("final", answer)
                 return
 
             # 模型要求调用工具：先记录 assistant 消息（含 tool_calls）
+            ordered_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
             self.history.append({
                 "role": "assistant",
-                "content": message.content or "",
+                "content": answer,
                 "tool_calls": [
                     {
-                        "id": tc.id,
+                        "id": acc["id"] or f"call_{i}",
                         "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
+                        "function": {"name": acc["name"], "arguments": acc["arguments"]},
                     }
-                    for tc in message.tool_calls
+                    for i, acc in enumerate(ordered_calls)
                 ],
             })
 
-            for tc in message.tool_calls:
-                name, args = tc.function.name, tc.function.arguments
+            for i, acc in enumerate(ordered_calls):
+                name, args = acc["name"], acc["arguments"]
                 yield AgentStep("tool_call", f"调用工具 `{name}`，参数: {args}")
 
                 # 防死循环：同样的调用连续出现两次则打断
@@ -105,7 +138,7 @@ class ReActAgent:
                 yield AgentStep("tool_result", f"`{name}` 返回: {result}")
                 self.history.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": acc["id"] or f"call_{i}",
                     "content": result,
                 })
 

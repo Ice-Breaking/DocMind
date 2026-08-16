@@ -78,6 +78,27 @@ def chat(messages: list[dict], tools: list[dict] | None = None):
         return msg
 
 
+def chat_stream(messages: list[dict], tools: list[dict] | None = None):
+    """流式对话：yield ChatCompletionChunk，调用方自行累积内容与 tool_calls。
+
+    带 usage 统计（stream_options）；创建阶段的瞬时错误同样退避重试。
+    """
+    kwargs = {"stream": True, "stream_options": {"include_usage": True}}
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+
+    def _create():
+        return get_client().chat.completions.create(
+            model=config.CHAT_MODEL,
+            messages=messages,
+            temperature=0.1,
+            **kwargs,
+        )
+
+    yield from _with_retry(_create)
+
+
 def embed(texts: list[str]) -> list[list[float]]:
     """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交"""
     batch_size = 10
