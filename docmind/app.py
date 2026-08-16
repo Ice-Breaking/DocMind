@@ -171,6 +171,16 @@ footer { display: none !important; }
     background: #f4f6ff !important; border-color: #c7d2fe !important;
     color: #6366f1 !important;
 }
+
+/* Mermaid 图表容器：Gradio 将 ```mermaid 代码块渲染为 div.mermaid，
+   这里给它白底 + 圆角 + 轻阴影，与气泡风格一致；渲染前显示原始代码，渲染后为 SVG */
+.message.bot div.mermaid {
+    margin: 10px 0 !important; padding: 12px !important;
+    background: #ffffff !important; border: 1px solid #e9ecf7 !important;
+    border-radius: 10px !important; box-shadow: 0 1px 4px rgba(30,41,59,.04) !important;
+    overflow-x: auto !important; text-align: center !important;
+}
+.message.bot div.mermaid svg { max-width: 100% !important; height: auto !important; display: inline-block !important; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -342,6 +352,35 @@ FOLD_SCRIPT = """
   setInterval(renderSuggestions, 800);
 })();
 </script>
+<script>
+// Mermaid 图表渲染：Gradio 会把 ```mermaid 代码块输出为 <div class="mermaid">原始代码</div>，
+// 这里用 mermaid.run 对这些容器「原地渲染」。相比自行抽取围栏再 innerHTML 替换，
+// 这种方式不与 Gradio/追问脚本的 DOM 重建冲突，也不会产生重复图表。
+(() => {
+  if (window.__dmMermaidScriptInstalled) return;
+  window.__dmMermaidScriptInstalled = true;
+
+  function ensureInited() {
+    if (!window.mermaid || window.__dmMermaidInited) return;
+    window.__dmMermaidInited = true;
+    window.mermaid.initialize({ startOnLoad: false, theme: "default", securityLevel: "loose" });
+  }
+
+  function scan() {
+    if (!window.mermaid) return;
+    ensureInited();
+    // 找出 Gradio 已生成、但尚未被 mermaid 处理的 .mermaid 容器（流式结束后才稳定出现）
+    const nodes = Array.from(document.querySelectorAll(".message.bot div.mermaid")).filter(
+      (n) => n.getAttribute("data-processed") !== "true" && n.textContent.trim()
+    );
+    if (!nodes.length) return;
+    // mermaid.run 原地渲染并自动打上 data-processed 标记，天然去重、无重复图表
+    window.mermaid.run({ nodes: nodes }).catch(() => {});
+  }
+  scan();
+  setInterval(scan, 600);
+})();
+</script>
 """
 
 HEADER_HTML = f"""
@@ -494,10 +533,33 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 if __name__ == "__main__":
     # Gradio 6：theme / css 移到 launch()；折叠脚本与全局布局样式经 head 注入
     # （head 注入的内容不会被 Gradio 的 CSS 作用域重写）
+    #
+    # Mermaid 图表库：通过 FastAPI 路由 serve 本地 JS 文件
+    # （避免 CDN 不可达 + 避免 head_paths 内联 HTML 导致 </ 序列中断解析）
+    # 注意：launch() 内部会重建 demo.app，因此必须用 prevent_thread_lock=True
+    # 让 launch 返回后，再在新 demo.app 上注册路由
+    import time
+    from fastapi.responses import FileResponse
+    _mermaid_dir = os.path.dirname(os.path.abspath(__file__))
+
     demo.launch(
         theme=theme,
         css=CUSTOM_CSS,
-        head=FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>",
+        head=f'<script src="/mermaid.min.js"></script>\n'
+             + FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>",
         server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+        prevent_thread_lock=True,
     )
+
+    @demo.app.get("/mermaid.min.js", include_in_schema=False)
+    async def _serve_mermaid():
+        return FileResponse(os.path.join(_mermaid_dir, "mermaid.min.js"),
+                            media_type="application/javascript")
+
+    # 阻塞主线程（保持服务运行）
+    try:
+        while True:
+            time.sleep(86400)
+    except (KeyboardInterrupt, SystemExit):
+        demo.close()

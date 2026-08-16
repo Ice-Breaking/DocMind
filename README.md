@@ -171,6 +171,7 @@ $ python scripts/view_traces.py
 | 切片策略 | 500 字滑窗 + 80 字重叠，优先段落边界，防语义截断 |
 | 防幻觉 | Prompt 强制"先检索后回答"，回答附来源标注 |
 | 深度思考 | `enable_thinking` 请求真实思维链，GUI 实时流式展示；思维链不回传 history（百炼多轮限制），模型不支持自动降级 |
+| 数据可视化 | Prompt 引导模型对流程/架构类问题输出 ` ```mermaid ` 图表；内联 vendored mermaid.min.js（避 CDN），前端用 `mermaid.run` 对 Gradio 生成的 `.mermaid` 容器原地渲染为 SVG |
 
 ## 路线图
 
@@ -181,6 +182,7 @@ $ python scripts/view_traces.py
 - [x] Docker 一键部署（compose 编排，Key 注入不进镜像，索引缓存/知识库卷持久化）
 - [x] 深度思考·真实思维链（百炼 enable_thinking → reasoning_content 流式展示，完成后折叠摘要，模型不支持自动降级）
 - [x] 引导追问按钮（回答末尾动态生成 3 个可点击追问建议，点击自动填入输入框并发送）
+- [x] 数据可视化·Mermaid 图表（system prompt 引导生成 + 前端原地渲染 SVG；本地内联 mermaid 库避 CDN，`mermaid.run` 去重无冲突）
 
 ## License
 
