@@ -296,6 +296,10 @@ footer { display: none !important; }
 .dm-sd-item:hover .dm-sd-del { opacity: .7; }
 .dm-sd-del:hover { opacity: 1 !important; background: #fee2e2; }
 .dm-sd-empty { color: #94a3b8; font-size: 12px; text-align: center; padding: 24px 0; }
+.dm-sd-user { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid #f1f5f9; font-size: 12px; flex: none; }
+.dm-sd-who { color: #475569; font-weight: 600; }
+.dm-sd-logout { color: #6366f1; text-decoration: none; }
+.dm-sd-logout:hover { text-decoration: underline; }
 """
 
 # 全局布局 CSS：必须经 launch(head=...) 注入。
@@ -1067,10 +1071,28 @@ FOLD_SCRIPT = """
     return true;
   }
 
+  // 取当前登录用户（Gradio auth cookie → /gradio_api/token）
+  async function fetchUser() {
+    try {
+      const prefix = (window.gradio_config && window.gradio_config.api_prefix) || '/gradio_api';
+      const r = await fetch(prefix + '/token');
+      if (r.ok) return (await r.json()).user || '';
+    } catch (e) { /* 忽略 */ }
+    return '';
+  }
+
   let tries = 0;
-  function boot() {
+  async function boot() {
+    const user = await fetchUser();
+    window.__dmUser = user;
+    const storedUser = localStorage.getItem('dm_session_user');
     let id = localStorage.getItem('dm_session_id');
-    if (!id) { id = newId(); localStorage.setItem('dm_session_id', id); }
+    // 无会话 或 登录用户变化 → 开新会话（跨账号不串数据）
+    if (!id || (user && storedUser !== user)) {
+      id = newId();
+      localStorage.setItem('dm_session_id', id);
+    }
+    if (user) localStorage.setItem('dm_session_user', user);
     if (!writeSid(id)) { if (++tries < 25) setTimeout(boot, 400); return; }
     // 等 Gradio 同步完状态再触发历史恢复
     setTimeout(() => {
@@ -1172,8 +1194,18 @@ FOLD_SCRIPT = """
     }, 400);
   }
 
+  function renderUserBar() {
+    const bar = document.querySelector('#dm-sessions-drawer .dm-sd-user');
+    if (!bar) return;
+    const who = window.__dmUser || '';
+    bar.innerHTML = who
+      ? '<span class="dm-sd-who">👤 ' + who + '</span><a class="dm-sd-logout" href="/logout">退出登录</a>'
+      : '';
+  }
+
   function openDrawer() {
     document.getElementById('dm-sessions-drawer').classList.add('dm-open');
+    renderUserBar();
     refresh();
   }
   function closeDrawer() {
@@ -1191,6 +1223,7 @@ FOLD_SCRIPT = """
       + '<span class="dm-sd-head-title">💬 会话历史</span>'
       + '<button id="dm-sd-new">＋ 新会话</button>'
       + '<button id="dm-sd-close" title="关闭">✕</button></div>'
+      + '<div class="dm-sd-user"></div>'
       + '<div id="dm-sd-list"></div>';
     document.body.appendChild(drawer);
     drawer.querySelector('#dm-sd-new').onclick = () => {
@@ -1340,7 +1373,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     # 注意：必须绑定真正的 generator function（yield 在函数体内）。
     # Gradio 6 用 isgeneratorfunction 识别流式，lambda 返回 generator 对象不满足，
     # 会被当普通值 postprocess 而报 messages format 错误。
-    def persist_pair(session_id, question, final_history):
+    def persist_pair(session_id, question, final_history, user=""):
         """本轮用户问题 + 最终回答落库（失败不影响主链路）。
 
         assistant 同时存渲染版 content（展示）与 raw（agent.history 末尾的纯净终答，
@@ -1352,22 +1385,22 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
             clean = ""
             if agent.history and agent.history[-1].get("role") == "assistant":
                 clean = agent.history[-1].get("content", "")
-            chatstore.append_message(session_id, "user", question)
+            chatstore.append_message(session_id, "user", question, user=user)
             chatstore.append_message(session_id, "assistant",
-                                     final_history[-1]["content"], raw=clean)
+                                     final_history[-1]["content"], raw=clean, user=user)
         except Exception as e:  # noqa: BLE001
             print(f"[警告] 会话持久化失败: {e}")
 
     def make_example_handler(ex):
-        def handler(history, session_id):
+        def handler(history, session_id, request: gr.Request):
             last = history
             for h in respond_simple(ex, history):
                 last = h
                 yield h
-            persist_pair(session_id, ex, last)
+            persist_pair(session_id, ex, last, user=request.username or "")
         return handler
 
-    def submit(question: str, history: list, session_id: str):
+    def submit(question: str, history: list, session_id: str, request: gr.Request):
         if not question.strip():
             yield history
             return
@@ -1375,9 +1408,9 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         for h in respond_simple(question, history):
             last = h
             yield h
-        persist_pair(session_id, question, last)
+        persist_pair(session_id, question, last, user=request.username or "")
 
-    def load_history(session_id):
+    def load_history(session_id, request: gr.Request):
         """恢复历史对话（页面加载/侧边栏切换均走这里）。
 
         除回填 Chatbot 展示内容外，同步用 raw 干净文本重建 Agent 多轮上下文，
@@ -1387,6 +1420,10 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         if not session_id:
             return []
         try:
+            owner = chatstore.session_owner(session_id)
+            user = request.username or ""
+            if owner not in (None, "", user):
+                return []   # 他人会话：不恢复（sidebar 也不会列出）
             msgs = chatstore.load_session(session_id)
             pairs = chatstore.load_raw_pairs(session_id)
             if pairs:
@@ -1410,6 +1447,11 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
 if __name__ == "__main__":
     # Gradio 6：theme / css 移到 launch()；折叠脚本与全局布局样式经 head 注入
     # （head 注入的内容不会被 Gradio 的 CSS 作用域重写）
+    # 认证门禁：无任何账号时播种 admin（密码取 ADMIN_PASSWORD 环境变量）
+    chatstore.ensure_seed_admin()
+
+    def _login_auth(username: str, password: str) -> bool:
+        return chatstore.verify_user(username, password)
     #
     # Mermaid 图表库：通过 FastAPI 路由 serve 本地 JS 文件
     # （避免 CDN 不可达 + 避免 head_paths 内联 HTML 导致 </ 序列中断解析）
@@ -1422,6 +1464,8 @@ if __name__ == "__main__":
     demo.launch(
         theme=theme,
         css=CUSTOM_CSS,
+        auth=_login_auth,
+        auth_message="DocMind 知识助理 · 请登录后使用",
         head=f'<script src="/mermaid.min.js"></script>\n'
              + FOLD_SCRIPT + f"<style>{LAYOUT_CSS}</style>",
         server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
@@ -1513,6 +1557,29 @@ if __name__ == "__main__":
             return FileResponse(out_pdf, media_type="application/pdf")
         return FileResponse(path)
 
+    # ---- 当前用户解析：复用 Gradio 登录 cookie（access-token-{cookie_id}） ----
+    import fastapi as _fastapi
+
+    def _current_user(request: _fastapi.Request) -> str:
+        token = (request.cookies.get(f"access-token-{demo.app.cookie_id}")
+                 or request.cookies.get(f"access-token-unsecure-{demo.app.cookie_id}"))
+        return (demo.app.tokens.get(token) if token else None) or ""
+
+    def _require_user(request: _fastapi.Request) -> str:
+        """自定义 /api/* 路由不受 Gradio 登录页保护，需自行校验登录态"""
+        user = _current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="未登录")
+        return user
+
+    def _check_session_access(request: _fastapi.Request, session_id: str) -> None:
+        """会话归属校验：本人或无主历史会话放行，他人会话 403"""
+        owner = chatstore.session_owner(session_id)
+        if owner is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        if owner not in ("", _current_user(request)):
+            raise HTTPException(status_code=403, detail="无权访问该会话")
+
     # ---- 反馈闭环：👍/👎 评价（session_id + 消息序号唯一定位，重复点击覆盖） ----
     from pydantic import BaseModel
 
@@ -1522,9 +1589,11 @@ if __name__ == "__main__":
         rating: str
 
     @demo.app.post("/api/feedback", include_in_schema=False)
-    async def _save_feedback(fb: FeedbackIn):
+    async def _save_feedback(fb: FeedbackIn, request: _fastapi.Request):
+        _require_user(request)
         if fb.rating not in ("up", "down"):
             raise HTTPException(status_code=400, detail="rating 必须是 up/down")
+        _check_session_access(request, fb.session_id)
         try:
             chatstore.save_feedback(fb.session_id, fb.seq, fb.rating)
         except Exception as e:  # noqa: BLE001
@@ -1532,19 +1601,24 @@ if __name__ == "__main__":
         return {"ok": True}
 
     @demo.app.get("/api/feedback/{session_id}", include_in_schema=False)
-    async def _get_feedback(session_id: str):
+    async def _get_feedback(session_id: str, request: _fastapi.Request):
+        _require_user(request)
+        _check_session_access(request, session_id)
         return chatstore.get_feedback(session_id)
 
     # ---- 多会话侧边栏：会话列表 + 删除 ----
     @demo.app.get("/api/sessions", include_in_schema=False)
-    async def _list_sessions():
+    async def _list_sessions(request: _fastapi.Request):
+        user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500
         try:
-            return chatstore.list_sessions()
+            return chatstore.list_sessions(user=user)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"会话列表获取失败: {e}")
 
     @demo.app.delete("/api/sessions/{session_id}", include_in_schema=False)
-    async def _delete_session(session_id: str):
+    async def _delete_session(session_id: str, request: _fastapi.Request):
+        _require_user(request)
+        _check_session_access(request, session_id)
         try:
             chatstore.delete_session(session_id)
         except Exception as e:  # noqa: BLE001

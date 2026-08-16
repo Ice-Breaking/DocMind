@@ -176,6 +176,8 @@ $ python scripts/view_traces.py
 | 会话持久化 | SQLite 单文件（data/chat.db，标准库零依赖）：session_id 由前端 localStorage 生成，引导脚本写入隐藏框并触发历史恢复；清空对话即开新会话 |
 | 反馈闭环 | 完成的回答下 👍/👎（稳定性闸门后追加），POST /api/feedback 按 session+消息序号 upsert；刷新后 GET 恢复选中态，👎 即 badcase 收集入口 |
 | 多会话侧边栏 | 标题栏「☰ 会话」抽屉：会话列表（标题/轮数/时间/当前高亮）、切换、新建、删除（带确认）。切换时服务端 reset Agent 并用 raw 干净文本重建多轮上下文——消息表 content 存渲染版、raw 存纯净终答，展示与 LLM 上下文分离 |
+| 认证权限 | Gradio 原生登录门禁（launch auth）+ users 表 pbkdf2 哈希（manage_users CLI 管理）；会话按用户隔离（sessions.user 归属 + /api 路由 cookie 鉴权 401/403）；无账号自动播种 admin（ADMIN_PASSWORD 环境变量） |
+| 端到端评测 | eval_e2e.py：真实链路跑评测集（来源命中 0.5 + 关键要点 0.3 + 引用格式 0.2，OOD 用例评诚实性），可选 --judge LLM 评审；报告落 data/eval/*.json |
 
 ## 路线图
 
@@ -185,6 +187,8 @@ $ python scripts/view_traces.py
 - [x] Excel/图片预览（xlsx Sheet 页签表格；图片原图 + OCR 文本对照，点击引用直达）
 - [x] 会话持久化 + 反馈闭环（SQLite 存储刷新自动恢复；👍👎 评价落库，badcase 可溯源）
 - [x] 多会话侧边栏（列表/切换/新建/删除；切换重建对应会话的 LLM 多轮上下文）
+- [x] 认证权限（登录门禁 + pbkdf2 账号体系 + 会话按用户隔离）
+- [x] 端到端评测集（真实链路评分 + OOD 诚实性 + LLM 评审 + JSON 报告）
 - [x] 向量索引持久化缓存（文件指纹失效策略，启动建库 2.1s → 0.002s，零 API 调用）
 - [x] 对话调用链追踪（Langfuse / 本地 JSONL 双后端，覆盖 LLM 调用 + 工具执行 + token 用量）
 - [x] Docker 一键部署（compose 编排，Key 注入不进镜像，索引缓存/知识库卷持久化）
