@@ -11,7 +11,9 @@ from collections import defaultdict
 import fastapi
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from docmind import config, semantic_cache, store
 
@@ -28,6 +30,8 @@ def _require_admin(request, app) -> str:
         raise HTTPException(status_code=401, detail="未登录")
     if not store.is_admin(user):
         raise HTTPException(status_code=403, detail="需要管理员权限")
+    if store.get_must_change_pwd(user):
+        raise HTTPException(status_code=403, detail={"code": "MUST_CHANGE_PWD", "message": "请先修改密码"})
     return user
 
 
@@ -67,16 +71,32 @@ def _trace_usage() -> dict:
     return agg
 
 
+# 成本估算价目表：每千 token 价格（元），input / output（alerts 成本规则共用）
+MODEL_PRICING = {
+    "qwen-plus": (0.004, 0.012),
+    "qwen-turbo": (0.002, 0.006),
+    "qwen-max": (0.02, 0.06),
+    "qwen-flash": (0.001, 0.003),
+    "gpt-4o": (0.01, 0.03),
+    "gpt-4o-mini": (0.0006, 0.0024),
+}
+_DEFAULT_PRICING = (0.005, 0.015)
+
+
 class BadcaseStatusIn(BaseModel):
-    status: str          # pending / resolved / ignored
-    note: str = ""
+    status: Literal["pending", "resolved", "ignored"]
+    note: str = Field(default="", max_length=500)
 
 
 def register_admin_routes(app) -> None:
     @app.get("/api/me", include_in_schema=False)
     async def _me(request: fastapi.Request):
         user = _current_user(request, app)
-        return {"user": user, "is_admin": bool(user and store.is_admin(user))}
+        return {
+            "user": user,
+            "is_admin": bool(user and store.is_admin(user)),
+            "must_change_pwd": bool(user and store.get_must_change_pwd(user))
+        }
 
     @app.get("/api/admin/overview", include_in_schema=False)
     async def _overview(request: fastapi.Request):
@@ -97,7 +117,16 @@ def register_admin_routes(app) -> None:
         if body.status not in ("pending", "resolved", "ignored"):
             raise HTTPException(status_code=400, detail="status 非法")
         store.set_badcase_status(fid, body.status, body.note)
+        user = _current_user(request, app)
+        store.record_audit(user, "badcase.update", f"feedback#{fid}", body.status)
         return {"ok": True}
+
+    @app.get("/api/admin/queries", include_in_schema=False)
+    async def _queries(request: fastapi.Request, user: str = "", q: str = "",
+                       days: int = 0, limit: int = 500):
+        """管理员查看用户提问记录：按用户/关键词/时间过滤"""
+        _require_admin(request, app)
+        return JSONResponse(store.list_user_queries(user, q, days, limit))
 
     @app.get("/api/admin/sessions", include_in_schema=False)
     async def _sessions(request: fastapi.Request):
@@ -108,6 +137,224 @@ def register_admin_routes(app) -> None:
     async def _session_messages(sid: str, request: fastapi.Request):
         _require_admin(request, app)
         return JSONResponse(store.get_session_messages(sid))
+
+    @app.post("/api/admin/reindex", include_in_schema=False)
+    async def _reindex(request: fastapi.Request):
+        """手动触发知识库增量重建：逐文件 manifest 对比，只处理变化文件"""
+        _require_admin(request, app)
+        from docmind.core import rebuild_knowledge_index
+        result = rebuild_knowledge_index()
+        if "error" in result:
+            status = 409 if "正在重建" in result["error"] else 500
+            return JSONResponse({"ok": False, "result": result}, status_code=status)
+        return {"ok": True, "result": result}
+
+    # ---- 检索日志端点 ----
+    @app.get("/api/admin/traces", include_in_schema=False)
+    async def _traces(request: fastapi.Request, page: int = 1, page_size: int = 50,
+                      kind: str = "", status: str = "", q: str = "",
+                      start: str = "", end: str = "", kb: str = ""):
+        """检索日志：按类型/状态/关键词/时间范围/知识库过滤（start/end 为 YYYY-MM-DD），倒序分页"""
+        _require_admin(request, app)
+        path = config.TRACE_LOG_PATH
+        all_items = []
+        if not os.path.exists(path):
+            return JSONResponse({"items": [], "total": 0})
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()[-5000:]  # 硬上限：只读最近 5000 行
+        except OSError:
+            return JSONResponse({"items": [], "total": 0})
+
+        for line in reversed(lines):
+            try:
+                d = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            # kind 筛选
+            if kind and d.get("kind") != kind:
+                continue
+            # 状态筛选（ok / error）
+            if status and d.get("status") != status:
+                continue
+            # 知识库筛选（阶段埋点 span 携带 kb 标签）
+            if kb and str(d.get("kb", "")) != kb:
+                continue
+            # 时间范围筛选（ts 日期部分按 ISO 字符串比较）
+            day = str(d.get("ts", ""))[:10]
+            if start and day < start:
+                continue
+            if end and day > end:
+                continue
+            # q 关键词过滤（匹配 name / model 字段）
+            if q:
+                q_lower = q.lower()
+                if q_lower not in str(d.get("name", "")).lower() and q_lower not in str(d.get("model", "")).lower():
+                    continue
+            all_items.append(d)
+
+        total = len(all_items)
+        # 分页
+        start = (page - 1) * page_size
+        end = start + page_size
+        items = all_items[start:end]
+        return JSONResponse({"items": items, "total": total})
+
+    # ---- 用量成本端点（价目表见模块级 MODEL_PRICING） ----
+    @app.get("/api/admin/usage", include_in_schema=False)
+    async def _usage_detail(request: fastapi.Request, days: int = 30):
+        _require_admin(request, app)
+        path = config.TRACE_LOG_PATH
+        if not os.path.exists(path):
+            return JSONResponse({"summary": {"total_calls": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0}, "by_model": [], "daily": []})
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return JSONResponse({"summary": {"total_calls": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0}, "by_model": [], "daily": []})
+
+        import time as _time
+        now = _time.time()
+        cutoff_ts = now - days * 86400
+
+        by_model = {}
+        daily = {}
+        total_calls = 0
+        total_input = 0
+        total_output = 0
+        total_cost = 0.0
+
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if d.get("kind") != "generation":
+                continue
+            # 时间过滤
+            ts_str = str(d.get("ts", ""))
+            if len(ts_str) >= 10:
+                try:
+                    from datetime import datetime as _dt
+                    dt = _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                    if dt.timestamp() < cutoff_ts:
+                        continue
+                    day = ts_str[:10]
+                except ValueError:
+                    continue
+            else:
+                continue
+
+            model = d.get("model", "unknown")
+            usage = d.get("usage") or {}
+            inp = usage.get("input", 0)
+            out = usage.get("output", 0)
+            pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
+            cost = (inp / 1000.0) * pricing[0] + (out / 1000.0) * pricing[1]
+
+            total_calls += 1
+            total_input += inp
+            total_output += out
+            total_cost += cost
+
+            # 按模型聚合
+            if model not in by_model:
+                by_model[model] = {"model": model, "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
+            by_model[model]["calls"] += 1
+            by_model[model]["input_tokens"] += inp
+            by_model[model]["output_tokens"] += out
+            by_model[model]["cost"] += cost
+
+            # 按日期聚合
+            if day not in daily:
+                daily[day] = {"date": day, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
+            daily[day]["input_tokens"] += inp
+            daily[day]["output_tokens"] += out
+            daily[day]["cost"] += cost
+
+        # cost 保留 4 位小数
+        for m in by_model.values():
+            m["cost"] = round(m["cost"], 4)
+        for d in daily.values():
+            d["cost"] = round(d["cost"], 4)
+
+        return JSONResponse({
+            "summary": {
+                "total_calls": total_calls,
+                "total_input_tokens": total_input,
+                "total_output_tokens": total_output,
+                "total_cost": round(total_cost, 4),
+            },
+            "by_model": sorted(by_model.values(), key=lambda x: x["cost"], reverse=True),
+            "daily": sorted(daily.values(), key=lambda x: x["date"]),
+        })
+
+    @app.get("/api/admin/usage/top-queries", include_in_schema=False)
+    async def _top_queries(request: fastapi.Request, days: int = 30, limit: int = 10):
+        """高成本 Query Top N：以 generation 记录的最后一条用户消息聚合调用数/token/成本"""
+        _require_admin(request, app)
+        path = config.TRACE_LOG_PATH
+        empty = {"items": [], "total": 0}
+        if not os.path.exists(path):
+            return JSONResponse(empty)
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return JSONResponse(empty)
+
+        import time as _time
+        cutoff_ts = _time.time() - days * 86400
+
+        agg = {}
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if d.get("kind") != "generation":
+                continue
+            ts_str = str(d.get("ts", ""))
+            if len(ts_str) < 19:
+                continue
+            try:
+                from datetime import datetime as _dt
+                if _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S").timestamp() < cutoff_ts:
+                    continue
+            except ValueError:
+                continue
+
+            # 取最后一条用户消息作为 Query 标识（截断防爆）
+            query = ""
+            for m in reversed(d.get("input") or []):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    query = str(m.get("content") or "").strip()[:80]
+                    break
+            if not query:
+                continue
+
+            model = d.get("model", "unknown")
+            usage = d.get("usage") or {}
+            inp = usage.get("input", 0)
+            out = usage.get("output", 0)
+            pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
+            cost = (inp / 1000.0) * pricing[0] + (out / 1000.0) * pricing[1]
+
+            item = agg.setdefault(query, {
+                "query": query, "calls": 0,
+                "input_tokens": 0, "output_tokens": 0, "cost": 0.0,
+            })
+            item["calls"] += 1
+            item["input_tokens"] += inp
+            item["output_tokens"] += out
+            item["cost"] += cost
+
+        items = sorted(agg.values(), key=lambda x: x["cost"], reverse=True)
+        for it in items:
+            it["cost"] = round(it["cost"], 4)
+        limit = max(1, min(limit, 50))
+        return JSONResponse({"items": items[:limit], "total": len(items)})
 
     @app.get("/admin", include_in_schema=False)
     async def _admin_page(request: fastapi.Request):
@@ -160,6 +407,7 @@ ADMIN_HTML = """<!DOCTYPE html>
 <div class="head">
   <h1>📊 DocMind 管理后台</h1>
   <span id="who" style="font-size:12px;color:var(--sub)"></span>
+  <button id="reindex" class="mini re" title="增量重建知识库索引（只处理变化文件）">🔄 重建索引</button>
   <a href="/">← 返回对话</a>
 </div>
 <div class="tabs">
@@ -261,6 +509,30 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   renderers[b.dataset.tab]();
 });
 api('/api/me').then(d => { if (d) $('#who').textContent = '👑 ' + d.user; });
+
+/* ---------- 一键重建知识库索引（增量） ---------- */
+$('#reindex').onclick = async () => {
+  if (!confirm('开始增量重建知识库索引？（只对变化的文件重新切片与向量化）')) return;
+  const btn = $('#reindex');
+  btn.disabled = true; btn.textContent = '重建中…';
+  try {
+    const r = await fetch('/api/admin/reindex', {method: 'POST'});
+    const d = await r.json();
+    if (d && d.ok) {
+      const res = d.result || {};
+      alert(res.full_rebuild
+        ? `已全量重建，共 ${res.chunks} 个切片`
+        : `增量重建完成：新增 ${res.added} / 修改 ${res.modified} / 删除 ${res.removed} / 未变 ${res.unchanged} 个文件，共 ${res.chunks} 个切片`);
+    } else {
+      alert('重建未完成：' + ((d && d.result && d.result.error) || ('HTTP ' + r.status)));
+    }
+  } catch (e) {
+    alert('重建请求失败: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '🔄 重建索引';
+  }
+};
+
 renderUsage();
 </script>
 </body>

@@ -10,11 +10,15 @@
 """
 import contextlib
 import json
+import logging
 import os
 import time
 import uuid
 
 from docmind import config
+from docmind.pii import mask_pii
+
+logger = logging.getLogger(__name__)
 
 
 def _try_init_langfuse():
@@ -28,14 +32,29 @@ def _try_init_langfuse():
             secret_key=config.LANGFUSE_SECRET_KEY,
             host=config.LANGFUSE_HOST,
         )
-        print(f"[Trace] Langfuse 追踪已启用 → {config.LANGFUSE_HOST}")
+        logger.info(f"Langfuse 追踪已启用 → {config.LANGFUSE_HOST}")
         return client
     except Exception as e:  # noqa: BLE001 - SDK 初始化失败降级本地日志
-        print(f"[警告] Langfuse 初始化失败，降级为本地 JSONL 日志: {e}")
+        logger.warning(f"Langfuse 初始化失败，降级为本地 JSONL 日志: {e}")
         return None
 
 
 _langfuse = _try_init_langfuse()
+
+
+def _mask_record(record: dict) -> dict:
+    """Recursively mask PII in string values."""
+    masked = {}
+    for key, value in record.items():
+        if isinstance(value, str):
+            masked[key] = mask_pii(value)
+        elif isinstance(value, dict):
+            masked[key] = _mask_record(value)
+        elif isinstance(value, list):
+            masked[key] = [mask_pii(v) if isinstance(v, str) else v for v in value]
+        else:
+            masked[key] = value
+    return masked
 
 
 def _append_jsonl(record: dict) -> None:
@@ -44,7 +63,7 @@ def _append_jsonl(record: dict) -> None:
         with open(config.TRACE_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception as e:  # noqa: BLE001
-        print(f"[警告] 追踪日志写入失败: {e}")
+        logger.warning(f"追踪日志写入失败: {e}")
 
 
 @contextlib.contextmanager
@@ -85,7 +104,7 @@ def span(name: str, kind: str = "span", **meta):
         except Exception as e:  # noqa: BLE001 - Langfuse 故障不影响主链路
             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                 raise
-            print(f"[警告] Langfuse 上报失败（本次降级 JSONL）: {e}")
+            logger.warning(f"Langfuse 上报失败（本次降级 JSONL）: {e}")
 
     # 本地 JSONL 后端（未配置 Langfuse 或降级）
     record = {
@@ -103,4 +122,4 @@ def span(name: str, kind: str = "span", **meta):
     finally:
         record["duration_ms"] = round((time.time() - start) * 1000)
         record.update({k: v for k, v in data.items() if v is not None})
-        _append_jsonl(record)
+        _append_jsonl(_mask_record(record))

@@ -20,3 +20,7 @@ data/preview_cache/
 data/ocr_cache/
 data/chat.db
 data/cache.db
+
+# 运行时数据不入库（含会话 trace 日志）
+data/trace_log.jsonl
+data/backups/

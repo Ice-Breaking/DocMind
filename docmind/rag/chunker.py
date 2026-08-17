@@ -15,10 +15,13 @@
 """
 import base64
 import hashlib
+import logging
 import os
 import re
 
 from docmind import config
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -159,7 +162,7 @@ def load_documents(knowledge_dir: str | None = None) -> list[dict]:
                 with open(path, encoding="utf-8") as f:
                     text = f.read()
         except Exception as e:  # noqa: BLE001 - 坏文件不能阻断整个建库流程
-            print(f"[警告] 文档解析失败，已跳过 {name}: {e}")
+            logger.warning(f"文档解析失败，已跳过 {name}: {e}")
             continue
         if text.strip():
             docs.append({"source": name, "text": text.strip()})
@@ -290,6 +293,44 @@ def chunk_text(text: str) -> list[str]:
     return _chunk_structured(text)
 
 
+def chunk_single_file(root: str, name: str) -> list[dict]:
+    """加载并切片单个文件，返回 [{source, text, page?}]；解析失败返回 [] 不阻断。
+
+    全量建库（load_chunks）与增量索引（VectorStore.rebuild_incremental）
+    共用本函数，保证两条路径的切片行为完全一致。
+    """
+    ext = os.path.splitext(name)[1].lower()
+    path = os.path.join(root, name)
+    try:
+        if ext in _EXTRACTORS:
+            text = _EXTRACTORS[ext](path)
+        else:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+    except Exception as e:  # noqa: BLE001 - 坏文件不能阻断整个建库流程
+        logger.warning(f"文档解析失败，已跳过 {name}: {e}")
+        return []
+    if not text.strip():
+        return []
+    chunks = []
+    if ext == ".pdf":
+        try:
+            pages = _extract_pdf_pages(path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"PDF 按页切片失败，退回整篇切片 {name}: {e}")
+            pages = [(0, text.strip())]
+        for page_no, page_text in pages:
+            for piece in chunk_text(page_text):
+                item = {"source": name, "text": piece}
+                if page_no:
+                    item["page"] = page_no
+                chunks.append(item)
+    else:
+        for piece in chunk_text(text.strip()):
+            chunks.append({"source": name, "text": piece})
+    return chunks
+
+
 def load_chunks(knowledge_dir: str | None = None) -> list[dict]:
     """加载并切片，返回 [{source, text, page?}]（text 为切片）。
 
@@ -298,22 +339,10 @@ def load_chunks(knowledge_dir: str | None = None) -> list[dict]:
     """
     root = knowledge_dir or config.KNOWLEDGE_DIR
     result = []
-    for doc in load_documents(knowledge_dir):
-        ext = os.path.splitext(doc["source"])[1].lower()
-        if ext == ".pdf":
-            path = os.path.join(root, doc["source"])
-            try:
-                pages = _extract_pdf_pages(path)
-            except Exception as e:  # noqa: BLE001
-                print(f"[警告] PDF 按页切片失败，退回整篇切片 {doc['source']}: {e}")
-                pages = [(0, doc["text"])]
-            for page_no, page_text in pages:
-                for piece in chunk_text(page_text):
-                    item = {"source": doc["source"], "text": piece}
-                    if page_no:
-                        item["page"] = page_no
-                    result.append(item)
-        else:
-            for piece in chunk_text(doc["text"]):
-                result.append({"source": doc["source"], "text": piece})
+    if not os.path.isdir(root):
+        return result
+    for name in sorted(os.listdir(root)):
+        if os.path.splitext(name)[1].lower() not in SUPPORTED_EXTS:
+            continue
+        result.extend(chunk_single_file(root, name))
     return result

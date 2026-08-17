@@ -30,8 +30,8 @@ ENV GRADIO_SERVER_NAME=0.0.0.0 \
 
 EXPOSE 7860
 
-# 健康检查：登录页返回 200 即视为存活（不依赖登录态）
+# 健康检查：/health 端点检查数据库/磁盘/知识库状态（不依赖登录态）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/', timeout=3)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health', timeout=3)" || exit 1
 
-CMD ["python", "-m", "docmind.app"]
+CMD ["python", "-u", "-m", "docmind.app"]

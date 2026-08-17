@@ -32,6 +32,10 @@ ENABLE_THINKING = os.getenv("ENABLE_THINKING", "true").strip().lower() in ("1", 
 SEMANTIC_CACHE = os.getenv("SEMANTIC_CACHE", "true").strip().lower() in ("1", "true", "yes")
 CACHE_THRESHOLD = float(os.getenv("CACHE_THRESHOLD", "0.92"))  # 保守阈值：宁缺毋滥
 
+# 证据拒答（RetrievalOps 核心）：开启后知识库未命中证据时确定性拒答，
+# 不依赖模型自觉，防幻觉的企业问答生死线；关闭则保留旧的通识标注行为
+EVIDENCE_REFUSAL = os.getenv("EVIDENCE_REFUSAL", "false").strip().lower() in ("1", "true", "yes")
+
 # RAG 配置
 KNOWLEDGE_DIR = os.path.join(PROJECT_ROOT, "docs", "knowledge")
 CHUNK_SIZE = 280          # 每片最大字符数（中文 QA 类文档不宜过大，避免关键内容被稀释）
@@ -56,6 +60,16 @@ LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
 TRACE_LOG_PATH = os.path.join(PROJECT_ROOT, "data", "trace_log.jsonl")
+
+# 企业 LDAP 登录（两者均配置时，本地账号失败降级 LDAP，首登自动开通）
+LDAP_URL = os.getenv("LDAP_URL", "")                       # 如 ldap://ldap.example.com:389
+LDAP_USER_DN_TEMPLATE = os.getenv("LDAP_USER_DN_TEMPLATE", "")  # 如 uid={username},ou=people,dc=example,dc=com
+
+# 告警阈值（告警引擎周期评估，见 docmind/alerts.py）
+ALERT_INTERVAL_MIN = int(os.getenv("ALERT_INTERVAL_MIN", "10"))
+ALERT_BADCASE_PENDING = int(os.getenv("ALERT_BADCASE_PENDING", "5"))
+ALERT_DAILY_COST = float(os.getenv("ALERT_DAILY_COST", "10.0"))     # 元 / 24h
+ALERT_ERROR_COUNT = int(os.getenv("ALERT_ERROR_COUNT", "10"))       # 次 / 1h
 
 # MCP Server 配置：name -> 启动命令（stdio 模式）
 # 用当前解释器启动子进程，保证虚拟环境里的 mcp 包可用

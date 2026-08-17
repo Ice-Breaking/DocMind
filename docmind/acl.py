@@ -44,6 +44,8 @@ def _conn() -> sqlite3.Connection:
     if conn is None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
         conn.commit()

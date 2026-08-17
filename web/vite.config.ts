@@ -25,8 +25,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': sseSafe,
-      '/login': BACKEND,
+      // 注意结尾斜杠：避免前缀匹配误伤 SPA 路由 /api-keys
+      '/api/': sseSafe,
+      '/open/': BACKEND,
+      // /login 仅代理 POST（登录提交）；GET 走 SPA 的登录页
+      '/login': {
+        target: BACKEND,
+        bypass: (req: any) => (req.method === 'GET' ? '/index.html' : null),
+      },
       '/logout': BACKEND,
       '/files': BACKEND,
     },

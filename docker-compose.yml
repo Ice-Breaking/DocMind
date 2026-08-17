@@ -1,11 +1,25 @@
 # DocMind 一键部署：docker compose up -d
 # 需要先在项目根目录准备好 .env（参考 .env.example）
+#
+# 架构：nginx (port 80) → frontend 静态文件 + 反向代理到 docmind 后端
+#   - frontend: React SPA，nginx 提供静态文件服务，同时代理 API 请求到后端
+#   - docmind:  Gradio/FastAPI 后端，仅监听 127.0.0.1:7860（外部无法直接访问）
+#   - searxng:  元搜索引擎，仅监听 127.0.0.1:8080（供 docmind 容器内通过 Docker 网络访问）
 services:
+  # 前端容器：nginx 静态服务 + API 反向代理（SSE 安全）
+  frontend:
+    build: ./web
+    ports:
+      - "80:80"
+    depends_on:
+      - docmind
+    restart: unless-stopped
+
   docmind:
     build: .
     image: docmind:latest
     ports:
-      - "7860:7860"
+      - "127.0.0.1:7860:7860"   # 仅本机调试用，正常流量由 nginx 代理
     env_file:
       - .env                     # 百炼 API Key / Tavily Key 等（不进镜像、不进仓库）
     environment:
@@ -21,11 +35,12 @@ services:
     restart: unless-stopped
 
   # 自托管元搜索引擎：免费无限量，作为 Tavily 的降级兜底
-  # 浏览器也可直接访问 http://localhost:8080 手动搜索
+  # docmind 容器内通过 Docker 网络直连 http://searxng:8080
+  # 本机调试可访问 http://localhost:8080
   searxng:
     image: searxng/searxng:latest
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # 仅本机调试用
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:

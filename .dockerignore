@@ -15,3 +15,7 @@ README.md
 .vscode
 .DS_Store
 .aicoding-chat-workspace
+
+# 前端构建产物和依赖不进后端镜像
+web/node_modules
+web/dist

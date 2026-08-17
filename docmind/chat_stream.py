@@ -13,42 +13,67 @@ respond_simple 并存互不影响——ACL/语义缓存/OOD 守卫/防注入行�
   error     {"message"}                     异常兜底（随后仍发 final）
   final     {"answer"}                      完整终答（纯净版，落库/上下文直接用）
 """
+import contextvars
+import logging
 from collections.abc import Iterator
 
 from docmind import acl, config, semantic_cache
 from docmind import store
+from docmind.metrics import CACHE_HITS, CACHE_MISSES
 from docmind.agent.react_agent import SYSTEM_PROMPT
 from docmind.llm import embed
 
+logger = logging.getLogger(__name__)
+
 _TIME_SENSITIVE = {"get_weather", "get_current_time"}
+
+# 助手上下文：端点在请求开始时 set 当前助手绑定的 KB 列表，
+# core.knowledge_search 惰性读取以动态路由检索目标（空列表=默认知识库）
+current_kb_ids: contextvars.ContextVar[list] = contextvars.ContextVar(
+    "current_kb_ids", default=[])
 
 
 def stream_events(agent, question: str, session_id: str = "",
-                  user: str = "") -> Iterator[dict]:
-    """核心应答流程，yield 结构化事件；任何异常收敛为 error+final，不挂空流"""
+                  user: str = "", assistant_id: str = "",
+                  system_prompt: str | None = None) -> Iterator[dict]:
+    """核心应答流程，yield 结构化事件；任何异常收敛为 error+final，不挂空流
+
+    assistant_id 非空且非 "default" 时视为自定义助手：跳过语义缓存
+    （自定义 system_prompt/KB 的应答不应污染/命中默认缓存）；
+    system_prompt 覆盖多轮历史重建用的系统提示。"""
     acl.set_current_user(user)   # 文档级 ACL：检索/缓存按当前用户过滤
+    sp = system_prompt if system_prompt else SYSTEM_PROMPT
+    # 非默认助手不走语义缓存（读与写都跳过），默认链路行为保持逐字节一致
+    use_cache = not assistant_id or assistant_id == "default"
 
     # 1) 多轮上下文：从 DB raw 对确定性重建（切换会话/并发请求均不串上下文）
-    agent.reset()
+    # 注意：agent 现在是每请求独立实例，无需 reset
     if session_id:
         try:
             pairs = store.load_raw_pairs(session_id)
         except Exception as e:  # noqa: BLE001
             pairs = []
-            print(f"[警告] SSE 上下文重建失败: {e}")
+            logger.warning(f"SSE 上下文重建失败: {e}")
         if pairs:
-            agent.history.append({"role": "system", "content": SYSTEM_PROMPT})
+            agent.history.append({"role": "system", "content": sp})
             agent.history.extend({"role": r, "content": c} for r, c in pairs)
 
     # 2) 语义缓存：高频问题秒回，跳过整个 Agent 链路
     q_vec = None
-    if config.SEMANTIC_CACHE:
+    if config.SEMANTIC_CACHE and use_cache:
         try:
             q_vec = embed([question])[0]
             hit = semantic_cache.lookup(q_vec)
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             hit = None
-            print(f"[警告] 语义缓存查询失败: {e}")
+            logger.warning(f"语义缓存查询失败: {e}")
+        try:
+            if hit:
+                CACHE_HITS.inc()
+            elif q_vec is not None:
+                CACHE_MISSES.inc()   # 查询成功但未命中（查询异常不计 miss）
+        except Exception:  # noqa: BLE001 - 指标故障不阻塞主链路
+            pass
         if hit and not acl.answer_allowed(hit[1], user):
             hit = None   # 缓存答案引用了当前用户无权的受限文档 → 防跨用户泄露
         if hit:
@@ -78,13 +103,13 @@ def stream_events(agent, question: str, session_id: str = "",
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
 
     # 4) 写语义缓存：与主链路同规则（实时类工具/错误答案/受限引用不入缓存）
-    if (config.SEMANTIC_CACHE and q_vec is not None and final_answer
+    if (config.SEMANTIC_CACHE and use_cache and q_vec is not None and final_answer
             and not final_answer.startswith("⚠️")
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
         try:
             semantic_cache.save(question, final_answer, q_vec)
         except Exception as e:  # noqa: BLE001
-            print(f"[警告] 语义缓存写入失败: {e}")
+            logger.warning(f"语义缓存写入失败: {e}")
 
     yield {"kind": "final", "answer": final_answer}

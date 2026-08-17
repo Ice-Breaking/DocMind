@@ -8,15 +8,23 @@ import os
 
 import gradio as gr
 
+from docmind.logging_setup import setup_logging
+
+setup_logging()
+
+import logging
+
 from docmind import acl, config, semantic_cache
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
 from docmind.agent.react_agent import SYSTEM_PROMPT
-from docmind.core import build_agent
+from docmind.core import build_shared, create_agent
 from docmind.llm import embed
 
-print("[DocMind] 正在装配 Agent（加载知识库、连接 MCP Server）...")
-agent, store, mcp_connections = build_agent()
-tool_names = list(agent.registry.tools.keys())
+logger = logging.getLogger(__name__)
+
+logger.info("正在装配 Agent（加载知识库、连接 MCP Server）...")
+registry, store, mcp_connections = build_shared()
+tool_names = list(registry.tools.keys())
 
 # ---------------------------------------------------------------- 样式
 CUSTOM_CSS = """
@@ -1378,6 +1386,92 @@ FOLD_SCRIPT = """
   });
 })();
 </script>
+<script>
+// 强制首次登录修改密码：页面加载时检查 must_change_pwd，为 true 则弹出不可关闭的模态框
+(() => {
+  if (window.__dmPwdChangeInstalled) return;
+  window.__dmPwdChangeInstalled = true;
+
+  async function checkMustChangePwd() {
+    try {
+      const resp = await fetch('/api/me');
+      if (resp.status === 401) return;
+      const data = await resp.json();
+      if (data.must_change_pwd) showChangePasswordModal();
+    } catch(e) {}
+  }
+
+  function showChangePasswordModal() {
+    const overlay = document.createElement('div');
+    overlay.id = 'pwd-change-overlay';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:white;border-radius:8px;padding:24px;width:360px;box-shadow:0 4px 20px rgba(0,0,0,0.3);';
+    modal.innerHTML = `
+      <h3 style="margin:0 0 16px;font-size:18px;">首次登录请修改密码</h3>
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:14px;">原密码</label>
+        <input id="old-pwd" type="password" style="width:100%;padding:8px;border:1px solid #d9d9d9;border-radius:4px;box-sizing:border-box;">
+      </div>
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:14px;">新密码（至少8位）</label>
+        <input id="new-pwd" type="password" style="width:100%;padding:8px;border:1px solid #d9d9d9;border-radius:4px;box-sizing:border-box;">
+      </div>
+      <div style="margin-bottom:16px;">
+        <label style="display:block;margin-bottom:4px;font-size:14px;">确认新密码</label>
+        <input id="confirm-pwd" type="password" style="width:100%;padding:8px;border:1px solid #d9d9d9;border-radius:4px;box-sizing:border-box;">
+      </div>
+      <div id="pwd-error" style="color:red;font-size:13px;margin-bottom:12px;display:none;"></div>
+      <button id="pwd-submit" style="width:100%;padding:10px;background:#1677ff;color:white;border:none;border-radius:4px;cursor:pointer;font-size:15px;">确认修改</button>
+    `;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    document.getElementById('pwd-submit').onclick = async function() {
+      const oldPwd = document.getElementById('old-pwd').value;
+      const newPwd = document.getElementById('new-pwd').value;
+      const confirmPwd = document.getElementById('confirm-pwd').value;
+      const errEl = document.getElementById('pwd-error');
+
+      if (newPwd !== confirmPwd) {
+        errEl.textContent = '两次输入的新密码不一致';
+        errEl.style.display = 'block';
+        return;
+      }
+      if (newPwd.length < 8) {
+        errEl.textContent = '新密码至少 8 个字符';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/change-password', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({old_password: oldPwd, new_password: newPwd})
+        });
+        if (resp.ok) {
+          location.reload();
+        } else {
+          const data = await resp.json();
+          errEl.textContent = data.detail || '修改失败';
+          errEl.style.display = 'block';
+        }
+      } catch(e) {
+        errEl.textContent = '网络错误';
+        errEl.style.display = 'block';
+      }
+    };
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', checkMustChangePwd);
+  } else {
+    checkMustChangePwd();
+  }
+})();
+</script>
 """
 
 HEADER_HTML = f"""
@@ -1409,10 +1503,21 @@ def _render_trace(lines: list[str]) -> str:
     return "\n\n".join(f"> {ln}" for ln in lines)
 
 
-def respond_simple(question: str, history: list, user: str = ""):
+def respond_simple(question: str, history: list, user: str = "", session_id: str = "", raw_out: dict | None = None):
     """流式渲染：模型思维链实时展示 → 逐 token 打字效果 → 工具轨迹。
     任何异常都兼底为一条完整消息，避免界面停留在“思考中”"""
     acl.set_current_user(user)   # 文档级 ACL：检索/缓存按当前用户过滤
+    # 每请求创建独立 Agent 实例，避免并发请求共享 history 导致上下文混乱
+    req_agent = create_agent(registry)
+    # 从 DB 重建多轮上下文（与 SSE 链路一致，无单例状态污染）
+    if session_id:
+        try:
+            pairs = chatstore.load_raw_pairs(session_id)
+            if pairs:
+                req_agent.history.append({"role": "system", "content": SYSTEM_PROMPT})
+                req_agent.history.extend({"role": r, "content": c} for r, c in pairs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"上下文重建失败: {e}")
     trace_lines = []
     reasoning_parts = []   # 模型真实思维链（reasoning_content）增量累积
     final_answer = ""
@@ -1428,12 +1533,13 @@ def respond_simple(question: str, history: list, user: str = ""):
             hit = semantic_cache.lookup(q_vec)
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             hit = None
-            print(f"[警告] 语义缓存查询失败: {e}")
+            logger.warning(f"语义缓存查询失败: {e}")
         if hit and not acl.answer_allowed(hit[1], user):
             hit = None   # 缓存答案引用了当前用户无权的受限文档 → 防跨用户泄露
         if hit:
             cq, cached_answer, _ = hit
-            respond_simple.last_raw = cached_answer   # 供 persist_pair 落库
+            if raw_out is not None:
+                raw_out["raw"] = cached_answer   # 供 persist_pair 落库
             full = (f"<sub>⚡ 语义缓存命中 · 秒回（相似问题：{cq}）</sub>\n\n"
                     f"{cached_answer}")
             yield history + [user_msg, {"role": "assistant", "content": full}]
@@ -1457,7 +1563,7 @@ def respond_simple(question: str, history: list, user: str = ""):
 
     try:
         yield history + [user_msg, {"role": "assistant", "content": "🤔 深度思考中…"}]
-        for step in agent.ask(question):
+        for step in req_agent.ask(question):
             if step.kind == "token":
                 thinking = False
                 partial += step.text
@@ -1477,18 +1583,19 @@ def respond_simple(question: str, history: list, user: str = ""):
         final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
     if not final_answer:
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
-    respond_simple.last_raw = final_answer   # 供 persist_pair 落库（缓存命中/正常均适用）
+    if raw_out is not None:
+        raw_out["raw"] = final_answer   # 供 persist_pair 落库（缓存命中/正常均适用）
     # 写语义缓存：实时类工具（天气/时间）与错误兜底答案不入缓存，防过期数据；
     # web_search 交叉核验不排除——稳定知识类问题的联网佐证可缓存（真正实时的是天气/时间）
     _TIME_SENSITIVE = {"get_weather", "get_current_time"}
     if (config.SEMANTIC_CACHE and q_vec is not None and final_answer
             and not final_answer.startswith("⚠️")
-            and not (agent.last_tools & _TIME_SENSITIVE)
+            and not (req_agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):   # 引用受限文档不入缓存
         try:
             semantic_cache.save(question, final_answer, q_vec)
         except Exception as e:  # noqa: BLE001
-            print(f"[警告] 语义缓存写入失败: {e}")
+            logger.warning(f"语义缓存写入失败: {e}")
     thinking = False   # 思考结束，让思维链按截断策略渲染
     full = f"<sub>✓ 深度思考已完成</sub>\n\n{reasoning_quote()}{final_answer}"
     if trace_lines:
@@ -1497,7 +1604,7 @@ def respond_simple(question: str, history: list, user: str = ""):
 
 
 def reset_chat():
-    agent.reset()
+    # 每请求创建独立 Agent，无需 reset 全局状态
     return []
 
 
@@ -1543,50 +1650,59 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     # 注意：必须绑定真正的 generator function（yield 在函数体内）。
     # Gradio 6 用 isgeneratorfunction 识别流式，lambda 返回 generator 对象不满足，
     # 会被当普通值 postprocess 而报 messages format 错误。
-    def persist_pair(session_id, question, final_history, user=""):
+    def persist_pair(session_id, question, final_history, user="", raw_answer=""):
         """本轮用户问题 + 最终回答落库（失败不影响主链路）。
 
-        assistant 同时存渲染版 content（展示）与 raw（agent.history 末尾的纯净终答，
+        assistant 同时存渲染版 content（展示）与 raw（纯净终答，
         供切换会话时恢复 LLM 多轮上下文）。
         """
         if not session_id or not final_history:
             return
         try:
-            clean = getattr(respond_simple, "last_raw", "") or ""
-            if not clean and agent.history and agent.history[-1].get("role") == "assistant":
-                clean = agent.history[-1].get("content", "")
+            clean = raw_answer or ""
             chatstore.append_message(session_id, "user", question, user=user)
             chatstore.append_message(session_id, "assistant",
                                      final_history[-1]["content"], raw=clean, user=user)
         except Exception as e:  # noqa: BLE001
-            print(f"[警告] 会话持久化失败: {e}")
+            logger.warning(f"会话持久化失败: {e}")
 
     def make_example_handler(ex):
         def handler(history, session_id, request: gr.Request):
+            user = request.username or ""
+            # 强制改密门禁：未改密用户不得经 Gradio 链路发起对话（防绕过）
+            if user and chatstore.get_must_change_pwd(user):
+                yield history + [{"role": "assistant", "content": "⚠️ 请先修改密码后再使用"}]
+                return
             last = history
-            for h in respond_simple(ex, history, user=request.username or ""):
+            raw_out = {}
+            for h in respond_simple(ex, history, user=user, session_id=session_id, raw_out=raw_out):
                 last = h
                 yield h
-            persist_pair(session_id, ex, last, user=request.username or "")
+            persist_pair(session_id, ex, last, user=user, raw_answer=raw_out.get("raw", ""))
         return handler
 
     def submit(question: str, history: list, session_id: str, request: gr.Request):
         if not question.strip():
             yield history
             return
+        user = request.username or ""
+        # 强制改密门禁：未改密用户不得经 Gradio 链路发起对话（防绕过）
+        if user and chatstore.get_must_change_pwd(user):
+            yield history + [{"role": "assistant", "content": "⚠️ 请先修改密码后再使用"}]
+            return
         last = history
-        for h in respond_simple(question, history, user=request.username or ""):
+        raw_out = {}
+        for h in respond_simple(question, history, user=user, session_id=session_id, raw_out=raw_out):
             last = h
             yield h
-        persist_pair(session_id, question, last, user=request.username or "")
+        persist_pair(session_id, question, last, user=user, raw_answer=raw_out.get("raw", ""))
 
     def load_history(session_id, request: gr.Request):
         """恢复历史对话（页面加载/侧边栏切换均走这里）。
 
-        除回填 Chatbot 展示内容外，同步用 raw 干净文本重建 Agent 多轮上下文，
-        并先 reset——保证切换会话不会把上一会话的上下文串进来。
+        回填 Chatbot 展示内容。Agent 多轮上下文由 respond_simple 在每次请求时
+        从 DB 重建，无需在此预加载到全局 Agent（已改为每请求独立 Agent）。
         """
-        agent.reset()
         if not session_id:
             return []
         try:
@@ -1594,14 +1710,9 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
             user = request.username or ""
             if owner not in (None, "", user):
                 return []   # 他人会话：不恢复（sidebar 也不会列出）
-            msgs = chatstore.load_session(session_id)
-            pairs = chatstore.load_raw_pairs(session_id)
-            if pairs:
-                agent.history.append({"role": "system", "content": SYSTEM_PROMPT})
-                agent.history.extend({"role": r, "content": c} for r, c in pairs)
-            return msgs
+            return chatstore.load_session(session_id)
         except Exception as e:  # noqa: BLE001
-            print(f"[警告] 会话恢复失败: {e}")
+            logger.warning(f"会话恢复失败: {e}")
             return []
 
     msg.submit(submit, [msg, chatbot, session_box], chatbot).then(lambda: "", None, msg)
@@ -1621,7 +1732,17 @@ if __name__ == "__main__":
     chatstore.ensure_seed_admin()
 
     def _login_auth(username: str, password: str) -> bool:
-        return chatstore.verify_user(username, password)
+        """登录链：本地账号优先；配置了企业 LDAP 时本地失败降级 LDAP 绑定，
+        LDAP 首登自动开通本地账号（is_admin 默认关，需管理员另行授权）"""
+        from docmind import ldap_auth
+        if chatstore.verify_user(username, password):
+            chatstore.record_audit(username, "login", "local")
+            return True
+        if ldap_auth.authenticate(username, password):
+            chatstore.ensure_external_user(username)
+            chatstore.record_audit(username, "login", "ldap")
+            return True
+        return False
     #
     # Mermaid 图表库：通过 FastAPI 路由 serve 本地 JS 文件
     # （避免 CDN 不可达 + 避免 head_paths 内联 HTML 导致 </ 序列中断解析）
@@ -1643,10 +1764,80 @@ if __name__ == "__main__":
         prevent_thread_lock=True,
     )
 
+    # ---- Prometheus 监控：/metrics 指标导出 + HTTP 请求埋点 ----
+    # （不要求登录态：供 Prometheus 服务端抓取；只暴露计数器，不含敏感数据）
+    import time as _metrics_time
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    from fastapi.responses import Response as _MetricsResponse
+    from docmind.metrics import HTTP_LATENCY, HTTP_REQUESTS
+
+    @demo.app.get("/metrics", include_in_schema=False)
+    async def _metrics():
+        return _MetricsResponse(content=generate_latest(),
+                                media_type=CONTENT_TYPE_LATEST)
+
+    try:
+        @demo.app.middleware("http")
+        async def metrics_middleware(request, call_next):
+            if request.url.path in ("/metrics", "/health"):
+                return await call_next(request)   # 探活/抓取自身不计入指标
+            start = _metrics_time.time()
+            response = await call_next(request)
+            try:
+                duration = _metrics_time.time() - start
+                HTTP_REQUESTS.labels(method=request.method, path=request.url.path,
+                                     status=response.status_code).inc()
+                HTTP_LATENCY.labels(method=request.method,
+                                    path=request.url.path).observe(duration)
+            except Exception:  # noqa: BLE001 - 指标故障绝不影响请求
+                pass
+            return response
+    except RuntimeError:
+        # 新版 starlette 禁止应用启动后注入中间件 → HTTP 请求埋点优雅降级，
+        # /metrics 仍导出其余指标；启动绝不能因监控失败而中断
+        logging.getLogger(__name__).warning(
+            "当前 starlette 不支持启动后注入中间件，HTTP 请求指标已降级")
+
     @demo.app.get("/mermaid.min.js", include_in_schema=False)
     async def _serve_mermaid():
         return FileResponse(os.path.join(_mermaid_dir, "mermaid.min.js"),
                             media_type="application/javascript")
+
+    # ---- 健康检查：Docker HEALTHCHECK / 监控探活（不要求登录态，只暴露内部状态） ----
+    @demo.app.get("/health", include_in_schema=False)
+    async def _health():
+        """Lightweight health check for Docker HEALTHCHECK and monitoring."""
+        import shutil
+        from fastapi.responses import JSONResponse
+        checks = {}
+
+        # SQLite 连通性
+        try:
+            chatstore._conn().execute("SELECT 1").fetchone()
+            checks["database"] = "ok"
+        except Exception as e:  # noqa: BLE001
+            checks["database"] = f"error: {e}"
+
+        # 磁盘剩余空间（< 100MB 告警）
+        try:
+            disk = shutil.disk_usage(os.path.join(config.PROJECT_ROOT, "data"))
+            free_mb = disk.free / (1024 * 1024)
+            checks["disk_free_mb"] = round(free_mb, 1)
+            checks["disk"] = "low" if free_mb < 100 else "ok"
+        except Exception as e:  # noqa: BLE001
+            checks["disk"] = f"error: {e}"
+
+        # 知识库加载状态
+        try:
+            checks["knowledge_chunks"] = len(store.chunks) if hasattr(store, "chunks") else 0
+        except Exception:  # noqa: BLE001
+            checks["knowledge_chunks"] = 0
+
+        all_ok = all(v == "ok" or isinstance(v, (int, float)) for v in checks.values())
+        return JSONResponse(
+            status_code=200 if all_ok else 503,
+            content={"status": "healthy" if all_ok else "degraded", "checks": checks},
+        )
 
     # ---- 文档预览：vendored pdf.js + 知识库原文（引用溯源直达） ----
     from fastapi import HTTPException, Query
@@ -1742,6 +1933,13 @@ if __name__ == "__main__":
             raise HTTPException(status_code=401, detail="未登录")
         return user
 
+    def _require_active_user(request: _fastapi.Request) -> str:
+        """Like _require_user but also blocks users who must change their password."""
+        user = _require_user(request)
+        if chatstore.get_must_change_pwd(user):
+            raise HTTPException(status_code=403, detail={"code": "MUST_CHANGE_PWD", "message": "请先修改密码"})
+        return user
+
     def _check_session_access(request: _fastapi.Request, session_id: str) -> None:
         """会话归属校验：本人或无主历史会话放行，他人会话 403"""
         owner = chatstore.session_owner(session_id)
@@ -1751,16 +1949,17 @@ if __name__ == "__main__":
             raise HTTPException(status_code=403, detail="无权访问该会话")
 
     # ---- 反馈闭环：👍/👎 评价（session_id + 消息序号唯一定位，重复点击覆盖） ----
-    from pydantic import BaseModel
+    from typing import Literal
+    from pydantic import BaseModel, Field
 
     class FeedbackIn(BaseModel):
-        session_id: str
+        session_id: str = Field(..., min_length=1, max_length=64)
         seq: int
-        rating: str
+        rating: Literal["up", "down"]
 
     @demo.app.post("/api/feedback", include_in_schema=False)
     async def _save_feedback(fb: FeedbackIn, request: _fastapi.Request):
-        _require_user(request)
+        _require_active_user(request)
         if fb.rating not in ("up", "down"):
             raise HTTPException(status_code=400, detail="rating 必须是 up/down")
         _check_session_access(request, fb.session_id)
@@ -1772,14 +1971,45 @@ if __name__ == "__main__":
 
     @demo.app.get("/api/feedback/{session_id}", include_in_schema=False)
     async def _get_feedback(session_id: str, request: _fastapi.Request):
-        _require_user(request)
+        _require_active_user(request)
         _check_session_access(request, session_id)
         return chatstore.get_feedback(session_id)
+
+    # ---- 强制修改密码 ----
+    class ChangePasswordIn(BaseModel):
+        old_password: str = Field(..., min_length=1, max_length=128)
+        new_password: str = Field(..., min_length=8, max_length=128)
+
+    @demo.app.post("/api/change-password", include_in_schema=False)
+    async def _change_password(body: ChangePasswordIn, request: _fastapi.Request):
+        user = _require_user(request)
+        ok, msg = chatstore.change_password(user, body.old_password, body.new_password)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"ok": True}
 
     # ---- 多会话侧边栏：会话列表 + 删除 ----
     # ---- 管理后台：用量看板 / badcase 流转 / 会话审计（仅管理员） ----
     from docmind.admin import register_admin_routes
     register_admin_routes(demo.app)
+    from docmind.assistants_api import register_assistant_routes
+    register_assistant_routes(demo.app)
+
+    from docmind.docs_api import register_docs_routes
+    register_docs_routes(demo.app)
+    from docmind.retrieval_api import register_retrieval_routes
+    register_retrieval_routes(demo.app)
+    from docmind.eval_api import register_eval_routes
+    register_eval_routes(demo.app)
+    from docmind.platform_api import register_platform_routes
+    register_platform_routes(demo.app)
+    from docmind.governance_api import register_governance_routes
+    register_governance_routes(demo.app)
+    from docmind.users_api import register_users_routes
+    register_users_routes(demo.app)
+    from docmind import alerts as _alerts_mod
+    _alerts_mod.register_alert_routes(demo.app)
+    _alerts_mod.start_loop()   # 后台周期评估告警规则（幂等）
 
     # ---- 引用锚点定位：按用户问题在指定文档内检索最相关片段 ----
     # （复用已构建的 VectorStore，BM25 索引独立构建一次；ACL 感知，无权返回空）
@@ -1789,7 +2019,7 @@ if __name__ == "__main__":
 
     @demo.app.get("/api/locate", include_in_schema=False)
     async def _locate(request: _fastapi.Request, doc: str, q: str = ""):
-        _require_user(request)
+        _require_active_user(request)
         doc = os.path.basename(doc)
         if doc not in acl.allowed_docs(_current_user(request)):
             return {"found": False}   # 无权文档：与"没找到"无差别，不泄露存在性
@@ -1806,12 +2036,12 @@ if __name__ == "__main__":
     from docmind import suggest as suggest_mod
 
     class SuggestIn(BaseModel):
-        question: str = ""
-        answer: str
+        question: str = Field(default="", max_length=4000)
+        answer: str = Field(..., min_length=1, max_length=4000)
 
     @demo.app.post("/api/suggest", include_in_schema=False)
     async def _suggest(body: SuggestIn, request: _fastapi.Request):
-        _require_user(request)
+        _require_active_user(request)
         answer = body.answer.strip()
         if len(answer) < 80:   # 过短内容（报错/拒答）不生成
             return {"suggestions": []}
@@ -1828,14 +2058,16 @@ if __name__ == "__main__":
     import json as _json
     from fastapi.responses import StreamingResponse
     from docmind import chat_stream as chat_stream_mod
+    from docmind.metrics import SSE_ACTIVE_STREAMS
 
     class ChatIn(BaseModel):
-        question: str
-        session_id: str = ""
+        question: str = Field(..., min_length=1, max_length=4000)
+        session_id: str = Field(default="", max_length=64)
+        assistant_id: str = Field(default="", max_length=64)
 
     @demo.app.post("/api/chat/stream", include_in_schema=False)
     async def _chat_stream(body: ChatIn, request: _fastapi.Request):
-        user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500
+        user = _require_active_user(request)   # 401/403 校验须在 try 外，避免被吞成 500
         question = body.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="question 不能为空")
@@ -1845,22 +2077,48 @@ if __name__ == "__main__":
             if owner not in (None, "", user):
                 raise HTTPException(status_code=403, detail="无权访问该会话")
 
+        # 自定义助手接入：解析绑定的 KB 列表与 system prompt；
+        # 空串/"default" 走原默认链路（缓存/单库检索/内置提示词均不变）
+        assistant_id = getattr(body, "assistant_id", "") or ""
+        assistant = chatstore.get_assistant(assistant_id) if assistant_id else None
+        kb_ids = (assistant.get("kb_ids") if assistant else []) or []
+        sp = (assistant.get("system_prompt") if assistant else "") or None
+
         def gen():
-            final_raw = ""
-            for ev in chat_stream_mod.stream_events(agent, question,
-                                                    body.session_id, user):
-                if ev["kind"] == "final":
-                    final_raw = ev["answer"]
-                yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"
-            # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）
-            if body.session_id and final_raw:
+            try:
+                SSE_ACTIVE_STREAMS.inc()
+            except Exception:  # noqa: BLE001 - 指标故障不影响应答
+                pass
+            tok = chat_stream_mod.current_kb_ids.set(kb_ids)
+            try:
+                final_raw = ""
+                req_agent = create_agent(registry, system_prompt=sp)
+                for ev in chat_stream_mod.stream_events(
+                        req_agent, question, body.session_id, user,
+                        assistant_id=assistant_id, system_prompt=sp):
+                    if ev["kind"] == "final":
+                        final_raw = ev["answer"]
+                    yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"
+                # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）
+                if body.session_id and final_raw:
+                    try:
+                        chatstore.append_message(body.session_id, "user", question,
+                                                 user=user, assistant_id=assistant_id)
+                        chatstore.append_message(body.session_id, "assistant",
+                                                 final_raw, raw=final_raw, user=user,
+                                                 assistant_id=assistant_id)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"SSE 会话持久化失败: {e}")
+                yield f"event: done\ndata: {_json.dumps({'session_id': body.session_id}, ensure_ascii=False)}\n\n"
+            finally:
                 try:
-                    chatstore.append_message(body.session_id, "user", question, user=user)
-                    chatstore.append_message(body.session_id, "assistant",
-                                             final_raw, raw=final_raw, user=user)
-                except Exception as e:  # noqa: BLE001
-                    print(f"[警告] SSE 会话持久化失败: {e}")
-            yield f"event: done\ndata: {_json.dumps({'session_id': body.session_id}, ensure_ascii=False)}\n\n"
+                    chat_stream_mod.current_kb_ids.reset(tok)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    SSE_ACTIVE_STREAMS.dec()
+                except Exception:  # noqa: BLE001
+                    pass
 
         return StreamingResponse(
             gen(), media_type="text/event-stream",
@@ -1868,7 +2126,7 @@ if __name__ == "__main__":
 
     @demo.app.get("/api/sessions", include_in_schema=False)
     async def _list_sessions(request: _fastapi.Request):
-        user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500
+        user = _require_active_user(request)   # 401/403 校验须在 try 外，避免被吞成 500
         try:
             return chatstore.list_sessions(user=user)
         except Exception as e:  # noqa: BLE001
@@ -1876,7 +2134,7 @@ if __name__ == "__main__":
 
     @demo.app.delete("/api/sessions/{session_id}", include_in_schema=False)
     async def _delete_session(session_id: str, request: _fastapi.Request):
-        _require_user(request)
+        _require_active_user(request)
         _check_session_access(request, session_id)
         try:
             chatstore.delete_session(session_id)
@@ -1884,9 +2142,76 @@ if __name__ == "__main__":
             raise HTTPException(status_code=500, detail=f"会话删除失败: {e}")
         return {"ok": True}
 
-    # 阻塞主线程（保持服务运行）
+    @demo.app.get("/api/sessions/{session_id}/messages", include_in_schema=False)
+    async def _get_messages(session_id: str, request: _fastapi.Request):
+        _require_active_user(request)
+        _check_session_access(request, session_id)
+        try:
+            return chatstore.get_messages_full(session_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"消息获取失败: {e}")
+
+    # ---- GDPR 合规：个人数据导出（可携带权）与账号级联删除（被遗忘权） ----
+    from fastapi.responses import JSONResponse
+
+    @demo.app.get("/api/me/export", include_in_schema=False)
+    async def _export_my_data(request: _fastapi.Request):
+        user = _require_user(request)
+        try:
+            data = chatstore.export_user_data(user)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"数据导出失败: {e}")
+        if "error" in data:
+            raise HTTPException(status_code=404, detail=data["error"])
+        return JSONResponse(content=data, headers={
+            "Content-Disposition": f"attachment; filename=docmind-export-{user}.json"
+        })
+
+    @demo.app.post("/api/me/delete", include_in_schema=False)
+    async def _delete_my_account(request: _fastapi.Request):
+        user = _require_user(request)
+        result = chatstore.delete_user_cascade(user)
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        response = JSONResponse(content={"ok": True, **result})
+        # 删除后立即登出：注销服务端 token 并清除两种 Gradio 登录 cookie 形态
+        token = (request.cookies.get(f"access-token-{demo.app.cookie_id}")
+                 or request.cookies.get(f"access-token-unsecure-{demo.app.cookie_id}"))
+        if token:
+            demo.app.tokens.pop(token, None)
+        for _name in (f"access-token-{demo.app.cookie_id}",
+                      f"access-token-unsecure-{demo.app.cookie_id}"):
+            response.delete_cookie(key=_name, path="/")
+        return response
+
+    import signal as _signal
+
+    _shutdown_requested = False
+
+    def _handle_signal(signum, frame):
+        global _shutdown_requested
+        logger.info(f"收到信号 {signum}，开始优雅关闭...")
+        _shutdown_requested = True
+
+    _signal.signal(_signal.SIGTERM, _handle_signal)
+    _signal.signal(_signal.SIGINT, _handle_signal)
+
+    logger.info("服务已启动，按 Ctrl+C 或发送 SIGTERM 优雅关闭")
     try:
-        while True:
-            time.sleep(86400)
+        while not _shutdown_requested:
+            time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        demo.close()
+        pass
+    finally:
+        logger.info("正在清理资源...")
+        try:
+            for conn in mcp_connections:
+                if hasattr(conn, 'close'):
+                    conn.close()
+        except Exception:
+            pass
+        try:
+            demo.close()
+        except Exception:
+            pass
+        logger.info("已优雅关闭")

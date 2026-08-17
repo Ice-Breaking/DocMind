@@ -8,12 +8,15 @@
 """
 import asyncio
 import contextlib
+import logging
 import threading
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from docmind.agent.tools import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class _BackgroundLoop:
@@ -80,7 +83,7 @@ def register_mcp_tools(registry: ToolRegistry, servers: dict[str, list[str]]) ->
             runner.run(_init_and_register(conn, registry))
             connections.append(conn)
         except Exception as e:  # noqa: BLE001
-            print(f"[警告] MCP Server '{name}' 连接失败，跳过: {e}")
+            logger.warning(f"MCP Server '{name}' 连接失败，跳过: {e}")
     return connections
 
 

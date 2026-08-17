@@ -1,0 +1,353 @@
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Alert,
+  App,
+  Button,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Space,
+  Switch,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
+import {
+  CrownOutlined,
+  DeleteOutlined,
+  KeyOutlined,
+  PlusOutlined,
+  UserOutlined,
+} from '@ant-design/icons';
+import type { ColumnsType } from 'antd/es/table';
+import {
+  createUser,
+  deleteUser,
+  fetchUsers,
+  resetUserPassword,
+  setUserAdmin,
+  type AdminUser,
+  type Me,
+} from '../api';
+
+const { Text } = Typography;
+
+/**
+ * 用户管理（仅管理员）：新增账号、重置密码、授予/收回管理员、删除账号。
+ * 安全约束由后端保证：不能删自己、不能移除最后一个管理员、代建账号强制首登改密。
+ */
+export default function Users({ me }: { me: Me }) {
+  const { message: msgApi, modal: modalApi } = App.useApp();
+
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  /* ---- 新建用户 Modal ---- */
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form] = Form.useForm<{ username: string; password: string; is_admin: boolean }>();
+
+  /* ---- 重置密码 Modal ---- */
+  const [pwdTarget, setPwdTarget] = useState<AdminUser | null>(null);
+  const [pwdText, setPwdText] = useState('');
+  const [pwdSaving, setPwdSaving] = useState(false);
+
+  /* ---- 初始密码一次性展示 Modal ---- */
+  const [credModal, setCredModal] = useState<{ username: string; password: string } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setUsers(await fetchUsers());
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '加载失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [msgApi]);
+
+  useEffect(() => { load(); }, [load]);
+
+  /* ---- 新建 ---- */
+  const handleCreate = async () => {
+    let values: { username: string; password: string; is_admin: boolean };
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
+    setCreating(true);
+    try {
+      await createUser({
+        username: values.username,
+        password: values.password,
+        is_admin: values.is_admin ?? false,
+      });
+      msgApi.success(`用户 ${values.username} 已创建，首次登录须修改密码`);
+      setCredModal({ username: values.username, password: values.password });
+      setCreateOpen(false);
+      form.resetFields();
+      await load();
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '创建失败');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  /* ---- 重置密码 ---- */
+  const handleResetPwd = async () => {
+    if (!pwdTarget) return;
+    if (pwdText.length < 8) {
+      msgApi.warning('新密码至少 8 个字符');
+      return;
+    }
+    setPwdSaving(true);
+    try {
+      await resetUserPassword(pwdTarget.username, pwdText);
+      msgApi.success(`${pwdTarget.username} 密码已重置，下次登录须修改`);
+      setPwdTarget(null);
+      setPwdText('');
+      await load();
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '重置失败');
+    } finally {
+      setPwdSaving(false);
+    }
+  };
+
+  /* ---- 管理员开关 ---- */
+  const handleToggleAdmin = async (u: AdminUser, grant: boolean) => {
+    try {
+      await setUserAdmin(u.username, grant);
+      msgApi.success(grant ? `${u.username} 已授予管理员` : `${u.username} 已收回管理员`);
+      await load();
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '操作失败');
+    }
+  };
+
+  /* ---- 删除 ---- */
+  const handleDelete = async (u: AdminUser) => {
+    try {
+      const r = await deleteUser(u.username);
+      modalApi.success({
+        title: `${u.username} 已删除`,
+        content: `级联清理：会话 ${r.deleted?.sessions ?? 0} 个 / 消息 ${r.deleted?.messages ?? 0} 条`,
+      });
+      await load();
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '删除失败');
+    }
+  };
+
+  const columns: ColumnsType<AdminUser> = [
+    {
+      title: '用户名',
+      dataIndex: 'username',
+      key: 'username',
+      width: 220,
+      render: (v: string) => (
+        <Space>
+          <UserOutlined style={{ color: '#1677ff' }} />
+          <Text strong>{v}</Text>
+          {v === me.user && <Tag>当前登录</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: '角色',
+      dataIndex: 'is_admin',
+      key: 'is_admin',
+      width: 130,
+      render: (v: number, u) => (
+        <Space>
+          {v === 1
+            ? <Tag color="gold" icon={<CrownOutlined />}>管理员</Tag>
+            : <Tag>普通用户</Tag>}
+          {/* 自己不能改自己；最后一个管理员的收回由后端拦截 */}
+          {u.username !== me.user && (
+            <Switch
+              size="small"
+              checked={v === 1}
+              onChange={(checked) => handleToggleAdmin(u, checked)}
+            />
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'must_change_pwd',
+      key: 'must_change_pwd',
+      width: 110,
+      render: (v: number) =>
+        v === 1 ? <Tag color="orange">待改密</Tag> : <Tag color="green">正常</Tag>,
+    },
+    { title: '会话数', dataIndex: 'sessions', key: 'sessions', width: 90 },
+    { title: '消息数', dataIndex: 'messages', key: 'messages', width: 90 },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 170,
+      render: (ts: number) => (ts ? new Date(ts * 1000).toLocaleString() : '—'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 190,
+      render: (_: any, u) => (
+        <Space>
+          <Button
+            size="small"
+            icon={<KeyOutlined />}
+            onClick={() => { setPwdTarget(u); setPwdText(''); }}
+          >
+            重置密码
+          </Button>
+          {u.username !== me.user && (
+            <Popconfirm
+              title={`删除用户「${u.username}」？`}
+              description="将级联删除其全部会话与消息，不可恢复。"
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              cancelText="取消"
+              onConfirm={() => handleDelete(u)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+            </Popconfirm>
+          )}
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 24,
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>用户管理</h1>
+          <Text type="secondary">新增账号、重置密码、授予管理员、删除账号（均写入审计日志）</Text>
+        </div>
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          onClick={() => { form.resetFields(); setCreateOpen(true); }}
+        >
+          新增用户
+        </Button>
+      </div>
+
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="密码以 PBKDF2 加盐哈希存储，任何人（含管理员）都无法查看明文；用户忘记密码时使用「重置密码」，新密码强制下次登录修改。新建账号的初始密码仅在创建成功时展示一次。"
+      />
+
+      <Table
+        columns={columns}
+        dataSource={users}
+        rowKey="username"
+        loading={loading}
+        pagination={false}
+        size="middle"
+      />
+
+      {/* ---- 新建用户 Modal ---- */}
+      <Modal
+        title="新增用户"
+        open={createOpen}
+        onOk={handleCreate}
+        onCancel={() => setCreateOpen(false)}
+        confirmLoading={creating}
+        okText="创建"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item
+            name="username"
+            label="用户名"
+            rules={[
+              { required: true, message: '请输入用户名' },
+              { pattern: /^[\w.@-]{2,64}$/, message: '仅支持字母/数字/._@-，长度 2-64' },
+            ]}
+          >
+            <Input placeholder="例如：zhangsan 或 zhangsan@company.com" />
+          </Form.Item>
+          <Form.Item
+            name="password"
+            label="初始密码"
+            rules={[
+              { required: true, message: '请输入初始密码' },
+              { min: 8, message: '至少 8 个字符' },
+            ]}
+          >
+            <Input.Password placeholder="用户首次登录将被强制修改" />
+          </Form.Item>
+          <Form.Item name="is_admin" label="管理员" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ---- 重置密码 Modal ---- */}
+      <Modal
+        title={`重置密码 — ${pwdTarget?.username || ''}`}
+        open={!!pwdTarget}
+        onOk={handleResetPwd}
+        onCancel={() => setPwdTarget(null)}
+        confirmLoading={pwdSaving}
+        okText="重置"
+        cancelText="取消"
+      >
+        <Input.Password
+          placeholder="新密码（至少 8 位），用户下次登录须修改"
+          value={pwdText}
+          onChange={(e) => setPwdText(e.target.value)}
+        />
+      </Modal>
+
+      {/* ---- 初始密码一次性展示 ---- */}
+      <Modal
+        title="账号创建成功"
+        open={!!credModal}
+        onCancel={() => setCredModal(null)}
+        footer={[
+          <Button key="ok" type="primary" onClick={() => setCredModal(null)}>
+            我已保存
+          </Button>,
+        ]}
+        closable={false}
+        maskClosable={false}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="初始密码仅本次展示，请妥善保存或线下告知用户；之后无法找回，只能重置。"
+        />
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div>
+            用户名：
+            <Typography.Text code copyable>{credModal?.username}</Typography.Text>
+          </div>
+          <div>
+            初始密码：
+            <Typography.Text code copyable>{credModal?.password}</Typography.Text>
+          </div>
+        </Space>
+      </Modal>
+    </div>
+  );
+}

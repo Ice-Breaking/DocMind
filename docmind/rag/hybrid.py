@@ -6,12 +6,17 @@
 - Rerank 独立成级：初筛候选控制在 10 条以内再精排，兼顾效果与延迟/成本
 - Rerank 失败自动降级为 RRF 结果，保证可用性
 """
+import logging
+import time
+
 import jieba
 import requests
 from rank_bm25 import BM25Okapi
 
-from docmind import config
+from docmind import config, trace
 from docmind.rag.vector_store import SearchHit, VectorStore
+
+logger = logging.getLogger(__name__)
 
 RRF_K = 60          # RRF 平滑常数，经验值 60
 CANDIDATE_K = 10    # 初筛候选数量（送入 Rerank 的上限）
@@ -44,16 +49,21 @@ class HybridRetriever:
         self.store = store
         self.bm25: BM25Okapi | None = None
         self._text2idx: dict[str, int] = {}
+        # BM25 构建时的 store 版本号；与 store.version 不一致时懒重建
+        # （增量索引后所有持有本 store 的检索器自动保持一致）
+        self._built_version = -1
 
     def build(self) -> None:
-        """在向量库已 build 的基础上，同步构建 BM25 索引"""
+        """在向量库已 build 的基础上，同步构建 BM25 索引（空语料时 BM25 置空）"""
         chunks = self.store.chunks
         self._text2idx = {c["text"]: i for i, c in enumerate(chunks)}
-        self.bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks])
+        self.bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None
+        self._built_version = self.store.version
 
     # ---------------- 内部：双路召回 ----------------
     def _bm25_rank(self, query: str, top_k: int) -> list[tuple[int, float]]:
-        assert self.bm25 is not None, "HybridRetriever 未 build"
+        if self.bm25 is None:
+            return []
         scores = self.bm25.get_scores(tokenize(query))
         order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
         return [(i, float(scores[i])) for i in order if scores[i] > 0]
@@ -96,10 +106,23 @@ class HybridRetriever:
     ) -> list[SearchHit]:
         """allowed_sources：文档级 ACL 过滤——只保留授权来源的候选（rerank 前过滤，
         避免无权文档挤占 top_k 名额）；None 表示不过滤"""
+        # 懒重建：store 切片变化（增量索引/全量重建）后 version +1，
+        # 此处自动重建 BM25，无需调用方手动同步
+        if self._built_version != self.store.version:
+            self.build()
         k = top_k or config.TOP_K
+        kb_tag = getattr(self.store, "_collection_name", "")
 
-        vec_hits = self.store.search(query, top_k=candidate_k)
-        bm25_hits = self._bm25_rank(query, candidate_k)
+        # 链路阶段埋点：dense/sparse/rerank 各自独立 span，
+        # 供检索日志按阶段下钻耗时（链路分析）
+        with trace.span("retrieval:dense", kind="retrieval",
+                        kb=kb_tag, input=query[:80]) as _dc:
+            vec_hits = self.store.search(query, top_k=candidate_k)
+            _dc["output"] = len(vec_hits)
+        with trace.span("retrieval:sparse", kind="retrieval",
+                        kb=kb_tag, input=query[:80]) as _sc:
+            bm25_hits = self._bm25_rank(query, candidate_k)
+            _sc["output"] = len(bm25_hits)
 
         # RRF 融合：每路按排名贡献 1/(RRF_K + rank)，双路命中叠加
         rrf: dict[int, float] = {}
@@ -125,10 +148,82 @@ class HybridRetriever:
 
         if rerank and candidates:
             try:
-                ranked = self._rerank(query, candidates, top_n=k)
+                with trace.span("retrieval:rerank", kind="retrieval",
+                                kb=kb_tag, input=query[:80]) as _rc:
+                    ranked = self._rerank(query, candidates, top_n=k)
+                    _rc["output"] = len(ranked)
                 # relevance_score 有真实语义（0~1），用“绝对下限+相对头部”过滤；
                 # RRF 分数只是排名融合值，无阈值语义，不过滤
                 return filter_reranked(ranked)
             except Exception as e:  # noqa: BLE001 - Rerank 失败降级为 RRF
-                print(f"[警告] Rerank 调用失败，降级为 RRF 结果: {e}")
+                logger.warning(f"Rerank 调用失败，降级为 RRF 结果: {e}")
         return candidates[:k]
+
+    # ---------------- 对外：检索调优调试 ----------------
+    def search_debug(self, query: str, top_k: int | None = None,
+                     rerank: bool = True, candidate_k: int = CANDIDATE_K,
+                     allowed_sources: set[str] | None = None) -> dict:
+        """检索调优实验室专用：与 search 同逻辑，但额外返回各阶段耗时、
+        召回数量与最终路线，便于定位「召回不准」发生在哪一级。
+        不走 trace.span（调试请求不应污染线上链路日志）。"""
+        if self._built_version != self.store.version:
+            self.build()
+        k = top_k or config.TOP_K
+        stages: list[dict] = []
+
+        t0 = time.perf_counter()
+        vec_hits = self.store.search(query, top_k=candidate_k)
+        stages.append({"stage": "dense 向量召回", "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                       "count": len(vec_hits)})
+
+        t0 = time.perf_counter()
+        bm25_hits = self._bm25_rank(query, candidate_k)
+        stages.append({"stage": "sparse BM25 召回", "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                       "count": len(bm25_hits)})
+
+        t0 = time.perf_counter()
+        rrf: dict[int, float] = {}
+        for rank, h in enumerate(vec_hits, 1):
+            idx = self._text2idx.get(h.text)
+            if idx is not None:
+                rrf[idx] = rrf.get(idx, 0.0) + 1.0 / (RRF_K + rank)
+        for rank, (idx, _score) in enumerate(bm25_hits, 1):
+            rrf[idx] = rrf.get(idx, 0.0) + 1.0 / (RRF_K + rank)
+        merged = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)[:candidate_k]
+        candidates = [
+            SearchHit(text=self.store.chunks[i]["text"],
+                      source=self.store.chunks[i]["source"],
+                      score=s, page=self.store.chunks[i].get("page"))
+            for i, s in merged
+        ]
+        if allowed_sources is not None:
+            candidates = [c for c in candidates if c.source in allowed_sources]
+        stages.append({"stage": "RRF 融合去重", "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                       "count": len(candidates)})
+
+        route = "dense + sparse → RRF"
+        final = candidates[:k]
+        if rerank and candidates:
+            t0 = time.perf_counter()
+            try:
+                ranked = self._rerank(query, candidates, top_n=k)
+                filtered = filter_reranked(ranked)
+                stages.append({"stage": "rerank 精排+阈值过滤",
+                               "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                               "count": len(filtered)})
+                route = "dense + sparse → RRF → rerank"
+                final = filtered
+            except Exception as e:  # noqa: BLE001 - 与主链路一致的降级策略
+                stages.append({"stage": "rerank（失败降级 RRF）",
+                               "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                               "count": len(final), "error": str(e)[:120]})
+
+        return {
+            "route": route,
+            "stages": stages,
+            "hits": [
+                {"rank": i, "text": h.text, "source": h.source,
+                 "page": h.page, "score": round(float(h.score), 4)}
+                for i, h in enumerate(final, 1)
+            ],
+        }

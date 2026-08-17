@@ -35,3 +35,18 @@ def test_hits_counter(temp_db):
     semantic_cache.lookup([1.0, 0, 0])
     semantic_cache.lookup([1.0, 0, 0])
     assert semantic_cache.stats()["total_hits"] == 2
+
+
+def test_delete_entry(temp_db):
+    semantic_cache.save("to_delete", "临时答案", [1.0, 0.0, 0.0])
+    before = semantic_cache.stats()["entries"]
+    # 找到刚写入的条目 id
+    hit = semantic_cache.lookup([1.0, 0.0, 0.0])
+    assert hit is not None
+    entry_id = hit[2]
+    # 删除
+    semantic_cache.delete_entry(entry_id)
+    # lookup 返回 None
+    assert semantic_cache.lookup([1.0, 0.0, 0.0]) is None
+    # 条目数减少 1
+    assert semantic_cache.stats()["entries"] == before - 1

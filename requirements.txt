@@ -1,7 +1,8 @@
 # LLM 调用（OpenAI 兼容模式对接百炼）
 openai>=1.40.0
 
-# RAG 向量检索（轻量实现，仅用 numpy 算余弦相似度）
+# RAG 向量检索：Chroma 本地持久化向量库（HNSW 余弦索引），numpy 仅作内存镜像/回退
+chromadb>=0.5.0
 numpy>=1.26.0
 
 # 混合检索：BM25 关键词路 + 中文分词；Rerank 调用用 requests（自带证书）
@@ -30,3 +31,10 @@ python-dotenv>=1.0.0
 
 # 测试（离线单测，不需 API Key；CI 同款）
 pytest>=8.0
+pytest-timeout>=2.3
+
+# Prometheus 监控指标（/metrics 端点 + 埋点）
+prometheus-client>=0.20
+
+# 企业 LDAP 登录（可选：未安装时 LDAP 登录自动禁用，不影响本地账号）
+ldap3>=2.9

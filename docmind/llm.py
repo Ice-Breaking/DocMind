@@ -12,6 +12,19 @@ from openai import (
 
 from docmind import config
 from docmind import trace
+from docmind.metrics import ERRORS, LLM_CALLS, LLM_LATENCY, LLM_TOKENS
+
+
+def _record_llm_metrics(status: str, start: float, resp=None) -> None:
+    """记录 LLM 调用指标；任何异常静默吞掉，绝不影响主链路"""
+    try:
+        LLM_CALLS.labels(model=config.CHAT_MODEL, status=status).inc()
+        LLM_LATENCY.labels(model=config.CHAT_MODEL).observe(time.time() - start)
+        if resp is not None and getattr(resp, "usage", None):
+            LLM_TOKENS.labels(direction="input").inc(resp.usage.prompt_tokens or 0)
+            LLM_TOKENS.labels(direction="output").inc(resp.usage.completion_tokens or 0)
+    except Exception:  # noqa: BLE001
+        pass
 
 _client: OpenAI | None = None
 
@@ -20,18 +33,43 @@ _RETRYABLE = (RateLimitError, APITimeoutError, APIConnectionError, InternalServe
 _MAX_RETRIES = 3
 
 
+def _active_cfg(kind: str) -> tuple[str, str, str]:
+    """在线模型配置优先：返回 (model_name, base_url, api_key)；
+    未配置生效模型时回退 .env。kind: llm / embedding"""
+    try:
+        from docmind import store as _store
+        m = _store.get_active_model(kind)
+        if m:
+            return (m["model_name"],
+                    m.get("base_url") or config.DASHSCOPE_BASE_URL,
+                    m.get("api_key") or config.DASHSCOPE_API_KEY)
+    except Exception:  # noqa: BLE001 - 库未就绪/异常时回退 env 配置
+        pass
+    model = config.EMBEDDING_MODEL if kind == "embedding" else config.CHAT_MODEL
+    return model, config.DASHSCOPE_BASE_URL, config.DASHSCOPE_API_KEY
+
+
+_clients: dict[tuple, OpenAI] = {}
+_client: OpenAI | None = None
+
+
 def get_client() -> OpenAI:
-    """获取单例 OpenAI 客户端（懒加载，方便测试时 mock）"""
+    """获取 OpenAI 客户端：按在线配置的 (base_url, key) 缓存多实例，
+    模型管理页切换供应商后立即生效；无在线配置时用默认单例"""
     global _client
-    if _client is None:
-        if not config.DASHSCOPE_API_KEY:
+    model_name, base_url, api_key = _active_cfg("llm")
+    cache_key = (base_url, api_key)
+    cli = _clients.get(cache_key)
+    if cli is None:
+        if not api_key:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，请在 .env 中填写")
-        _client = OpenAI(
-            api_key=config.DASHSCOPE_API_KEY,
-            base_url=config.DASHSCOPE_BASE_URL,
+        cli = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
             timeout=60.0,  # 避免请求挂起导致界面卡在“思考中”
         )
-    return _client
+        _clients[cache_key] = cli
+    return cli
 
 
 def _with_retry(fn):
@@ -68,14 +106,25 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
         kwargs["tool_choice"] = "auto"
     if max_tokens:
         kwargs["max_tokens"] = max_tokens
-    with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
+    _model = _active_cfg("llm")[0]
+    with trace.span("llm-chat", kind="generation", model=_model,
                     input=_brief_messages(messages)) as ctx:
-        resp = _with_retry(lambda: get_client().chat.completions.create(
-            model=config.CHAT_MODEL,
-            messages=messages,
-            temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
-            **kwargs,
-        ))
+        _start = time.time()
+        try:
+            resp = _with_retry(lambda: get_client().chat.completions.create(
+                model=_model,
+                messages=messages,
+                temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
+                **kwargs,
+            ))
+        except Exception:
+            _record_llm_metrics("error", _start)
+            try:
+                ERRORS.labels(stage="llm").inc()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        _record_llm_metrics("success", _start, resp)
         msg = resp.choices[0].message
         ctx["output"] = (msg.content or f"[调用工具: {[tc.function.name for tc in msg.tool_calls]}]")[:300] if msg.tool_calls or msg.content else ""
         if getattr(resp, "usage", None):
@@ -96,9 +145,11 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
+    _model = _active_cfg("llm")[0]
+
     def _create(thinking: bool):
         return get_client().chat.completions.create(
-            model=config.CHAT_MODEL,
+            model=_model,
             messages=messages,
             # 百炼建议：开启思维链时温度不宜过低（0.1 易陷入重复推理）
             temperature=0.6 if thinking else 0.1,
@@ -106,21 +157,52 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
             **kwargs,
         )
 
+    def _stream_with_metrics(gen):
+        """流式指标包装：首 chunk 记成功/耗时，usage 尾包记 token，异常记 error"""
+        _start = time.time()
+        _counted = False
+        try:
+            for chunk in gen:
+                if not _counted:
+                    _record_llm_metrics("success", _start)
+                    _counted = True
+                if getattr(chunk, "usage", None):
+                    try:
+                        LLM_TOKENS.labels(direction="input").inc(chunk.usage.prompt_tokens or 0)
+                        LLM_TOKENS.labels(direction="output").inc(chunk.usage.completion_tokens or 0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                yield chunk
+        except Exception:
+            _record_llm_metrics("error", _start)
+            try:
+                ERRORS.labels(stage="llm").inc()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
     try:
-        yield from _with_retry(lambda: _create(enable_thinking))
+        yield from _stream_with_metrics(_with_retry(lambda: _create(enable_thinking)))
     except BadRequestError:
         if not enable_thinking:
             raise
-        yield from _with_retry(lambda: _create(False))
+        yield from _stream_with_metrics(_with_retry(lambda: _create(False)))
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交"""
+    """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交。
+    注意：切换在线 Embedding 模型只影响新增切片，存量索引维度不变——
+    换模型后必须全量重建知识库索引。"""
+    _model, _base, _key = _active_cfg("embedding")
+    cli = _clients.get((_base, _key))
+    if cli is None:
+        cli = OpenAI(api_key=_key, base_url=_base, timeout=60.0)
+        _clients[(_base, _key)] = cli
     batch_size = 10
     results: list[list[float]] = []
     for i in range(0, len(texts), batch_size):
-        resp = _with_retry(lambda chunk=texts[i:i + batch_size]: get_client().embeddings.create(
-            model=config.EMBEDDING_MODEL,
+        resp = _with_retry(lambda chunk=texts[i:i + batch_size]: cli.embeddings.create(
+            model=_model,
             input=chunk,
         ))
         results.extend(d.embedding for d in resp.data)

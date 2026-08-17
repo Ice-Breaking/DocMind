@@ -9,6 +9,7 @@
 2. 重复调用检测：连续相同的工具+参数直接打断
 3. 工具异常不抛出，转为观察结果让 LLM 自我纠正
 """
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -18,6 +19,8 @@ from docmind import guard
 from docmind import trace
 from docmind.agent.tools import ToolRegistry
 from docmind.llm import _brief_messages, chat, chat_stream
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天是 {date.today().isoformat()}。
 
@@ -96,11 +99,16 @@ class ReActAgent:
     registry: ToolRegistry
     history: list[dict] = field(default_factory=list)
     last_tools: set = field(default_factory=set)   # 本轮调用过的工具名
+    # 自定义助手的系统提示；None/空串回退内置 SYSTEM_PROMPT（默认行为不变）
+    system_prompt: str | None = None
+
+    def __post_init__(self):
+        self.system_prompt = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
 
     def ask(self, question: str):
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答"""
         if not self.history:
-            self.history.append({"role": "system", "content": SYSTEM_PROMPT})
+            self.history.append({"role": "system", "content": self.system_prompt})
         # Prompt 注入防护：高危用户输入（指令覆盖/越狱术语）确定性拦截，不进 LLM
         risk = guard.is_high_risk_user_input(question)
         if risk:
@@ -173,8 +181,21 @@ class ReActAgent:
 
             # 模型给出最终回答（无工具调用）
             if not tool_calls_acc:
+                refused = False
+                # 证据拒答（严格模式）：KB 检索过但未命中、又无联网结果 →
+                # 确定性替换为拒答，不依赖模型自觉（防幻觉兜底）；
+                # 用过联网搜索时不拒答，走下方 OOD 标注路径
+                if config.EVIDENCE_REFUSAL and kb_called and not kb_hit and not web_used:
+                    refused = True
+                    with trace.span("evidence-refusal", kind="retrieval",
+                                    input=question[:120]):
+                        pass   # 仅记录拒答事件，供质量监控统计
+                    answer = ("抱歉，知识库中未找到与您的问题相关的资料，"
+                              "为保证回答准确性，我不进行推测性作答。\n"
+                              "您可以尝试换一种方式提问，或联系管理员补充知识库内容。")
                 # OOD 透明度守卫：KB 检索过但为空、且终答未带任何标注 → 自动补标
-                if kb_called and not kb_hit and _OOD_MARKER_KEY not in answer:
+                if (not refused and kb_called and not kb_hit
+                        and _OOD_MARKER_KEY not in answer):
                     marker = _OOD_MARKER_WEB if web_used else _OOD_MARKER_KB_EMPTY
                     answer = f"{marker}\n\n{answer}"
                 self.history.append({"role": "assistant", "content": answer})
@@ -258,7 +279,7 @@ class ReActAgent:
             if out and out != q:
                 return out
         except Exception as e:  # noqa: BLE001 - 改写失败不阻塞主链路
-            print(f"[警告] 查询改写失败，用原问题检索: {e}")
+            logger.warning(f"查询改写失败，用原问题检索: {e}")
         return None
 
     def reset(self) -> None:

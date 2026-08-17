@@ -65,3 +65,88 @@ body {
 .dm-smoke-events { margin-top: 18px; }
 .dm-smoke-track { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .dm-smoke-answer { margin-top: 10px; background: #f8fafc; }
+
+/* ---------------- Chat 对话页 ---------------- */
+.dm-chat { display: flex; height: 100%; min-height: 0; }
+.dm-chat-sidebar { width: 280px; border-right: 1px solid #e9ecf7; background: #fff; display: flex; flex-direction: column; min-height: 0; }
+.dm-chat-sidebar-header { padding: 16px; border-bottom: 1px solid #e9ecf7; }
+.dm-chat-sidebar-list { flex: 1; overflow-y: auto; }
+.dm-chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.dm-chat-messages { flex: 1; overflow-y: auto; padding: 24px; }
+.dm-chat-input { border-top: 1px solid #e9ecf7; padding: 16px 24px; background: #fff; }
+
+/* Citation links */
+.dm-source-link { color: #6366f1 !important; cursor: pointer; text-decoration: underline dotted !important; text-underline-offset: 2px; }
+.dm-source-link:hover { background: #eef2ff; border-radius: 2px; }
+
+/* Feedback buttons */
+.dm-feedback { display: flex; gap: 4px; margin-top: 6px; }
+
+/* Thought chain */
+.dm-thought-chain { margin-bottom: 8px; }
+
+/* Suggestion chips */
+.dm-suggestions { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 24px 0; }
+
+/* ---------------- Markdown rendering in chat messages ---------------- */
+.dm-chat .react-markdown h1,
+.dm-chat .react-markdown h2,
+.dm-chat .react-markdown h3 {
+  margin: 0.5em 0 0.3em;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.dm-chat .react-markdown p {
+  margin: 0.3em 0;
+}
+
+.dm-chat .react-markdown ul,
+.dm-chat .react-markdown ol {
+  padding-left: 1.5em;
+  margin: 0.3em 0;
+}
+
+.dm-chat .react-markdown code {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.dm-chat .react-markdown pre {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.dm-chat .react-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.dm-chat .react-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+}
+
+.dm-chat .react-markdown th,
+.dm-chat .react-markdown td {
+  border: 1px solid #e8e8e8;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.dm-chat .react-markdown th {
+  background: #fafafa;
+  font-weight: 600;
+}
+
+.dm-chat .react-markdown blockquote {
+  border-left: 3px solid #d9d9d9;
+  padding-left: 12px;
+  margin: 0.5em 0;
+  color: #666;
+}

@@ -4,6 +4,7 @@
     knowledge_search（RAG 检索） + get_current_time（本地工具）
     + MCP Server 远程工具 → ToolRegistry → ReActAgent
 """
+import logging
 from datetime import datetime
 
 from docmind import acl, config
@@ -13,9 +14,19 @@ from docmind.mcp_client import register_mcp_tools
 from docmind.rag.hybrid import HybridRetriever
 from docmind.rag.vector_store import VectorStore
 
+logger = logging.getLogger(__name__)
 
-def build_agent():
-    """装配 Agent，返回 (agent, vector_store, mcp_connections)"""
+# 共享运行态：build_shared 装配完成后登记 store/retriever，
+# 供管理端点 /api/admin/reindex 触发知识库增量重建
+_shared_state: dict = {}
+
+
+def build_shared():
+    """构建共享资源（registry、store、连接），启动时调用一次。
+    
+    返回 (registry, vector_store, mcp_connections)。
+    ToolRegistry 无状态可安全共享；只有 ReActAgent（持有 history）需要每请求创建。
+    """
     registry = ToolRegistry()
 
     # ---- RAG 知识库：向量库 + 混合检索（BM25+RRF+Rerank）----
@@ -23,7 +34,13 @@ def build_agent():
     n = store.build()
     retriever = HybridRetriever(store)
     retriever.build()
-    print(f"[DocMind] 知识库加载完成：{n} 个切片，混合索引已构建")
+    logger.info(f"知识库加载完成：{n} 个切片，混合索引已构建")
+    _shared_state.update(store=store, retriever=retriever)
+    try:
+        from docmind.metrics import KNOWLEDGE_CHUNKS
+        KNOWLEDGE_CHUNKS.set(n)
+    except Exception:  # noqa: BLE001 - 指标故障不影响启动
+        pass
 
     def knowledge_search(args: dict) -> str:
         query = args.get("query", "")
@@ -32,9 +49,27 @@ def build_agent():
         # 文档级 ACL：只检索当前用户可见的文档；无权文档被过滤后
         # 返回与"真没有"完全相同的话术，不泄露受限文档的存在性
         allowed = acl.allowed_docs(acl.get_current_user())
-        hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
-                                allowed_sources=allowed)
+        # 多 KB 路由：当前请求若挂着自定义助手（contextvar 由 app 端点设置），
+        # 则检索其绑定的知识库集合；空列表回退默认单库，行为与旧链路完全一致。
+        # 惰性导入 chat_stream：contextvar 归属该模块，顶层导入会循环依赖
+        try:
+            from docmind.chat_stream import current_kb_ids
+            kb_ids = current_kb_ids.get()
+        except Exception:  # noqa: BLE001 - 无上下文时按默认库处理
+            kb_ids = []
+        kb_ids = [k for k in kb_ids if k and k != "default"]
+        if kb_ids:
+            from docmind.rag.kb_registry import get_registry
+            hits = get_registry().search_multi(kb_ids, query, top_k=config.TOP_K,
+                                               allowed_sources=allowed)
+        else:
+            hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
+                                    allowed_sources=allowed)
         if not hits:
+            if config.EVIDENCE_REFUSAL:
+                # 严格模式：工具结果里直接下达拒答指令，尽早终结 ReAct 循环省 token
+                return ("知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
+                        "当前为严格模式：请明确告知用户无法回答，禁止用通识编造。")
             return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
         lines = []
         for i, h in enumerate(hits, 1):
@@ -144,5 +179,42 @@ def build_agent():
     from docmind.config import MCP_SERVERS
     connections = register_mcp_tools(registry, MCP_SERVERS)
 
-    agent = ReActAgent(registry=registry)
-    return agent, store, connections
+    return registry, store, connections
+
+
+def create_agent(registry, system_prompt: str | None = None):
+    """为每个请求创建新的 Agent 实例，避免并发请求共享 history 导致上下文混乱。
+
+    system_prompt 非空时覆盖默认 SYSTEM_PROMPT（自定义助手场景）；None 保持原行为。"""
+    return ReActAgent(registry=registry, system_prompt=system_prompt)
+
+
+def rebuild_knowledge_index() -> dict:
+    """手动触发知识库索引增量重建（管理端点 /api/admin/reindex 调用）。
+
+    线程安全：非阻塞锁防止并发重建导致切片/矩阵撕裂；
+    重建后 store.version 递增，所有 HybridRetriever 在下次检索时
+    懒重建 BM25，无需逐个手动同步（含 app 层独立的 locate_retriever）。
+    """
+    import threading
+
+    store = _shared_state.get("store")
+    if store is None:
+        return {"error": "知识库尚未初始化"}
+    lock = _shared_state.setdefault("_rebuild_lock", threading.Lock())
+    if not lock.acquire(blocking=False):
+        return {"error": "索引正在重建中，请稍后再试"}
+    try:
+        result = store.rebuild_incremental(config.KNOWLEDGE_DIR)
+        try:
+            from docmind.metrics import KNOWLEDGE_CHUNKS
+            KNOWLEDGE_CHUNKS.set(len(store.chunks))
+        except Exception:  # noqa: BLE001 - 指标故障不影响重建结果
+            pass
+        logger.info(f"知识库索引手动重建完成: {result}")
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.exception("知识库索引重建失败")
+        return {"error": f"重建失败: {e}"}
+    finally:
+        lock.release()

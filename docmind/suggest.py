@@ -8,9 +8,12 @@
 - 结果按答案哈希入库缓存（store.suggestions），同答案不重复生成
 """
 import json
+import logging
 import re
 
 from docmind.llm import chat
+
+logger = logging.getLogger(__name__)
 
 FALLBACK_SUGGESTIONS = [
     "能详细解释一下吗？",
@@ -61,5 +64,5 @@ def generate_suggestions(question: str, answer: str) -> list[str]:
         if items:
             return items
     except Exception as e:  # noqa: BLE001 - 副任务失败不阻塞
-        print(f"[警告] 动态追问生成失败，回退固定建议: {e}")
+        logger.warning(f"动态追问生成失败，回退固定建议: {e}")
     return list(FALLBACK_SUGGESTIONS)
