@@ -245,7 +245,7 @@ $ python scripts/view_traces.py
 
 **工程**
 - [x] 单元测试 + CI：48 个离线单测（pytest）+ GitHub Actions 自动执行
-- [ ] Docker 镜像补 LibreOffice、chat.db 卷挂载、健康检查
+- [x] Docker 镜像完善：LibreOffice headless + CJK 字体（容器内 docx→PDF 保真预览）、data 卷持久化（chat.db/cache.db/索引/预览缓存）、HEALTHCHECK（实测容器内转 PDF 成功、重启后账号留存、healthy）
 
 **体验**
 - [x] 动态追问：LLM 按问答内容生成针对性追问（答案哈希缓存 + 失败回退固定三问）
