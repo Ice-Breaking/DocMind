@@ -1823,6 +1823,49 @@ if __name__ == "__main__":
         chatstore.save_suggestions(key, items)
         return {"suggestions": items, "cached": False}
 
+    # ---- SSE 流式聊天（前后端分离新 UI 的应答协议层，与 Gradio 主链路并存） ----
+    # 事件：cache/thinking/token/step/error/final/done，见 docmind/chat_stream.py
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from docmind import chat_stream as chat_stream_mod
+
+    class ChatIn(BaseModel):
+        question: str
+        session_id: str = ""
+
+    @demo.app.post("/api/chat/stream", include_in_schema=False)
+    async def _chat_stream(body: ChatIn, request: _fastapi.Request):
+        user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500
+        question = body.question.strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="question 不能为空")
+        # 会话归属校验：防重建/写入他人会话上下文
+        if body.session_id:
+            owner = chatstore.session_owner(body.session_id)
+            if owner not in (None, "", user):
+                raise HTTPException(status_code=403, detail="无权访问该会话")
+
+        def gen():
+            final_raw = ""
+            for ev in chat_stream_mod.stream_events(agent, question,
+                                                    body.session_id, user):
+                if ev["kind"] == "final":
+                    final_raw = ev["answer"]
+                yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"
+            # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）
+            if body.session_id and final_raw:
+                try:
+                    chatstore.append_message(body.session_id, "user", question, user=user)
+                    chatstore.append_message(body.session_id, "assistant",
+                                             final_raw, raw=final_raw, user=user)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[警告] SSE 会话持久化失败: {e}")
+            yield f"event: done\ndata: {_json.dumps({'session_id': body.session_id}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            gen(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @demo.app.get("/api/sessions", include_in_schema=False)
     async def _list_sessions(request: _fastapi.Request):
         user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500

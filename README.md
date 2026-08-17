@@ -198,6 +198,7 @@ $ python scripts/view_traces.py
 | 数据可视化 | Prompt 引导模型对流程/架构类问题输出 ` ```mermaid ` 图表；内联 vendored mermaid.min.js（避 CDN），前端用 `mermaid.run` 对 Gradio 生成的 `.mermaid` 容器原地渲染为 SVG |
 | 引用溯源预览 | PDF 切片携带页码元数据 → 检索结果带页码 → 模型引用写成 `[来源: 文件 · 第N页]` → 前端链接化，点击弹窗预览原文（vendored pdf.js 定位到页，支持缩放/翻页/页码跳转/键盘导航；docx 经 LibreOffice 转 PDF 复用 PDF 通道，未安装降级文本预览；xlsx 解析为 Sheet 表格预览；图片预览原图 + OCR 识别文本（百炼 qwen-vl，结果磁盘缓存并入库可检索） |
 | 会话持久化 | SQLite 单文件（data/chat.db，标准库零依赖）：session_id 由前端 localStorage 生成，引导脚本写入隐藏框并触发历史恢复；清空对话即开新会话 |
+| SSE 流式协议层 | 前后端分离第一步：POST /api/chat/stream 返回 SSE 事件流（cache/thinking/token/step/error/final/done），核心流程抽为 docmind/chat_stream.stream_events 纯生成器（可单测）；多轮上下文每请求从 chat.db raw 对确定性重建（无单例污染，铺路并发）；会话归属校验（他人会话 403）、ACL/语义缓存/注入拦截与主链路一致；与 Gradio 并存互不影响 |
 | 引用锚点细化 | 点击引用不再只打开文档，而是定位到被引用的段落：引用点击携带问题上下文 → /api/locate 在该文档内检索最相关片段（复用 VectorStore 的 BM25 独立检索器，ACL 感知无权返回空不泄露存在性）；md/txt/docx-text 正文内 <mark> 高亮 + 平滑滚动，PDF/docx-PDF/xlsx 顶部「📌 引用片段」面板 + PDF 页码跳转；面板插入用 MutationObserver 监听 canvas 出现，不依赖 renderPdf 的 Promise resolve |
 | 动态追问 | 固定三问升级为按回答内容动态生成：消息稳定后前端按需 POST /api/suggest（问题+答案节选），服务端一次低成本 LLM 调用（max_tokens 限长）输出 JSON 数组，解析容错（剥围栏/取首数组/截三项）；按答案哈希入 suggestions 表缓存，同答案不重复生成；失败回退固定三问 UX 永不缺位；前端纯追加 DOM + 3 次重试上限 |
 | 反馈闭环 | 完成的回答下 👍/👎（稳定性闸门后追加），POST /api/feedback 按 session+消息序号 upsert；刷新后 GET 恢复选中态，👎 即 badcase 收集入口 |
