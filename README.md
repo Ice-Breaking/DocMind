@@ -108,6 +108,22 @@ docker compose up -d --build
 - API Key 通过 `env_file` 注入，**不进镜像、不进仓库**
 - 向量索引缓存/调用链日志用命名卷持久化（重启不重建索引）
 - 知识库目录挂载到宿主机：改文档后 `docker compose restart` 即生效，无需重新构建镜像
+
+## 新前端 web/（前后端分离，建设中）
+
+Gradio 界面将逐步替换为 Vite + React + Ant Design X / Ant Design 的产品级 UI：
+
+```bash
+cd web
+npm install          # 国内可用 --registry=https://registry.npmmirror.com
+npm run dev          # http://127.0.0.1:5173（代理 /api /login /files 到 7860）
+```
+
+- 登录页对接后端 `/login`（cookie 同源流转），路由守卫经 `/api/me` 探活
+- 对话走 `POST /api/chat/stream` SSE 事件流（协议见 docmind/chat_stream.py）
+- 开发代理注意：SSE 需 `res.close + !writableEnded` 才销毁上游请求（vite.config.ts
+  的 sseSafe），监听 req.close 会误杀普通请求；生产部署 nginx 需 `proxy_buffering off`
+- 进度：① SSE 协议层 ✅ ② 脚手架 + 登录页 ✅ ③ Ant Design X 对话页 ④ Ant Design 后台
 - 依赖层与代码层分离，改代码重建镜像不重装依赖
 - **SearXNG 自托管搜索引擎**随 compose 一起编排：容器内自动经
   `http://searxng:8080` 直连，作为 Tavily 的免费无限量兜底
