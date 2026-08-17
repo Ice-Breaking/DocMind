@@ -9,13 +9,14 @@
 2. 重复调用检测：连续相同的工具+参数直接打断
 3. 工具异常不抛出，转为观察结果让 LLM 自我纠正
 """
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
 from docmind import config
 from docmind import trace
 from docmind.agent.tools import ToolRegistry
-from docmind.llm import _brief_messages, chat_stream
+from docmind.llm import _brief_messages, chat, chat_stream
 
 SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天是 {date.today().isoformat()}。
 
@@ -60,6 +61,24 @@ _OOD_MARKER_KEY = "知识库无相关内容"      # 命中任一变体即视为�
 _KB_NO_HIT_KEY = "未通过相关性阈值"        # knowledge_search 空结果的判定锚点
 _KB_HIT_KEY = "[1] ("                    # knowledge_search 有结果的格式锚点
 
+# 多轮查询改写：追问常含指代/省略（"它的端口？""怎么启动？"），原样检索必漏。
+# 命中指代特征或问题过短时，用一次低成本 LLM 调用消解指代、补全上下文后再进 ReAct 循环。
+_FOLLOWUP_RE = re.compile(
+    r"(它的?|这个|那个|这些|那些|哪[个种]|上述|前面|之前|刚才|上面|第[一二三四五六七八九十\d]+[个条点步])"
+)
+_SHORT_Q_LEN = 12   # 多轮场景下过短的问题大概率是省略式追问
+_REWRITE_PROMPT = """请基于对话历史，把用户最新问题改写成一句自包含、适合知识库检索的问题。
+要求：
+1. 消解指代（它/这个/那个等）并补全省略的主语/对象；
+2. 若原问题已经自包含，原样返回；
+3. 只输出改写后的问题，不要解释、不要引号。
+
+对话历史：
+{ctx}
+
+最新问题：{q}
+改写后的问题："""
+
 
 @dataclass
 class AgentStep:
@@ -77,6 +96,11 @@ class ReActAgent:
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答"""
         if not self.history:
             self.history.append({"role": "system", "content": SYSTEM_PROMPT})
+        # 多轮查询改写：仅多轮且含指代/过短时触发；改写失败静默回退原问题
+        rewritten = self._rewrite_if_followup(question)
+        if rewritten:
+            yield AgentStep("rewrite", f"多轮改写：{question} → {rewritten}")
+            question = rewritten
         self.history.append({"role": "user", "content": question})
 
         openai_tools = self.registry.to_openai_tools() or None
@@ -189,6 +213,30 @@ class ReActAgent:
         fallback = "抱歉，我尝试了多个步骤仍未能得出结论，请简化问题后重试。"
         self.history.append({"role": "assistant", "content": fallback})
         yield AgentStep("final", fallback)
+
+    def _rewrite_if_followup(self, question: str) -> str | None:
+        """多轮追问消解指代：返回改写后的问题；首轮/自包含/失败均返回 None"""
+        turns = [m for m in self.history if m["role"] in ("user", "assistant")]
+        if not turns:
+            return None
+        q = question.strip()
+        if not (_FOLLOWUP_RE.search(q) or len(q) <= _SHORT_Q_LEN):
+            return None
+        ctx = "\n".join(
+            f"{'用户' if m['role'] == 'user' else '助手'}: {str(m.get('content') or '')[:200]}"
+            for m in turns[-4:]
+        )
+        try:
+            with trace.span("query-rewrite", kind="retrieval", input=q) as rctx:
+                msg = chat([{"role": "user",
+                             "content": _REWRITE_PROMPT.format(ctx=ctx, q=q)}])
+                out = (msg.content or "").strip().strip('"“”').strip()
+                rctx["output"] = out[:200]
+            if out and out != q:
+                return out
+        except Exception as e:  # noqa: BLE001 - 改写失败不阻塞主链路
+            print(f"[警告] 查询改写失败，用原问题检索: {e}")
+        return None
 
     def reset(self) -> None:
         self.history.clear()
