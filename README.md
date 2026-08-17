@@ -163,6 +163,9 @@ scripts/
 ├── gen_sample_docs.py     # 示例 PDF/Word 文档生成工具
 └── view_traces.py         # 本地调用链日志查看器
 
+tests/                     # 离线单测（48 例，全 mock 无需 API Key，pytest tests/）
+.github/workflows/ci.yml   # GitHub Actions：push/PR 自动跑单测
+
 docs/knowledge/            # 知识库文档（.md/.txt/.pdf/.docx/.xlsx/图片，启动时自动建索引；图片走 OCR）
 ```
 
@@ -199,6 +202,7 @@ $ python scripts/view_traces.py
 | 多会话侧边栏 | 标题栏「☰ 会话」抽屉：会话列表（标题/轮数/时间/当前高亮）、切换、新建、删除（带确认）。切换时服务端 reset Agent 并用 raw 干净文本重建多轮上下文——消息表 content 存渲染版、raw 存纯净终答，展示与 LLM 上下文分离 |
 | 认证权限 | Gradio 原生登录门禁（launch auth）+ users 表 pbkdf2 哈希（manage_users CLI 管理）；会话按用户隔离（sessions.user 归属 + /api 路由 cookie 鉴权 401/403）；无账号自动播种 admin（ADMIN_PASSWORD 环境变量） |
 | 端到端评测 | eval_e2e.py：真实链路跑评测集（来源命中 0.5 + 关键要点 0.3 + 引用格式 0.2，OOD 用例评诚实性），可选 --judge LLM 评审；报告落 data/eval/*.json |
+| 测试与 CI | 48 个离线单测（LLM/embedding 全 mock，零 API 成本）：结构化切片/注入防护/ACL/存储层/语义缓存/混合检索（RRF+ACL 过滤）/Agent 核心循环（工具循环/步数兜底/注入拦截/OOD 守卫/多轮改写）；临时 DB/KB fixture 隔离真实数据；GitHub Actions 在 push/PR 自动执行 |
 | 管理后台 | /admin 看板（仅 is_admin，manage_users make-admin 授权）：用量看板（用户/会话/消息/反馈/LLM 与工具调用数/token 出入量/近 7 日趋势/缓存命中/失败数，数据源 chat.db + trace_log.jsonl）；Badcase 流转（👎 反馈明细 + 待处理/已解决/已忽略状态 + 备注）；会话审计（全用户会话列表 + 内容查看）；非管理员访问 403 |
 | 文档级 ACL | 默认公开 + 按文档限制（manage_acl CLI：restrict/grant/revoke）；knowledge_search 按当前用户过滤候选（rerank 前过滤，无权文档不挤占 top_k）；未授权检索返回与"真没有"无差别的话术，不泄露受限文档存在性；语义缓存联动：引用受限文档的答案不入缓存、命中时按当前用户权限二次校验防跨用户泄露 |
 | Prompt 注入防护 | 三层防线（guard.py 模式库，确定性可审计）：① 系统提示词加固——工具结果是数据非指令、不泄露内部规则；② 工具结果净化——高危「指令覆盖/越狱术语」句子剥离并上报 trace（🛡️ 步骤），中低危仅上报不改动防误伤合法安全文档；③ 用户输入高危（指令覆盖/越狱术语，中英双语）确定性拦截不进 LLM；实测恶意文档注入句被剥离而正常内容保留 |
@@ -238,7 +242,7 @@ $ python scripts/view_traces.py
 - [x] 管理后台：/admin 三标签看板（用量/badcase 流转/会话审计），is_admin 门禁
 
 **工程**
-- [ ] 单元测试 + CI 冒烟（当前零测试）
+- [x] 单元测试 + CI：48 个离线单测（pytest）+ GitHub Actions 自动执行
 - [ ] Docker 镜像补 LibreOffice、chat.db 卷挂载、健康检查
 
 **体验**

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 离线单测：全部 mock LLM/embedding，无需 API Key
+      # 覆盖：结构化切片 / 注入防护 / ACL / 存储层 / 语义缓存 / 混合检索 / Agent 核心循环
+      - name: Run tests
+        run: pytest tests/ -v --tb=short

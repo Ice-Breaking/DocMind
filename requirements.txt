@@ -27,3 +27,6 @@ gradio>=5.0.0
 
 # 环境变量
 python-dotenv>=1.0.0
+
+# 测试（离线单测，不需 API Key；CI 同款）
+pytest>=8.0

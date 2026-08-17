@@ -19,8 +19,8 @@ INJECTION_PATTERNS = [
      re.compile(r"忽略(上述|之前|以上|前面|所有|一切)?(所有|一切|任何|全部)?(的)?"
                 r"(指令|规则|要求|设定|提示|限制)", re.I)),
     ("指令覆盖", "high",
-     re.compile(r"(ignore|disregard|forget)\s+(all\s+)?(previous|above|prior|earlier)\s+"
-                r"(instructions?|rules?|prompts?|guidelines?)", re.I)),
+     re.compile(r"(ignore|disregard|forget)\s+(?:\w+\s+){0,2}"
+                r"(instructions?|rules?|prompts?|guidelines?|constraints?)", re.I)),
     ("指令覆盖", "high",
      re.compile(r"不要(遵守|执行|理会)(之前|上述|以上|任何)?(的)?(指令|规则|要求)", re.I)),
     ("越狱术语", "high",
