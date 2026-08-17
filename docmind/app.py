@@ -242,6 +242,11 @@ footer { display: none !important; }
 .dm-preview-text { text-align: left; white-space: pre-wrap; font-size: 12px; line-height: 1.7; background: #fff; padding: 14px; border-radius: 8px; margin: 0; }
 .dm-preview-loading, .dm-preview-error { color: #64748b; font-size: 13px; padding: 24px; }
 .dm-preview-error { color: #ef4444; }
+/* 引用锚点：正文高亮 + 引用片段面板 */
+mark.dm-anchor { background: #fef08a; padding: 0 2px; border-radius: 2px; }
+.dm-anchor-panel { text-align: left; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; }
+.dm-anchor-title { font-weight: 600; color: #b45309; margin-bottom: 6px; }
+.dm-anchor-text { color: #78350f; line-height: 1.6; white-space: pre-wrap; }
 
 /* Excel 预览：Sheet 页签 + 表格 */
 .dm-xlsx { text-align: left; }
@@ -971,31 +976,126 @@ FOLD_SCRIPT = """
   }
 
   // ---------- 打开预览（按格式分流） ----------
-  function openPreview(file, page) {
+  // 引用锚点：找到引用所在消息对应的用户问题（定位检索的上下文）
+  function findQuestionFor(el) {
+    const msg = el.closest('.message');
+    const msgs = Array.from(document.querySelectorAll('#chatbot .message'));
+    const i = msgs.indexOf(msg);
+    for (let j = i - 1; j >= 0; j--) {
+      if (msgs[j].classList.contains('user')) return (msgs[j].innerText || '').slice(0, 200);
+    }
+    return '';
+  }
+
+  async function locateFragment(file, query) {
+    if (!query) return null;
+    try {
+      const r = await fetch('/api/locate?doc=' + encodeURIComponent(file)
+        + '&q=' + encodeURIComponent(query));
+      const d = r.ok ? await r.json() : null;
+      return d && d.found ? d : null;
+    } catch (e) { return null; }
+  }
+
+  // 监听预览体：canvas/表格出现后（渲染完成）再插「📌 引用片段」面板，
+  // 用 MutationObserver 而非 .then 链，避免依赖 renderPdf 的 Promise resolve
+  function watchCanvasThenPanel(file, query) {
+    if (!query) return;
+    const b = bodyEl();
+    if (!b) return;
+    let done = false;
+    const tryInsert = () => {
+      if (done) return;
+      const ready = b.querySelector('canvas') || b.querySelector('.dm-xlsx');
+      if (!ready || b.querySelector('.dm-anchor-panel')) return;
+      done = true;
+      if (obs) obs.disconnect();
+      locateAndPanel(file, query);
+    };
+    const obs = new MutationObserver(tryInsert);
+    obs.observe(b, { childList: true, subtree: true });
+    setTimeout(tryInsert, 1200);   // 兜底：canvas 已存在时直接插
+    setTimeout(() => { if (!done && obs) obs.disconnect(); }, 15000);  // 超时断开
+  }
+
+  // PDF/docx-PDF/xlsx：预览体顶部插入「📌 引用片段」面板
+  async function locateAndPanel(file, query) {
+    const frag = await locateFragment(file, query);
+    if (!frag) return;
+    const b = bodyEl();
+    if (!b) return;
+    const panelEl = document.createElement('div');
+    panelEl.className = 'dm-anchor-panel';
+    const title = document.createElement('div');
+    title.className = 'dm-anchor-title';
+    title.textContent = '📌 引用片段' + (frag.page ? '（第 ' + frag.page + ' 页）' : '');
+    const txt = document.createElement('div');
+    txt.className = 'dm-anchor-text';
+    txt.textContent = frag.text.length > 220 ? frag.text.slice(0, 220) + '…' : frag.text;
+    panelEl.appendChild(title);
+    panelEl.appendChild(txt);
+    b.insertBefore(panelEl, b.firstChild);
+  }
+
+  // md/txt/docx-text：正文内 <mark> 高亮 + 平滑滚动到锚点
+  async function locateAndHighlight(file, query) {
+    const frag = await locateFragment(file, query);
+    if (!frag) return;
+    const pre = bodyEl().querySelector('.dm-preview-text');
+    if (!pre) return;
+    const text = pre.textContent;
+    let idx = text.indexOf(frag.text);
+    let piece = frag.text;
+    if (idx === -1) {
+      // 整片不匹配时退而用片段中最长的行做锚点
+      const lines = frag.text.split('\\n').filter((l) => l.trim().length >= 8);
+      lines.sort((a, b) => b.length - a.length);
+      for (const ln of lines) { idx = text.indexOf(ln); piece = ln; if (idx !== -1) break; }
+    }
+    if (idx === -1) return;
+    const before = text.slice(0, idx), after = text.slice(idx + piece.length);
+    pre.textContent = '';
+    pre.appendChild(document.createTextNode(before));
+    const mark = document.createElement('mark');
+    mark.className = 'dm-anchor';
+    mark.textContent = piece;
+    pre.appendChild(mark);
+    pre.appendChild(document.createTextNode(after));
+    mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+
+  function openPreview(file, page, locateQuery) {
     const ov = ensureModal();
     ov.style.display = "flex";
     ov.querySelector(".dm-preview-title").textContent = "📄 " + file;
     ov.querySelector(".dm-preview-pager").style.display = "none";
     const ext = file.split(".").pop().toLowerCase();
     const url = "/files/" + encodeURIComponent(file);
+    const hilite = () => locateAndHighlight(file, locateQuery); // 内联高亮
     if (ext === "pdf") {
       renderPdf(url, page);
+      watchCanvasThenPanel(file, locateQuery);
     } else if (ext === "xlsx") {
       renderXlsx(url);
+      watchCanvasThenPanel(file, locateQuery);
     } else if (["png", "jpg", "jpeg", "webp"].indexOf(ext) !== -1) {
       renderImage(url);
     } else if (ext === "docx") {
       showLoading("Word 文档加载中…");
       fetch(url + "?as=pdf", { method: "HEAD" }).then((r) => {
         const ct = r.headers.get("content-type") || "";
-        if (r.ok && ct.includes("pdf")) return renderPdf(url + "?as=pdf", 1);
+        if (r.ok && ct.includes("pdf")) {
+          renderPdf(url + "?as=pdf", 1);
+          watchCanvasThenPanel(file, locateQuery);
+          return;
+        }
         return fetch(url + "?as=text").then((r2) => r2.ok ? r2.text()
-          : Promise.reject(new Error("HTTP " + r2.status))).then(showText);
+          : Promise.reject(new Error("HTTP " + r2.status))).then(showText).then(hilite);
       }).catch(showError);
     } else {
       showLoading("加载中…");
       fetch(url).then((r) => r.ok ? r.text() : Promise.reject(new Error("HTTP " + r.status)))
-        .then(showText).catch(showError);
+        .then(showText).then(hilite).catch(showError);
     }
   }
 
@@ -1004,7 +1104,8 @@ FOLD_SCRIPT = """
     const link = e.target.closest(".dm-source-link");
     if (!link) return;
     e.stopPropagation();
-    openPreview(link.dataset.file, parseInt(link.dataset.page || "0", 10));
+    openPreview(link.dataset.file, parseInt(link.dataset.page || "0", 10),
+                findQuestionFor(link));
   });
 })();
 </script>
@@ -1679,6 +1780,26 @@ if __name__ == "__main__":
     # ---- 管理后台：用量看板 / badcase 流转 / 会话审计（仅管理员） ----
     from docmind.admin import register_admin_routes
     register_admin_routes(demo.app)
+
+    # ---- 引用锚点定位：按用户问题在指定文档内检索最相关片段 ----
+    # （复用已构建的 VectorStore，BM25 索引独立构建一次；ACL 感知，无权返回空）
+    from docmind.rag.hybrid import HybridRetriever
+    locate_retriever = HybridRetriever(store)
+    locate_retriever.build()
+
+    @demo.app.get("/api/locate", include_in_schema=False)
+    async def _locate(request: _fastapi.Request, doc: str, q: str = ""):
+        _require_user(request)
+        doc = os.path.basename(doc)
+        if doc not in acl.allowed_docs(_current_user(request)):
+            return {"found": False}   # 无权文档：与"没找到"无差别，不泄露存在性
+        if not q.strip():
+            return {"found": False}
+        hits = locate_retriever.search(q, top_k=1, rerank=False,
+                                       allowed_sources={doc})
+        if not hits:
+            return {"found": False}
+        return {"found": True, "text": hits[0].text, "page": hits[0].page}
 
     # ---- 动态追问：按问答内容生成针对性追问（答案哈希缓存，同答案不重复生成） ----
     import hashlib as _hashlib
