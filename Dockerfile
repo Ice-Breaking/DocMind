@@ -1,9 +1,18 @@
 # DocMind 一键部署镜像
 # 构建：docker build -t docmind .
-# 运行：docker run --env-file .env -p 7860:7860 -v docmind-data:/app/data docmind
+# 运行：docker compose up -d
+#   或：docker run --env-file .env -p 7860:7860 -v docmind-data:/app/data docmind
 FROM python:3.11-slim
 
 WORKDIR /app
+
+# LibreOffice headless（docx→PDF 保真预览）+ 中文字体（缺字体会转码豆腐块）
+# libreoffice-writer-nogui 仅装 Writer 组件，比完整 libreoffice 小很多；
+# apt 换国内镜像提速（海外环境可删掉 sed 那行）
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libreoffice-writer-nogui fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 
 # 依赖层单独缓存，改代码不用重装依赖
 COPY requirements.txt .
@@ -20,5 +29,9 @@ ENV GRADIO_SERVER_NAME=0.0.0.0 \
     PYTHONUNBUFFERED=1
 
 EXPOSE 7860
+
+# 健康检查：登录页返回 200 即视为存活（不依赖登录态）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/', timeout=3)" || exit 1
 
 CMD ["python", "-m", "docmind.app"]

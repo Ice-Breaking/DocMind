@@ -11,7 +11,10 @@ services:
     environment:
       - SEARXNG_URL=http://searxng:8080   # 容器网络内直连 SearXNG，覆盖 .env 中的地址
     volumes:
-      - docmind-data:/app/data                   # 向量索引缓存 + 调用链日志持久化
+      # data/ = chat.db（用户/会话/反馈/文档ACL）+ cache.db（语义缓存）+
+      #         向量索引缓存 + trace 日志 + docx 转 PDF/OCR 预览缓存
+      # 必须挂载：否则容器删除后账号与全部会话历史丢失
+      - docmind-data:/app/data
       - ./docs/knowledge:/app/docs/knowledge     # 知识库热更新：改文档重启容器即可
     depends_on:
       - searxng
