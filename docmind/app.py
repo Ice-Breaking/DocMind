@@ -8,10 +8,11 @@ import os
 
 import gradio as gr
 
-from docmind import config
+from docmind import config, semantic_cache
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
 from docmind.agent.react_agent import SYSTEM_PROMPT
 from docmind.core import build_agent
+from docmind.llm import embed
 
 print("[DocMind] 正在装配 Agent（加载知识库、连接 MCP Server）...")
 agent, store, mcp_connections = build_agent()
@@ -1281,6 +1282,23 @@ def respond_simple(question: str, history: list):
     partial = ""           # 流式累积的回答正文
     thinking = True        # 是否处于“深度思考中”状态（收到正文 token 即结束）
     user_msg = {"role": "user", "content": question}
+    q_vec = None
+
+    # 语义缓存：高频问题秒回，跳过整个 Agent 链路（多轮追问相似度低自然 miss）
+    if config.SEMANTIC_CACHE:
+        try:
+            q_vec = embed([question])[0]
+            hit = semantic_cache.lookup(q_vec)
+        except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
+            hit = None
+            print(f"[警告] 语义缓存查询失败: {e}")
+        if hit:
+            cq, cached_answer, _ = hit
+            respond_simple.last_raw = cached_answer   # 供 persist_pair 落库
+            full = (f"<sub>⚡ 语义缓存命中 · 秒回（相似问题：{cq}）</sub>\n\n"
+                    f"{cached_answer}")
+            yield history + [user_msg, {"role": "assistant", "content": full}]
+            return
 
     def reasoning_quote() -> str:
         """思维链渲染：思考中实时全文；完成后截断，避免淹没正文"""
@@ -1320,6 +1338,17 @@ def respond_simple(question: str, history: list):
         final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
     if not final_answer:
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
+    respond_simple.last_raw = final_answer   # 供 persist_pair 落库（缓存命中/正常均适用）
+    # 写语义缓存：实时类工具（天气/时间）与错误兜底答案不入缓存，防过期数据；
+    # web_search 交叉核验不排除——稳定知识类问题的联网佐证可缓存（真正实时的是天气/时间）
+    _TIME_SENSITIVE = {"get_weather", "get_current_time"}
+    if (config.SEMANTIC_CACHE and q_vec is not None and final_answer
+            and not final_answer.startswith("⚠️")
+            and not (agent.last_tools & _TIME_SENSITIVE)):
+        try:
+            semantic_cache.save(question, final_answer, q_vec)
+        except Exception as e:  # noqa: BLE001
+            print(f"[警告] 语义缓存写入失败: {e}")
     thinking = False   # 思考结束，让思维链按截断策略渲染
     full = f"<sub>✓ 深度思考已完成</sub>\n\n{reasoning_quote()}{final_answer}"
     if trace_lines:
@@ -1383,8 +1412,8 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
         if not session_id or not final_history:
             return
         try:
-            clean = ""
-            if agent.history and agent.history[-1].get("role") == "assistant":
+            clean = getattr(respond_simple, "last_raw", "") or ""
+            if not clean and agent.history and agent.history[-1].get("role") == "assistant":
                 clean = agent.history[-1].get("content", "")
             chatstore.append_message(session_id, "user", question, user=user)
             chatstore.append_message(session_id, "assistant",

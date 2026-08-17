@@ -91,11 +91,13 @@ class AgentStep:
 class ReActAgent:
     registry: ToolRegistry
     history: list[dict] = field(default_factory=list)
+    last_tools: set = field(default_factory=set)   # 本轮调用过的工具名
 
     def ask(self, question: str):
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答"""
         if not self.history:
             self.history.append({"role": "system", "content": SYSTEM_PROMPT})
+        self.last_tools = set()
         # 多轮查询改写：仅多轮且含指代/过短时触发；改写失败静默回退原问题
         rewritten = self._rewrite_if_followup(question)
         if rewritten:
@@ -196,6 +198,7 @@ class ReActAgent:
                         tctx["output"] = result[:300]
 
                 yield AgentStep("tool_result", f"`{name}` 返回: {result}")
+                self.last_tools.add(name)
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": acc["id"] or f"call_{i}",

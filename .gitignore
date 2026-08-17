@@ -19,3 +19,4 @@ data/index/
 data/preview_cache/
 data/ocr_cache/
 data/chat.db
+data/cache.db
