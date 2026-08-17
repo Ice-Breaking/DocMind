@@ -1330,8 +1330,8 @@ def respond_simple(question: str, history: list):
                 final_answer = step.text
             else:
                 thinking = False
-                icon = {"tool_call": "🔧", "tool_result": "📥", "rewrite": "🔁"}.get(
-                    step.kind, "📥")
+                icon = {"tool_call": "🔧", "tool_result": "📥", "rewrite": "🔁",
+                        "guard": "🛡️"}.get(step.kind, "📥")
                 trace_lines.append(f"{icon} {step.text}")
                 yield history + [user_msg, {"role": "assistant", "content": render()}]
     except Exception as e:  # noqa: BLE001
