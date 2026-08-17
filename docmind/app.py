@@ -8,7 +8,7 @@ import os
 
 import gradio as gr
 
-from docmind import config, semantic_cache
+from docmind import acl, config, semantic_cache
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
 from docmind.agent.react_agent import SYSTEM_PROMPT
 from docmind.core import build_agent
@@ -1273,9 +1273,10 @@ def _render_trace(lines: list[str]) -> str:
     return "\n\n".join(f"> {ln}" for ln in lines)
 
 
-def respond_simple(question: str, history: list):
+def respond_simple(question: str, history: list, user: str = ""):
     """流式渲染：模型思维链实时展示 → 逐 token 打字效果 → 工具轨迹。
     任何异常都兼底为一条完整消息，避免界面停留在“思考中”"""
+    acl.set_current_user(user)   # 文档级 ACL：检索/缓存按当前用户过滤
     trace_lines = []
     reasoning_parts = []   # 模型真实思维链（reasoning_content）增量累积
     final_answer = ""
@@ -1292,6 +1293,8 @@ def respond_simple(question: str, history: list):
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             hit = None
             print(f"[警告] 语义缓存查询失败: {e}")
+        if hit and not acl.answer_allowed(hit[1], user):
+            hit = None   # 缓存答案引用了当前用户无权的受限文档 → 防跨用户泄露
         if hit:
             cq, cached_answer, _ = hit
             respond_simple.last_raw = cached_answer   # 供 persist_pair 落库
@@ -1344,7 +1347,8 @@ def respond_simple(question: str, history: list):
     _TIME_SENSITIVE = {"get_weather", "get_current_time"}
     if (config.SEMANTIC_CACHE and q_vec is not None and final_answer
             and not final_answer.startswith("⚠️")
-            and not (agent.last_tools & _TIME_SENSITIVE)):
+            and not (agent.last_tools & _TIME_SENSITIVE)
+            and acl.answer_allowed(final_answer, user)):   # 引用受限文档不入缓存
         try:
             semantic_cache.save(question, final_answer, q_vec)
         except Exception as e:  # noqa: BLE001
@@ -1424,7 +1428,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
     def make_example_handler(ex):
         def handler(history, session_id, request: gr.Request):
             last = history
-            for h in respond_simple(ex, history):
+            for h in respond_simple(ex, history, user=request.username or ""):
                 last = h
                 yield h
             persist_pair(session_id, ex, last, user=request.username or "")
@@ -1435,7 +1439,7 @@ with gr.Blocks(title="DocMind · 知识助理 Agent") as demo:
             yield history
             return
         last = history
-        for h in respond_simple(question, history):
+        for h in respond_simple(question, history, user=request.username or ""):
             last = h
             yield h
         persist_pair(session_id, question, last, user=request.username or "")

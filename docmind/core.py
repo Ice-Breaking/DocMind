@@ -6,7 +6,7 @@
 """
 from datetime import datetime
 
-from docmind import config
+from docmind import acl, config
 from docmind.agent.react_agent import ReActAgent
 from docmind.agent.tools import ToolRegistry
 from docmind.mcp_client import register_mcp_tools
@@ -29,7 +29,11 @@ def build_agent():
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        hits = retriever.search(query, top_k=config.TOP_K, rerank=True)
+        # 文档级 ACL：只检索当前用户可见的文档；无权文档被过滤后
+        # 返回与"真没有"完全相同的话术，不泄露受限文档的存在性
+        allowed = acl.allowed_docs(acl.get_current_user())
+        hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
+                                allowed_sources=allowed)
         if not hits:
             return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
         lines = []

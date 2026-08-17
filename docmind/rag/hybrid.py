@@ -92,7 +92,10 @@ class HybridRetriever:
         top_k: int | None = None,
         rerank: bool = True,
         candidate_k: int = CANDIDATE_K,
+        allowed_sources: set[str] | None = None,
     ) -> list[SearchHit]:
+        """allowed_sources：文档级 ACL 过滤——只保留授权来源的候选（rerank 前过滤，
+        避免无权文档挤占 top_k 名额）；None 表示不过滤"""
         k = top_k or config.TOP_K
 
         vec_hits = self.store.search(query, top_k=candidate_k)
@@ -117,6 +120,8 @@ class HybridRetriever:
             )
             for i, s in merged
         ]
+        if allowed_sources is not None:
+            candidates = [c for c in candidates if c.source in allowed_sources]
 
         if rerank and candidates:
             try:
