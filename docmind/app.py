@@ -1199,9 +1199,14 @@ FOLD_SCRIPT = """
     const bar = document.querySelector('#dm-sessions-drawer .dm-sd-user');
     if (!bar) return;
     const who = window.__dmUser || '';
-    bar.innerHTML = who
-      ? '<span class="dm-sd-who">👤 ' + who + '</span><a class="dm-sd-logout" href="/logout">退出登录</a>'
-      : '';
+    const adminLink = '<a class="dm-sd-logout" href="/admin">📊 管理后台</a>';
+    fetch('/api/me').then(r => r.ok ? r.json() : { is_admin: false }).then((me) => {
+      bar.innerHTML = who
+        ? '<span class="dm-sd-who">👤 ' + who + '</span><span>'
+          + (me.is_admin ? adminLink + ' · ' : '')
+          + '<a class="dm-sd-logout" href="/logout">退出登录</a></span>'
+        : '';
+    }).catch(() => {});
   }
 
   function openDrawer() {
@@ -1641,6 +1646,10 @@ if __name__ == "__main__":
         return chatstore.get_feedback(session_id)
 
     # ---- 多会话侧边栏：会话列表 + 删除 ----
+    # ---- 管理后台：用量看板 / badcase 流转 / 会话审计（仅管理员） ----
+    from docmind.admin import register_admin_routes
+    register_admin_routes(demo.app)
+
     @demo.app.get("/api/sessions", include_in_schema=False)
     async def _list_sessions(request: _fastapi.Request):
         user = _require_user(request)   # 401 校验须在 try 外，避免被吞成 500

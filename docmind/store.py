@@ -24,6 +24,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
     username TEXT PRIMARY KEY,
     pw_hash TEXT NOT NULL,
+    is_admin INTEGER DEFAULT 0,
     created_at REAL
 );
 CREATE TABLE IF NOT EXISTS sessions(
@@ -51,6 +52,12 @@ CREATE TABLE IF NOT EXISTS feedback(
     created_at REAL,
     UNIQUE(session_id, seq)
 );
+CREATE TABLE IF NOT EXISTS feedback_status(
+    feedback_id INTEGER PRIMARY KEY,
+    status TEXT DEFAULT 'pending',
+    note TEXT DEFAULT '',
+    updated_at REAL
+);
 """
 
 
@@ -67,6 +74,9 @@ def _conn() -> sqlite3.Connection:
         s_cols = [r["name"] for r in conn.execute("PRAGMA table_info(sessions)")]
         if "user" not in s_cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT DEFAULT ''")
+        u_cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)")]
+        if "is_admin" not in u_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
         conn.commit()
         _local.conn = conn
     return conn
@@ -242,4 +252,105 @@ def ensure_seed_admin() -> None:
         return
     pw = os.getenv("ADMIN_PASSWORD", "admin123")
     create_user("admin", pw)
+    set_admin("admin", True)
     print("[DocMind] 已创建初始账号 admin（请尽快用 manage_users reset 修改密码）")
+
+
+# ---------------------------------------------------------------- 管理后台
+def set_admin(username: str, is_admin: bool) -> bool:
+    c = _conn()
+    cur = c.execute("UPDATE users SET is_admin = ? WHERE username = ?",
+                    (1 if is_admin else 0, username))
+    c.commit()
+    return cur.rowcount > 0
+
+
+def is_admin(username: str) -> bool:
+    row = _conn().execute(
+        "SELECT is_admin FROM users WHERE username = ?", (username,)).fetchone()
+    return bool(row and row["is_admin"])
+
+
+def stats_overview() -> dict:
+    """看板概览：用户/会话/消息/反馈统计"""
+    c = _conn()
+    q = lambda sql: c.execute(sql).fetchone()[0]  # noqa: E731
+    fb = {r["rating"]: r["n"] for r in c.execute(
+        "SELECT rating, COUNT(*) AS n FROM feedback GROUP BY rating")}
+    pending = c.execute(
+        """SELECT COUNT(*) FROM feedback f
+           LEFT JOIN feedback_status fs ON fs.feedback_id = f.id
+           WHERE f.rating = 'down' AND COALESCE(fs.status, 'pending') = 'pending'"""
+    ).fetchone()[0]
+    return {
+        "users": q("SELECT COUNT(*) FROM users"),
+        "sessions": q("SELECT COUNT(*) FROM sessions"),
+        "messages": q("SELECT COUNT(*) FROM messages"),
+        "feedback_up": fb.get("up", 0),
+        "feedback_down": fb.get("down", 0),
+        "badcase_pending": pending,
+    }
+
+
+def list_badcases(limit: int = 100) -> list[dict]:
+    """👎 反馈明细（badcase 流转列表）：问题 + 回答节选 + 处理状态"""
+    c = _conn()
+    rows = c.execute(
+        """SELECT f.id, f.session_id, f.seq, f.created_at,
+                  s.user, s.title,
+                  fs.status, fs.note
+           FROM feedback f
+           JOIN sessions s ON s.id = f.session_id
+           LEFT JOIN feedback_status fs ON fs.feedback_id = f.id
+           WHERE f.rating = 'down'
+           ORDER BY f.created_at DESC LIMIT ?""", (limit,)).fetchall()
+    out = []
+    for r in rows:
+        ans = c.execute(
+            "SELECT content FROM messages WHERE session_id = ? AND seq = ?",
+            (r["session_id"], r["seq"])).fetchone()
+        ques = c.execute(
+            "SELECT content FROM messages WHERE session_id = ? AND seq = ?",
+            (r["session_id"], r["seq"] - 1)).fetchone()
+        out.append({
+            "id": r["id"], "user": r["user"] or "(匿名)", "session": r["session_id"],
+            "session_title": r["title"], "status": r["status"] or "pending",
+            "note": r["note"] or "",
+            "question": (ques["content"] if ques else "")[:100],
+            "answer_excerpt": (ans["content"] if ans else "")[:200],
+            "created": r["created_at"],
+        })
+    return out
+
+
+def set_badcase_status(feedback_id: int, status: str, note: str = "") -> bool:
+    c = _conn()
+    c.execute(
+        """INSERT INTO feedback_status(feedback_id, status, note, updated_at)
+           VALUES(?, ?, ?, ?)
+           ON CONFLICT(feedback_id) DO UPDATE
+           SET status = excluded.status, note = excluded.note,
+               updated_at = excluded.updated_at""",
+        (feedback_id, status, note, time.time()))
+    c.commit()
+    return True
+
+
+def list_all_sessions(limit: int = 100) -> list[dict]:
+    """审计：全部用户的会话列表"""
+    rows = _conn().execute(
+        """SELECT s.id, s.user, s.title, s.updated_at, COUNT(m.id) AS msg_count
+           FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
+           GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?""", (limit,)).fetchall()
+    return [{"id": r["id"], "user": r["user"] or "(匿名)", "title": r["title"],
+             "msg_count": r["msg_count"], "updated_at": r["updated_at"]}
+            for r in rows]
+
+
+def get_session_messages(session_id: str, excerpt: int = 300) -> list[dict]:
+    rows = _conn().execute(
+        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY seq",
+        (session_id,)).fetchall()
+    return [{"role": r["role"], "content": (r["content"] or "")[:excerpt]}
+            for r in rows]
+
