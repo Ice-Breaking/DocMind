@@ -54,16 +54,20 @@ def _brief_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
-def chat(messages: list[dict], tools: list[dict] | None = None):
+def chat(messages: list[dict], tools: list[dict] | None = None,
+         max_tokens: int | None = None):
     """发起一次对话，返回 ChatCompletion 的 message 对象。
 
     tools 传入 OpenAI function calling 格式的工具列表；
     若模型决定调工具，返回的 message.tool_calls 非空。
+    max_tokens：限制输出长度（追问生成等轻量副任务用，省 token）。
     """
     kwargs = {}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    if max_tokens:
+        kwargs["max_tokens"] = max_tokens
     with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
                     input=_brief_messages(messages)) as ctx:
         resp = _with_retry(lambda: get_client().chat.completions.create(

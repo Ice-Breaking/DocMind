@@ -575,50 +575,80 @@ FOLD_SCRIPT = """
 })();
 </script>
 <script>
-// 引导追问按钮：对每条「已完成」的 bot 消息追加固定追问建议（点击自动填入输入框并发送）。
-// 历史方案是把 <!--suggest:...--> 标记写进回答再前端替换，但标记经 markdown 渲染
-// 常被转义或被代码围栏吞没导致失效；追问建议本身是固定列表，故改为无标记纯追加，
-// 且不再重建 innerHTML（从根上避免与折叠按钮等 DOM 加工的冲突）。
+// 动态追问：稳定消息按需请求 /api/suggest（服务端 LLM 按问答内容生成针对性追问，
+// 答案哈希缓存；生成失败服务端回退固定三问）。纯追加 DOM，不碰 innerHTML。
 (() => {
   if (window.__dmSuggestInstalled) return;
   window.__dmSuggestInstalled = true;
-  const SUGGESTIONS = [
-    "能详细解释一下吗？",
-    "有哪些实际应用场景？",
-    "与其他技术相比有什么优势？",
-  ];
-  function renderSuggestions() {
-    document.querySelectorAll('.message.bot').forEach((el) => {
-      if (el.dataset.dmSuggestRendered) return;
-      // 稳定性闸门：流式中不追加，避免用户误以为回答已完成
-      if (window.__dmIsStable && !window.__dmIsStable(el)) return;
-      const wrap = document.createElement('div');
-      wrap.className = 'dm-suggestions';
-      const title = document.createElement('div');
-      title.className = 'dm-suggest-title';
-      title.textContent = ' 你可能还想问：';
-      wrap.appendChild(title);
-      SUGGESTIONS.forEach((q) => {
-        const btn = document.createElement('button');
-        btn.className = 'dm-suggest-btn';
-        btn.textContent = q;
-        btn.onclick = () => {
-          const input = document.querySelector('#input-box textarea');
-          if (input) {
-            input.value = q;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            const sendBtn = document.querySelector('#send-btn');
-            if (sendBtn) sendBtn.click();
-          }
-        };
-        wrap.appendChild(btn);
-      });
-      el.appendChild(wrap);
-      el.dataset.dmSuggestRendered = '1';
-    });
+
+  function findQuestion(el) {
+    const msgs = Array.from(document.querySelectorAll('#chatbot .message'));
+    const i = msgs.indexOf(el);
+    for (let j = i - 1; j >= 0; j--) {
+      if (msgs[j].classList.contains('user')) return (msgs[j].innerText || '').slice(0, 200);
+    }
+    return '';
   }
-  renderSuggestions();
-  setInterval(renderSuggestions, 800);
+
+  function render(el, items) {
+    const wrap = document.createElement('div');
+    wrap.className = 'dm-suggestions';
+    const title = document.createElement('div');
+    title.className = 'dm-suggest-title';
+    title.textContent = ' 你可能还想问：';
+    wrap.appendChild(title);
+    items.forEach((q) => {
+      const btn = document.createElement('button');
+      btn.className = 'dm-suggest-btn';
+      btn.textContent = q;
+      btn.onclick = () => {
+        const input = document.querySelector('#input-box textarea');
+        if (input) {
+          input.value = q;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          const sendBtn = document.querySelector('#send-btn');
+          if (sendBtn) sendBtn.click();
+        }
+      };
+      wrap.appendChild(btn);
+    });
+    el.appendChild(wrap);
+    el.dataset.dmSuggestRendered = '1';
+  }
+
+  async function process(el) {
+    if (el.dataset.dmSuggestRendered || el.dataset.dmSuggestLoading) return;
+    // 稳定性闸门：流式中不生成（也避免用户误以为回答已完成）
+    if (window.__dmIsStable && !window.__dmIsStable(el)) return;
+    const answer = (el.innerText || '').trim();
+    if (answer.length < 80) return;          // 报错/拒答等短内容不需要追问
+    const tries = parseInt(el.dataset.dmSuggestTries || '0', 10);
+    if (tries >= 3) { el.dataset.dmSuggestRendered = '1'; return; }  // 放弃重试
+    el.dataset.dmSuggestTries = String(tries + 1);
+    el.dataset.dmSuggestLoading = '1';
+    try {
+      const r = await fetch('/api/suggest', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: findQuestion(el), answer: answer.slice(0, 800) }),
+      });
+      const data = r.ok ? await r.json() : null;
+      if (data && Array.isArray(data.suggestions) && data.suggestions.length) {
+        render(el, data.suggestions);
+      } else {
+        el.dataset.dmSuggestRendered = '1';   // 空结果不重试
+      }
+    } catch (e) {
+      // 网络/服务异常：清 loading 标记，允许下轮重试（至多 3 次）
+    } finally {
+      delete el.dataset.dmSuggestLoading;
+    }
+  }
+
+  function scan() {
+    document.querySelectorAll('.message.bot').forEach(process);
+  }
+  scan();
+  setInterval(scan, 1200);
 })();
 </script>
 <script>
@@ -1649,6 +1679,28 @@ if __name__ == "__main__":
     # ---- 管理后台：用量看板 / badcase 流转 / 会话审计（仅管理员） ----
     from docmind.admin import register_admin_routes
     register_admin_routes(demo.app)
+
+    # ---- 动态追问：按问答内容生成针对性追问（答案哈希缓存，同答案不重复生成） ----
+    import hashlib as _hashlib
+    from docmind import suggest as suggest_mod
+
+    class SuggestIn(BaseModel):
+        question: str = ""
+        answer: str
+
+    @demo.app.post("/api/suggest", include_in_schema=False)
+    async def _suggest(body: SuggestIn, request: _fastapi.Request):
+        _require_user(request)
+        answer = body.answer.strip()
+        if len(answer) < 80:   # 过短内容（报错/拒答）不生成
+            return {"suggestions": []}
+        key = _hashlib.sha1(answer.encode("utf-8")).hexdigest()[:16]
+        cached = chatstore.get_suggestions(key)
+        if cached:
+            return {"suggestions": cached, "cached": True}
+        items = suggest_mod.generate_suggestions(body.question, answer)
+        chatstore.save_suggestions(key, items)
+        return {"suggestions": items, "cached": False}
 
     @demo.app.get("/api/sessions", include_in_schema=False)
     async def _list_sessions(request: _fastapi.Request):

@@ -58,7 +58,13 @@ CREATE TABLE IF NOT EXISTS feedback_status(
     note TEXT DEFAULT '',
     updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS suggestions(
+    answer_hash TEXT PRIMARY KEY,
+    items TEXT NOT NULL,
+    created_at REAL
+);
 """
+
 
 
 def _conn() -> sqlite3.Connection:
@@ -354,3 +360,26 @@ def get_session_messages(session_id: str, excerpt: int = 300) -> list[dict]:
     return [{"role": r["role"], "content": (r["content"] or "")[:excerpt]}
             for r in rows]
 
+
+
+def get_suggestions(answer_hash: str) -> list[str] | None:
+    """按答案哈希取缓存的动态追问；未命中返回 None"""
+    import json as _json
+    row = _conn().execute(
+        "SELECT items FROM suggestions WHERE answer_hash = ?", (answer_hash,)).fetchone()
+    if not row:
+        return None
+    try:
+        return _json.loads(row["items"])
+    except _json.JSONDecodeError:
+        return None
+
+
+def save_suggestions(answer_hash: str, items: list[str]) -> None:
+    import json as _json
+    c = _conn()
+    c.execute(
+        """INSERT INTO suggestions(answer_hash, items, created_at) VALUES(?,?,?)
+           ON CONFLICT(answer_hash) DO UPDATE SET items = excluded.items""",
+        (answer_hash, _json.dumps(items, ensure_ascii=False), time.time()))
+    c.commit()
