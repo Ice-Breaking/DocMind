@@ -40,4 +40,23 @@ export default defineConfig({
       '/files': BACKEND,
     },
   },
+  build: {
+    // 代码分割优化：减少首屏加载体积
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // 核心框架单独打包
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          // UI 库单独打包
+          'vendor-antd': ['antd', '@ant-design/icons', '@ant-design/x'],
+          // markdown 渲染单独打包（按需加载）
+          'markdown': ['react-markdown', 'remark-gfm'],
+          // 图表库单独打包（仅管理页用，懒加载）
+          'charts': ['recharts'],
+        },
+      },
+    },
+    // 提高 chunk 大小警告阈值（优化后仍可能超标，但可接受）
+    chunkSizeWarningLimit: 1000,
+  },
 });

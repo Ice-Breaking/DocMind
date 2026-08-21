@@ -103,3 +103,21 @@ def register_governance_routes(app) -> None:
                                   "size": os.path.getsize(fp),
                                   "created_at": os.path.getmtime(fp)})
         return JSONResponse(items)
+
+    # ================= 配置热加载 =================
+    @app.get("/api/admin/config/reloadable", include_in_schema=False)
+    async def _get_reloadable_configs(request: fastapi.Request):
+        """获取可热加载的配置项"""
+        _require_admin(request, app)
+        from docmind import config_reload
+        return JSONResponse(config_reload.get_reloadable_configs())
+
+    @app.post("/api/admin/config/reload", include_in_schema=False)
+    async def _reload_config(request: fastapi.Request):
+        """热加载配置（从 .env 重新读取）"""
+        user = _require_admin(request, app)
+        from docmind import config_reload
+        changes = config_reload.reload_config()
+        store.record_audit(user, "config.reload", "",
+                           f"变更 {len(changes)} 项配置")
+        return JSONResponse({"ok": True, "changes": changes})
