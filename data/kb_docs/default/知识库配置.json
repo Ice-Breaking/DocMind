@@ -1,0 +1,31 @@
+{
+  "knowledge_base": {
+    "id": "default",
+    "name": "默认知识库",
+    "description": "系统内置知识库",
+    "config": {
+      "chunk_size": 500,
+      "chunk_overlap": 50,
+      "top_k": 4,
+      "rerank": true
+    },
+    "models": {
+      "embedding": "text-embedding-v3",
+      "chat": "qwen-turbo",
+      "rerank": "gte-rerank-v2"
+    },
+    "supported_formats": [
+      ".pdf",
+      ".md",
+      ".txt",
+      ".docx",
+      ".csv",
+      ".json"
+    ],
+    "statistics": {
+      "total_documents": 8,
+      "total_chunks": 156,
+      "last_updated": "2026-08-21T10:30:00Z"
+    }
+  }
+}
