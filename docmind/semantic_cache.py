@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS semantic_cache(
     created_at REAL,
     hits INTEGER DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_cache_created ON semantic_cache(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cache_hits ON semantic_cache(hits DESC);
 """
 
 
@@ -57,10 +59,18 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def lookup(vec: list[float] | np.ndarray) -> tuple[str, str, int] | None:
-    """返回最相似且 ≥ 阈值的 (缓存问题, 缓存答案, 条目id)；无命中返回 None"""
+    """返回最相似且 ≥ 阈值的 (缓存问题, 缓存答案, 条目id)；无命中返回 None
+
+    性能优化：只查询最近 500 条热缓存，避免全表扫描"""
     qv = np.asarray(vec, dtype=np.float32)
     best_sim, best = config.CACHE_THRESHOLD, None
-    for row in _conn().execute("SELECT id, question, answer, vec FROM semantic_cache"):
+    # 优化：只查最近 500 条（按创建时间 + 命中次数综合排序）
+    query = """
+        SELECT id, question, answer, vec FROM semantic_cache
+        ORDER BY hits DESC, created_at DESC
+        LIMIT 500
+    """
+    for row in _conn().execute(query):
         sim = _cosine(qv, np.asarray(json.loads(row["vec"]), dtype=np.float32))
         if sim >= best_sim:
             best_sim, best = sim, (row["question"], row["answer"], row["id"])
@@ -95,3 +105,15 @@ def stats() -> dict:
         "SELECT COUNT(*) AS n, COALESCE(SUM(hits), 0) AS h FROM semantic_cache"
     ).fetchone()
     return {"entries": row["n"], "total_hits": row["h"]}
+
+
+def cleanup_stale_entries(days: int = 7) -> int:
+    """清理陈旧缓存：删除创建超过 N 天且从未命中的条目
+
+    返回删除的条目数"""
+    cutoff = time.time() - (days * 86400)
+    c = _conn()
+    c.execute("DELETE FROM semantic_cache WHERE hits = 0 AND created_at < ?", (cutoff,))
+    deleted = c.total_changes
+    c.commit()
+    return deleted

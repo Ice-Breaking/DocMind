@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS sessions(
     created_at REAL,
     updated_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_user_updated ON sessions(user, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE TABLE IF NOT EXISTS messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS messages(
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
 CREATE TABLE IF NOT EXISTS feedback(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -57,12 +60,14 @@ CREATE TABLE IF NOT EXISTS feedback(
     created_at REAL,
     UNIQUE(session_id, seq)
 );
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at DESC);
 CREATE TABLE IF NOT EXISTS feedback_status(
     feedback_id INTEGER PRIMARY KEY,
     status TEXT DEFAULT 'pending',
     note TEXT DEFAULT '',
     updated_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_status(status, updated_at DESC);
 CREATE TABLE IF NOT EXISTS suggestions(
     answer_hash TEXT PRIMARY KEY,
     items TEXT NOT NULL,
@@ -86,6 +91,7 @@ CREATE TABLE IF NOT EXISTS assistants(
     created_at REAL,
     updated_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_assistants_owner ON assistants(owner, updated_at DESC);
 CREATE TABLE IF NOT EXISTS eval_datasets(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -105,6 +111,8 @@ CREATE TABLE IF NOT EXISTS api_keys(
     revoked_at REAL,
     last_used_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_apikeys_prefix ON api_keys(prefix);
+CREATE INDEX IF NOT EXISTS idx_apikeys_created ON api_keys(created_at DESC);
 CREATE TABLE IF NOT EXISTS ingest_tasks(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kb_id TEXT NOT NULL,
@@ -116,6 +124,7 @@ CREATE TABLE IF NOT EXISTS ingest_tasks(
     created_at REAL,
     updated_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_ingest_kb_status ON ingest_tasks(kb_id, status, created_at DESC);
 CREATE TABLE IF NOT EXISTS audit_events(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     actor TEXT DEFAULT '',
@@ -124,6 +133,8 @@ CREATE TABLE IF NOT EXISTS audit_events(
     detail TEXT DEFAULT '',
     created_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, created_at DESC);
 CREATE TABLE IF NOT EXISTS alerts(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,
@@ -135,6 +146,8 @@ CREATE TABLE IF NOT EXISTS alerts(
     acked_at REAL,
     resolved_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedupe ON alerts(dedupe_key, status);
 CREATE TABLE IF NOT EXISTS models(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -146,6 +159,7 @@ CREATE TABLE IF NOT EXISTS models(
     created_by TEXT DEFAULT '',
     created_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_models_kind_active ON models(kind, is_active);
 CREATE TABLE IF NOT EXISTS eval_runs(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dataset_id INTEGER NOT NULL,
@@ -161,6 +175,7 @@ CREATE TABLE IF NOT EXISTS eval_runs(
     created_by TEXT DEFAULT '',
     created_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_eval_dataset ON eval_runs(dataset_id, created_at DESC);
 """
 
 
@@ -174,6 +189,7 @@ def _conn() -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
+        # 动态列补充（向前兼容旧数据库）
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)")]
         if "raw" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN raw TEXT DEFAULT ''")
@@ -182,7 +198,6 @@ def _conn() -> sqlite3.Connection:
             conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT DEFAULT ''")
         if "assistant_id" not in s_cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN assistant_id TEXT DEFAULT ''")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at)")
         u_cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)")]
         if "is_admin" not in u_cols:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")

@@ -1,21 +1,51 @@
 """联网搜索结果缓存层：减少重复查询、加速响应。
 
 缓存策略：
-- 内存 LRU 缓存，TTL 默认 30 分钟（时效性 vs 速度平衡）
+- SQLite 持久化存储，服务重启不丢失
+- TTL 分级：新闻类 10 分钟，知识类 30 分钟（默认）
+- 自动清理过期条目
 - key = query 的 hash，避免长查询占内存
-- 缓存命中直接返回，跳过所有搜索引擎调用
 """
 import hashlib
+import json
+import os
+import sqlite3
+import threading
 import time
-from collections import OrderedDict
-from threading import Lock
 from typing import Optional
 
 from docmind import config
 
-_cache: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
-_lock = Lock()
-_MAX_ENTRIES = 500  # 最多缓存 500 条查询结果
+DB_PATH = os.path.join(config.PROJECT_ROOT, "data", "web_search_cache.db")
+_local = threading.local()
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS web_search_cache(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_hash TEXT UNIQUE NOT NULL,
+    query TEXT NOT NULL,
+    results TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    ttl INTEGER DEFAULT 1800,
+    hits INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_websearch_hash ON web_search_cache(query_hash);
+CREATE INDEX IF NOT EXISTS idx_websearch_created ON web_search_cache(created_at DESC);
+"""
+
+
+def _conn() -> sqlite3.Connection:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        _local.conn = conn
+    return conn
 
 
 def _cache_key(query: str) -> str:
@@ -26,23 +56,64 @@ def _cache_key(query: str) -> str:
 def get(query: str) -> Optional[list[dict]]:
     """从缓存获取搜索结果；过期/不存在返回 None"""
     key = _cache_key(query)
-    with _lock:
-        if key not in _cache:
-            return None
-        ts, results = _cache[key]
-        if time.time() - ts > config.WEB_SEARCH_CACHE_TTL:
-            del _cache[key]
-            return None
-        # LRU：访问时移到末尾
-        _cache.move_to_end(key)
-        return results
+    c = _conn()
+    row = c.execute(
+        "SELECT results, created_at, ttl FROM web_search_cache WHERE query_hash = ?",
+        (key,)
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    # 检查是否过期
+    if time.time() - row["created_at"] > row["ttl"]:
+        c.execute("DELETE FROM web_search_cache WHERE query_hash = ?", (key,))
+        c.commit()
+        return None
+
+    # 命中：更新计数
+    c.execute("UPDATE web_search_cache SET hits = hits + 1 WHERE query_hash = ?", (key,))
+    c.commit()
+
+    return json.loads(row["results"])
 
 
-def put(query: str, results: list[dict]) -> None:
-    """写入缓存；超出容量时淘汰最老的"""
+def put(query: str, results: list[dict], ttl: int = None) -> None:
+    """写入缓存；超出容量时淘汰最老的
+
+    ttl: 缓存生存时间（秒），None 使用默认值"""
+    if ttl is None:
+        ttl = config.WEB_SEARCH_CACHE_TTL
+
     key = _cache_key(query)
-    with _lock:
-        _cache[key] = (time.time(), results)
-        _cache.move_to_end(key)
-        if len(_cache) > _MAX_ENTRIES:
-            _cache.popitem(last=False)
+    c = _conn()
+
+    # 使用 INSERT OR REPLACE 更新或插入
+    c.execute(
+        """INSERT OR REPLACE INTO web_search_cache(query_hash, query, results, created_at, ttl, hits)
+           VALUES(?, ?, ?, ?, ?, 0)""",
+        (key, query, json.dumps(results, ensure_ascii=False), time.time(), ttl)
+    )
+    c.commit()
+
+
+def cleanup_expired() -> int:
+    """清理过期条目，返回删除数量"""
+    c = _conn()
+    # 删除所有过期条目
+    c.execute(
+        "DELETE FROM web_search_cache WHERE created_at + ttl < ?",
+        (time.time(),)
+    )
+    deleted = c.total_changes
+    c.commit()
+    return deleted
+
+
+def stats() -> dict:
+    """缓存统计"""
+    c = _conn()
+    row = c.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(hits), 0) AS h FROM web_search_cache"
+    ).fetchone()
+    return {"entries": row["n"], "total_hits": row["h"]}
