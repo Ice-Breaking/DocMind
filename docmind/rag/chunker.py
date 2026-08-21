@@ -23,7 +23,7 @@ from docmind import config
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".csv", ".json", ".png", ".jpg", ".jpeg", ".webp"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 OCR_CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "ocr_cache")
 _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切分但保留标题文本
