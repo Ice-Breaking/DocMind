@@ -125,3 +125,107 @@ def register_docs_routes(app) -> None:
                                  "已删除，等待重建索引后从检索移除", user)
         store.record_audit(user, "doc.delete", f"kb:{kb_id}/{filename}")
         return {"ok": True}
+
+    @app.get("/api/kbs/{kb_id}/docs/{filename}/preview", include_in_schema=False)
+    async def _preview_doc_chunks(kb_id: str, filename: str, request: fastapi.Request):
+        """预览文档的切片内容（chunks）
+
+        返回格式：
+        {
+            "filename": str,
+            "file_type": str,
+            "total_chunks": int,
+            "chunks": [
+                {"index": int, "text": str, "page": int or None},
+                ...
+            ]
+        }
+        """
+        _require_user(request, app)
+
+        # 获取知识库的向量存储
+        from docmind.rag.kb_registry import get_registry
+
+        kb_registry = get_registry()
+        kb_info = kb_registry.get(kb_id)
+
+        if kb_info is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+
+        vector_store = kb_info['vector_store']
+
+        # 从向量存储中查找该文件的所有切片
+        chunks = []
+        for i, chunk in enumerate(vector_store.chunks):
+            if chunk.get('source', '') == filename:
+                chunks.append({
+                    'index': i,
+                    'text': chunk.get('text', ''),
+                    'page': chunk.get('page'),
+                })
+
+        if not chunks:
+            raise HTTPException(status_code=404, detail="文件尚未索引或不存在")
+
+        ext = os.path.splitext(filename)[1].lower()
+
+        return JSONResponse({
+            'filename': filename,
+            'file_type': ext,
+            'total_chunks': len(chunks),
+            'chunks': chunks,
+        })
+
+    @app.put("/api/kbs/{kb_id}/docs/{filename}/content", include_in_schema=False)
+    async def _update_doc_content(kb_id: str, filename: str, request: fastapi.Request):
+        """更新文档内容（仅支持文本类文件）
+
+        请求体：{"content": "新内容"}
+        """
+        _require_user(request, app)
+        doc_dir = _resolve_doc_dir(kb_id)
+
+        filename = os.path.basename(filename)
+        fp = os.path.join(doc_dir, filename)
+
+        if not os.path.isfile(fp):
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        # 只允许编辑文本类文件
+        ext = os.path.splitext(filename)[1].lower()
+        editable_exts = {'.md', '.txt', '.json', '.csv'}
+
+        if ext not in editable_exts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持编辑此文件类型: {ext}，仅支持: {', '.join(sorted(editable_exts))}"
+            )
+
+        # 读取请求体
+        try:
+            body = await request.json()
+            new_content = body.get('content', '')
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"无效的请求体: {e}")
+
+        # 大小校验
+        if len(new_content.encode('utf-8')) > _MAX_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"内容过大，上限 {_MAX_SIZE // (1024*1024)} MB"
+            )
+
+        # 写入文件
+        with open(fp, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        # 记录审计日志
+        user = _require_user(request, app)
+        store.record_audit(user, "doc.edit", f"kb:{kb_id}/{filename}",
+                          f"{len(new_content)} bytes")
+
+        # 创建重新索引任务
+        store.create_ingest_task(kb_id, filename, "edit", "pending",
+                                "已修改，等待重建索引后生效", user)
+
+        return {"ok": True, "size": len(new_content.encode('utf-8'))}
