@@ -5,6 +5,7 @@
 - 未配置 → 自动降级写本地 JSONL（data/trace_log.jsonl），零依赖也能看链路
 - 追踪失败绝不影响主链路：所有上报均包在 try/except 里
 - 用 contextmanager 统一两种后端的 span 生命周期
+- 日志轮转：单文件 50MB，保留最近 5 个归档
 
 查看本地日志：python scripts/view_traces.py
 """
@@ -14,11 +15,17 @@ import logging
 import os
 import time
 import uuid
+from logging.handlers import RotatingFileHandler
 
 from docmind import config
 from docmind.pii import mask_pii
 
 logger = logging.getLogger(__name__)
+
+# 日志轮转配置
+_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+_BACKUP_COUNT = 5  # 保留最近 5 个归档
+_log_handler = None
 
 
 def _try_init_langfuse():
@@ -58,10 +65,32 @@ def _mask_record(record: dict) -> dict:
 
 
 def _append_jsonl(record: dict) -> None:
+    """追加日志到 JSONL 文件，支持自动轮转（50MB/文件，保留5个归档）"""
+    global _log_handler
     try:
         os.makedirs(os.path.dirname(config.TRACE_LOG_PATH), exist_ok=True)
-        with open(config.TRACE_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+        # 懒初始化日志轮转 handler
+        if _log_handler is None:
+            _log_handler = RotatingFileHandler(
+                config.TRACE_LOG_PATH,
+                maxBytes=_MAX_BYTES,
+                backupCount=_BACKUP_COUNT,
+                encoding='utf-8'
+            )
+
+        # 使用 handler 写入（自动轮转）
+        _log_handler.emit(
+            logging.LogRecord(
+                name="trace",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg=json.dumps(record, ensure_ascii=False, default=str),
+                args=(),
+                exc_info=None
+            )
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"追踪日志写入失败: {e}")
 

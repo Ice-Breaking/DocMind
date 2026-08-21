@@ -235,12 +235,16 @@ class VectorStore:
         new_chunks: list[dict] = []
         for fname in sorted(added | modified):
             new_chunks.extend(chunk_single_file(root, fname))
+
         if new_chunks:
+            # 批量向量化优化：一次性处理所有文本，减少网络往返
+            texts = [c["text"] for c in new_chunks]
+            embeddings = embed(texts)  # llm.py 内部已支持批量（每批10条）
+
             collection.add(
                 ids=self._make_ids(new_chunks),
-                embeddings=[list(map(float, v))
-                            for v in embed([c["text"] for c in new_chunks])],
-                documents=[c["text"] for c in new_chunks],
+                embeddings=[list(map(float, v)) for v in embeddings],
+                documents=texts,
                 metadatas=self._metadatas(new_chunks),
             )
 

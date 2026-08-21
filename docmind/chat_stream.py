@@ -7,6 +7,7 @@ respond_simple 并存互不影响——ACL/语义缓存/OOD 守卫/防注入行�
 
 事件协议（kind + data，endpoint 逐条转 SSE）：
   cache     {"cached_question", "answer"}   语义缓存命中秒回
+  reasoning {"answer"}                       Agent推理缓存命中
   thinking  {"text"}                        模型思维链增量
   token     {"text"}                        终答正文增量
   step      {"step_kind", "text"}           工具轨迹 tool_call/tool_result/rewrite/guard
@@ -18,6 +19,7 @@ import logging
 from collections.abc import Iterator
 
 from docmind import acl, config, semantic_cache
+from docmind import agent_reasoning_cache
 from docmind import store
 from docmind.metrics import CACHE_HITS, CACHE_MISSES
 from docmind.agent.react_agent import SYSTEM_PROMPT
@@ -82,6 +84,18 @@ def stream_events(agent, question: str, session_id: str = "",
             yield {"kind": "final", "answer": cached_answer}
             return
 
+    # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理
+    if use_cache:
+        try:
+            kb_ids = current_kb_ids.get() if assistant_id else []
+            reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids, sp)
+            if reasoning_hit and acl.answer_allowed(reasoning_hit, user):
+                yield {"kind": "reasoning", "answer": reasoning_hit}
+                yield {"kind": "final", "answer": reasoning_hit}
+                return
+        except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
+            logger.warning(f"Agent推理缓存查询失败: {e}")
+
     # 3) Agent 主链路：步骤与 token 逐条透传
     final_answer = ""
     partial = ""
@@ -111,6 +125,18 @@ def stream_events(agent, question: str, session_id: str = "",
             semantic_cache.save(question, final_answer, q_vec)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"语义缓存写入失败: {e}")
+
+    # 5) 写 Agent 推理缓存：纯知识检索类问题可缓存
+    if (use_cache and final_answer and not final_answer.startswith("⚠️")
+            and not (agent.last_tools & _TIME_SENSITIVE)
+            and acl.answer_allowed(final_answer, user)):
+        try:
+            kb_ids = current_kb_ids.get() if assistant_id else []
+            agent_reasoning_cache.save(
+                question, kb_ids, sp, final_answer, list(agent.last_tools)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Agent推理缓存写入失败: {e}")
 
     # failed 标记：兜底答案（⚠️ 开头）告知前端展示内联重试按钮
     yield {"kind": "final", "answer": final_answer,
