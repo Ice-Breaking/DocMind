@@ -93,19 +93,20 @@ def _brief_messages(messages: list[dict]) -> list[dict]:
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None,
-         max_tokens: int | None = None):
+         max_tokens: int | None = None, temperature: float | None = None):
     """发起一次对话，返回 ChatCompletion 的 message 对象。
 
     tools 传入 OpenAI function calling 格式的工具列表；
     若模型决定调工具，返回的 message.tool_calls 非空。
-    max_tokens：限制输出长度（追问生成等轻量副任务用，省 token）。
+    max_tokens：限制输出长度，None 时使用 config.MAX_OUTPUT_TOKENS 防止截断。
+    temperature：生成温度，None 时使用默认值 0.1。
     """
     kwargs = {}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
-    if max_tokens:
-        kwargs["max_tokens"] = max_tokens
+    # 默认使用配置的最大 token 数，防止回复被截断
+    kwargs["max_tokens"] = max_tokens if max_tokens is not None else config.MAX_OUTPUT_TOKENS
     _model = _active_cfg("llm")[0]
     with trace.span("llm-chat", kind="generation", model=_model,
                     input=_brief_messages(messages)) as ctx:
@@ -114,7 +115,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
             resp = _with_retry(lambda: get_client().chat.completions.create(
                 model=_model,
                 messages=messages,
-                temperature=0.1,  # 知识问答场景用低温度：提升工具调用/指令遵循的稳定性
+                temperature=temperature if temperature is not None else 0.1,
                 **kwargs,
             ))
         except Exception:
@@ -133,17 +134,20 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
 
 
 def chat_stream(messages: list[dict], tools: list[dict] | None = None,
-                enable_thinking: bool = False):
+                enable_thinking: bool = False, max_tokens: int | None = None):
     """流式对话：yield ChatCompletionChunk，调用方自行累积内容与 tool_calls。
 
     带 usage 统计（stream_options）；创建阶段的瞬时错误同样退避重试。
     enable_thinking=True 时请求百炼思维链（delta.reasoning_content 逐段返回），
     仅部分模型支持：不支持的模型报参数错误，自动去掉该参数重试（降级不影响主链路）。
+    max_tokens：限制输出长度，None 时使用 config.MAX_OUTPUT_TOKENS 防止截断。
     """
     kwargs = {"stream": True, "stream_options": {"include_usage": True}}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    # 默认使用配置的最大 token 数
+    kwargs["max_tokens"] = max_tokens if max_tokens is not None else config.MAX_OUTPUT_TOKENS
 
     _model = _active_cfg("llm")[0]
 

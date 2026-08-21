@@ -20,6 +20,8 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-turbo")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 # 图片 OCR：百炼多模态模型（入库时抽取图中文字，结果磁盘缓存避免重复调用）
 OCR_MODEL = os.getenv("OCR_MODEL", "qwen-vl-ocr")
+# 最大输出 token 数：防止回复截断（qwen-turbo 默认 1500，qwen-max 支持 8000）
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "2000"))
 
 # Agent 配置
 MAX_AGENT_STEPS = int(os.getenv("MAX_AGENT_STEPS", "8"))
@@ -54,6 +56,11 @@ RERANK_MODEL = os.getenv("RERANK_MODEL", "gte-rerank-v2")
 # 联网搜索：Tavily（质量优先，需 Key，免费 1000 次/月）→ SearXNG（自托管免限量）逐级降级
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "")  # 如 http://localhost:8080
+# 生产级搜索引擎（多引擎并发 + 结果缓存）
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")  # https://serper.dev 免费 2500次/月
+BING_SEARCH_KEY = os.getenv("BING_SEARCH_KEY", "")  # Azure Bing Search API
+WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "8"))  # 单引擎超时秒数
+WEB_SEARCH_CACHE_TTL = int(os.getenv("WEB_SEARCH_CACHE_TTL", "1800"))  # 搜索结果缓存30分钟
 
 # 调用链追踪：配置了 Langfuse 凭证则上报 Langfuse，否则降级写本地 JSONL
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")

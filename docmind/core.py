@@ -99,7 +99,7 @@ def build_shared():
         handler=lambda args: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
-    # ---- 联网搜索：多引擎降级（Tavily → SearXNG）----
+    # ---- 联网搜索：多引擎并发降级 + 结果缓存 + 超时优化 ----
     def _search_tavily(query: str) -> list[dict]:
         """Tavily：专为 AI Agent 设计的搜索 API，新鲜度/摘要质量最佳；需 TAVILY_API_KEY"""
         import requests
@@ -108,7 +108,7 @@ def build_shared():
             "https://api.tavily.com/search",
             headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"},
             json={"query": query, "max_results": 5, "search_depth": "basic"},
-            timeout=20,
+            timeout=config.WEB_SEARCH_TIMEOUT,
         )
         resp.raise_for_status()
         return [
@@ -117,6 +117,50 @@ def build_shared():
             for r in resp.json().get("results", [])
         ]
 
+    def _search_serper(query: str) -> list[dict]:
+        """Serper.dev：Google Search API 包装，免费 2500次/月，质量接近 Tavily"""
+        import requests
+
+        resp = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": config.SERPER_API_KEY},
+            json={"q": query, "num": 5, "gl": "cn", "hl": "zh-cn"},
+            timeout=config.WEB_SEARCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = []
+        for r in data.get("organic", [])[:5]:
+            results.append({
+                "title": r.get("title", ""),
+                "body": r.get("snippet", ""),
+                "href": r.get("link", ""),
+                "date": r.get("date", ""),
+            })
+        return results
+
+    def _search_bing(query: str) -> list[dict]:
+        """Azure Bing Search API：企业级稳定性，需订阅"""
+        import requests
+
+        resp = requests.get(
+            "https://api.bing.microsoft.com/v7.0/search",
+            headers={"Ocp-Apim-Subscription-Key": config.BING_SEARCH_KEY},
+            params={"q": query, "count": 5, "mkt": "zh-CN"},
+            timeout=config.WEB_SEARCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = []
+        for r in data.get("webPages", {}).get("value", [])[:5]:
+            results.append({
+                "title": r.get("name", ""),
+                "body": r.get("snippet", ""),
+                "href": r.get("url", ""),
+                "date": r.get("datePublished", "")[:10] if "datePublished" in r else "",
+            })
+        return results
+
     def _search_searxng(query: str) -> list[dict]:
         """SearXNG：自托管元搜索引擎（免费无限量）；需 SEARXNG_URL"""
         import requests
@@ -124,7 +168,7 @@ def build_shared():
         resp = requests.get(
             f"{config.SEARXNG_URL.rstrip('/')}/search",
             params={"q": query, "format": "json", "language": "zh"},
-            timeout=20,
+            timeout=config.WEB_SEARCH_TIMEOUT,
         )
         resp.raise_for_status()
         return [
@@ -137,24 +181,63 @@ def build_shared():
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
+
+        # 1) 缓存命中直接返回
+        from docmind import web_search_cache
+        cached = web_search_cache.get(query)
+        if cached:
+            lines = []
+            for i, r in enumerate(cached, 1):
+                date = f" ({r['date'][:10]})" if r.get("date") else ""
+                lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
+            return "\n\n".join(lines)
+
+        # 2) 构建引擎列表：优先级 Tavily > Serper > Bing > SearXNG
         engines = []
         if config.TAVILY_API_KEY:
             engines.append(("Tavily", _search_tavily))
+        if config.SERPER_API_KEY:
+            engines.append(("Serper", _search_serper))
+        if config.BING_SEARCH_KEY:
+            engines.append(("Bing", _search_bing))
         if config.SEARXNG_URL:
             engines.append(("SearXNG", _search_searxng))
+
         if not engines:
-            return "[错误] 未配置搜索引擎（TAVILY_API_KEY / SEARXNG_URL），请如实告知用户无法获取实时信息。"
+            return "[错误] 未配置搜索引擎（TAVILY_API_KEY / SERPER_API_KEY / BING_SEARCH_KEY / SEARXNG_URL），请如实告知用户无法获取实时信息。"
+
+        # 3) 并发调用多引擎（最多前2个），首个成功即返回
+        import concurrent.futures
         errors = []
         results = []
-        for name, fn in engines:
-            try:
-                results = fn(query)
-                if results:
-                    break
-            except Exception as e:  # noqa: BLE001 - 逐引擎降级
-                errors.append(f"{name}: {type(e).__name__}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(fn, query): name for name, fn in engines[:2]}
+            for future in concurrent.futures.as_completed(futures, timeout=config.WEB_SEARCH_TIMEOUT + 2):
+                name = futures[future]
+                try:
+                    results = future.result()
+                    if results:
+                        # 写缓存
+                        web_search_cache.put(query, results)
+                        break
+                except Exception as e:  # noqa: BLE001 - 单引擎失败继续尝试下一个
+                    errors.append(f"{name}: {type(e).__name__}")
+
+        # 4) 并发失败则同步降级到剩余引擎
+        if not results:
+            for name, fn in engines[2:]:
+                try:
+                    results = fn(query)
+                    if results:
+                        web_search_cache.put(query, results)
+                        break
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{name}: {type(e).__name__}")
+
         if not results:
             return f"[错误] 联网搜索暂不可用（{'; '.join(errors)}），请如实告知用户无法获取实时信息。"
+
         lines = []
         for i, r in enumerate(results, 1):
             date = f" ({str(r['date'])[:10]})" if r.get("date") else ""
@@ -163,8 +246,10 @@ def build_shared():
 
     registry.register(
         name="web_search",
-        description="联网搜索实时信息与最新新闻报道。涉及新闻、时事、最新动态等"
-                    "时效性问题时必须先调用此工具，严禁先凭自身知识作答。",
+        description="联网搜索实时信息与最新新闻报道。涉及新闻、时事、最新动态、"
+                    "当前/今年/今天/最近等时效性问题时必须调用此工具，"
+                    "严禁先凭自身知识作答。所有事实性问题完成知识库检索后，"
+                    "也应调用此工具交叉核对时效性。",
         parameters={
             "type": "object",
             "properties": {
