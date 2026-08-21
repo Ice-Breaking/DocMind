@@ -200,17 +200,30 @@ class ReActAgent:
         if not self.history:
             self.history.append({"role": "system", "content": self.system_prompt})
 
-        # 层0：增强的时效性检测（新增）
+        # 层-1：意图理解 - 判断是否需要最新数据（新增）
+        from docmind.intent_understanding import detect_question_intent
+
+        intent = detect_question_intent(question)
+        needs_latest = intent['needs_latest_data']
+        intent_note = ""
+
+        if needs_latest:
+            intent_note = f"【意图理解】{intent['reason']}；置信度：{intent['confidence']:.0%}"
+
+        # 层0：增强的时效性检测（保留原有功能）
         from docmind.timeliness_detector import detect_timeliness, extract_search_query
 
         timeliness_analysis = detect_timeliness(question)
-        force_web_search = timeliness_analysis['priority'] == 'high'
+        force_web_search_timeliness = timeliness_analysis['priority'] == 'high'
         timeliness_note = ""
 
         if timeliness_analysis['is_time_sensitive']:
             timeliness_note = f"【时效性检测】{timeliness_analysis['reason']}"
-            if force_web_search:
+            if force_web_search_timeliness:
                 timeliness_note += " → 已强制触发联网搜索"
+
+        # 综合判断：意图理解 OR 时效性检测 → 强制联网
+        force_web_search = needs_latest or force_web_search_timeliness
 
         # 层1：歧义检测与澄清提示（问题6）
         ambiguity_hint = ""
@@ -304,7 +317,7 @@ class ReActAgent:
             except Exception:  # noqa: BLE001
                 web_note = ""
 
-        note = "；".join(x for x in [timeliness_note, ambiguity_hint, gloss, interp, web_note] if x)
+        note = "；".join(x for x in [intent_note, timeliness_note, ambiguity_hint, gloss, interp, web_note] if x)
         if note:
             self.history.append({
                 "role": "system",

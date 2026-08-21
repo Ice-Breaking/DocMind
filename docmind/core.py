@@ -46,18 +46,18 @@ def build_shared():
         query = args.get("query", "")
         if not query:
             return "[错误] 缺少 query 参数"
-        # 文档级 ACL：只检索当前用户可见的文档；无权文档被过滤后
-        # 返回与"真没有"完全相同的话术，不泄露受限文档的存在性
+
+        # 文档级 ACL：只检索当前用户可见的文档
         allowed = acl.allowed_docs(acl.get_current_user())
-        # 多 KB 路由：当前请求若挂着自定义助手（contextvar 由 app 端点设置），
-        # 则检索其绑定的知识库集合；空列表回退默认单库，行为与旧链路完全一致。
-        # 惰性导入 chat_stream：contextvar 归属该模块，顶层导入会循环依赖
+
+        # 多 KB 路由
         try:
             from docmind.chat_stream import current_kb_ids
             kb_ids = current_kb_ids.get()
-        except Exception:  # noqa: BLE001 - 无上下文时按默认库处理
+        except Exception:  # noqa: BLE001
             kb_ids = []
         kb_ids = [k for k in kb_ids if k and k != "default"]
+
         if kb_ids:
             from docmind.rag.kb_registry import get_registry
             hits = get_registry().search_multi(kb_ids, query, top_k=config.TOP_K,
@@ -65,17 +65,61 @@ def build_shared():
         else:
             hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
                                     allowed_sources=allowed)
+
         if not hits:
             if config.EVIDENCE_REFUSAL:
-                # 严格模式：工具结果里直接下达拒答指令，尽早终结 ReAct 循环省 token
                 return ("知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
                         "当前为严格模式：请明确告知用户无法回答，禁止用通识编造。")
             return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
+
+        # 新增：文档时效性检测
+        from docmind.doc_freshness import check_document_freshness
+
+        # 检查最旧和最新文档的年份
+        freshness_checks = []
+        for h in hits:
+            freshness = check_document_freshness(h.source, h.text[:200])
+            freshness_checks.append(freshness)
+
+        # 找出最严重的过期风险
+        max_risk = 'none'
+        max_risk_doc = None
+        for i, f in enumerate(freshness_checks):
+            if f['expire_risk'] == 'high':
+                max_risk = 'high'
+                max_risk_doc = f
+                break
+            elif f['expire_risk'] == 'medium' and max_risk != 'high':
+                max_risk = 'medium'
+                max_risk_doc = f
+
+        # 构建检索结果
         lines = []
+
+        # 添加时效性警告（如果有高/中风险）
+        if max_risk in ['high', 'medium']:
+            warning = max_risk_doc['warning_message']
+            if max_risk_doc['should_web_search']:
+                warning += '\n\n💡 系统建议：文档已过期，建议上传最新文档或联网搜索核实（工具会自动尝试）'
+            lines.append(f"⚠️ 时效性警告：{warning}\n")
+
+        # 添加检索结果
         for i, h in enumerate(hits, 1):
-            loc = f"来源: {h.source}" + (f", 第{h.page}页" if h.page else "")
+            freshness = freshness_checks[i-1]
+            loc = f"来源: {h.source}"
+            if h.page:
+                loc += f", 第{h.page}页"
+            if freshness['doc_year']:
+                loc += f" ({freshness['doc_year']}年文档)"
             lines.append(f"[{i}] ({loc}, 相关度: {h.score:.2f})\n{h.text}")
-        return "\n\n".join(lines)
+
+        result = "\n\n".join(lines)
+
+        # 如果最高风险文档需要联网，在结果中明确标注
+        if max_risk_doc and max_risk_doc['should_web_search']:
+            result += "\n\n⚠️ 重要提示：上述内容来自过期文档，请务必调用 web_search 工具核实最新信息"
+
+        return result
 
     registry.register(
         name="knowledge_search",
