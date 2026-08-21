@@ -188,6 +188,11 @@ def _conn() -> sqlite3.Connection:
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
         if "must_change_pwd" not in u_cols:
             conn.execute("ALTER TABLE users ADD COLUMN must_change_pwd INTEGER DEFAULT 0")
+        if "avatar" not in u_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''")
+        if "pending_avatar" not in u_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN pending_avatar TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE users ADD COLUMN pending_avatar_at REAL DEFAULT 0")
         conn.commit()
         _local.conn = conn
     return conn
@@ -1226,3 +1231,49 @@ def list_user_queries(user: str = "", q: str = "", days: int = 0,
     sql += " ORDER BY m.created_at DESC LIMIT ?"
     args.append(max(1, min(limit, 2000)))
     return [dict(r) for r in c.execute(sql, args).fetchall()]
+
+
+# ================= 用户头像 =================
+
+def get_user_avatar(username: str) -> str:
+    row = _conn().execute(
+        "SELECT avatar FROM users WHERE username = ?", (username,)).fetchone()
+    return (row["avatar"] or "") if row else ""
+
+
+def set_user_avatar(username: str, avatar: str) -> bool:
+    cur = _conn().execute(
+        "UPDATE users SET avatar = ? WHERE username = ?", (avatar, username))
+    _conn().commit()
+    return cur.rowcount > 0
+
+
+# ================= 头像上传审核 =================
+
+def set_pending_avatar(username: str, fname: str) -> bool:
+    cur = _conn().execute(
+        "UPDATE users SET pending_avatar=?, pending_avatar_at=? WHERE username=?",
+        (fname, time.time(), username))
+    _conn().commit()
+    return cur.rowcount > 0
+
+
+def clear_pending_avatar(username: str) -> None:
+    _conn().execute(
+        "UPDATE users SET pending_avatar='', pending_avatar_at=0 WHERE username=?",
+        (username,))
+    _conn().commit()
+
+
+def get_pending_avatar(username: str) -> tuple:
+    row = _conn().execute(
+        "SELECT pending_avatar, pending_avatar_at FROM users WHERE username=?",
+        (username,)).fetchone()
+    return (row["pending_avatar"] or "", row["pending_avatar_at"] or 0) if row else ("", 0)
+
+
+def list_pending_avatars() -> list:
+    rows = _conn().execute(
+        """SELECT username, avatar, pending_avatar, pending_avatar_at
+           FROM users WHERE pending_avatar != '' ORDER BY pending_avatar_at""").fetchall()
+    return [dict(r) for r in rows]

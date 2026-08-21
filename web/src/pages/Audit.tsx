@@ -112,7 +112,7 @@ export default function Audit() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -166,7 +166,7 @@ export default function Audit() {
         <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
       </Space>
 
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={events}
         rowKey="id"

@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Avatar, Dropdown, Form, Input, Layout, Menu, Modal, Typography } from 'antd';
+import { Button, Drawer, Dropdown, Form, Input, Layout, Menu, Modal, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
@@ -28,22 +28,37 @@ import {
   UserOutlined,
   DownOutlined,
   LockOutlined,
+  MenuOutlined,
 } from '@ant-design/icons';
 import { changePassword, logout, type Me } from '../api';
+import UserAvatar from './UserAvatar';
 
 const { Sider, Content } = Layout;
 
 /**
- * 全局侧边导航骨架：可折叠 Sider + Outlet 内容区。
- * 顶部为用户菜单（个人设置 / 修改密码 / 退出登录），常驻可见，
- * 登出走后端 /logout 清除登录 cookie，避免"退出后又自动登录"。
+ * 全局导航骨架：
+ * - PC（≥768px）：可折叠 Sider + 顶部用户菜单
+ * - 移动端（<768px，基线 375×667）：顶部栏 + 抽屉导航
+ * 登出走后端 /logout 清除登录 cookie。
  */
 export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
 
-  /* ---- 修改密码 Modal（用户菜单直达，与个人设置页内容解耦） ---- */
+  /* ---- 移动端检测（matchMedia 实时响应） ---- */
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia('(max-width: 767px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const fn = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', fn);
+    return () => mq.removeEventListener('change', fn);
+  }, []);
+  const [navOpen, setNavOpen] = useState(false);
+
+  /* ---- 修改密码 Modal（用户菜单直达） ---- */
   const [pwdOpen, setPwdOpen] = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
   const [pwdForm] = Form.useForm<{ oldPassword: string; newPassword: string; confirmPassword: string }>();
@@ -142,9 +157,9 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
     navigate(key);
   };
 
-  // ---- 顶部用户菜单：设置 / 改密 / 登出 ----
+  // ---- 用户菜单：设置 / 改密 / 登出 ----
   const userMenuItems: MenuProps['items'] = [
-    { key: 'profile', icon: <UserOutlined />, label: `当前账号：${me.user}` , disabled: true },
+    { key: 'profile', icon: <UserOutlined />, label: `当前账号：${me.user}`, disabled: true },
     { type: 'divider' },
     { key: 'settings', icon: <SettingOutlined />, label: '个人设置' },
     { key: 'password', icon: <LockOutlined />, label: '修改密码' },
@@ -162,13 +177,9 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
     setPwdLoading(true);
     try {
       await changePassword(values.oldPassword, values.newPassword);
-      // 改密后服务端会话可能失效，统一回登录页重新登录
       await logout();
       onLogout();
     } catch (e: unknown) {
-      // eslint-disable-next-line no-console
-      console.warn(e);
-      // 错误提示由 antd 静态 message 兜底不便，这里用表单内提示
       pwdForm.setFields([{ name: 'oldPassword', errors: [e instanceof Error ? e.message : '修改失败'] }]);
     } finally {
       setPwdLoading(false);
@@ -186,12 +197,168 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
       return;
     }
     if (key === 'logout') {
-      // 先清服务端登录 cookie，再清前端状态；否则会被 cookie 自动"登回去"
       await logout();
       onLogout();
     }
   };
 
+  /* ---- 用户头像下拉（PC 侧栏顶部 / 移动顶栏共用） ---- */
+  const userDropdown = (
+    <Dropdown
+      menu={{ items: userMenuItems, onClick: handleUserMenu }}
+      placement="bottomLeft"
+      trigger={['click']}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+        <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
+            <UserAvatar avatar={me.avatar} name={me.user} size={34} />
+          </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              color: '#fff',
+              fontSize: 13,
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {me.user}
+          </div>
+          <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
+            {me.is_admin ? '管理员' : '普通用户'}
+          </div>
+        </div>
+        <DownOutlined style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }} />
+      </div>
+    </Dropdown>
+  );
+
+  /* ---- 修改密码 Modal ---- */
+  const pwdModal = (
+    <Modal
+      title="修改密码"
+      open={pwdOpen}
+      onOk={handleChangePassword}
+      onCancel={() => setPwdOpen(false)}
+      confirmLoading={pwdLoading}
+      okText="确认修改"
+      cancelText="取消"
+      destroyOnClose
+    >
+      <Form form={pwdForm} layout="vertical" style={{ marginTop: 12 }}>
+        <Form.Item
+          name="oldPassword"
+          label="当前密码"
+          rules={[{ required: true, message: '请输入当前密码' }]}
+        >
+          <Input.Password autoComplete="current-password" />
+        </Form.Item>
+        <Form.Item
+          name="newPassword"
+          label="新密码"
+          rules={[
+            { required: true, message: '请输入新密码' },
+            { min: 8, message: '新密码至少 8 个字符' },
+          ]}
+        >
+          <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
+        </Form.Item>
+        <Form.Item
+          name="confirmPassword"
+          label="确认新密码"
+          dependencies={['newPassword']}
+          rules={[
+            { required: true, message: '请再次输入新密码' },
+            ({ getFieldValue }) => ({
+              validator(_, value: string) {
+                if (!value || getFieldValue('newPassword') === value) {
+                  return Promise.resolve();
+                }
+                return Promise.reject(new Error('两次输入的新密码不一致'));
+              },
+            }),
+          ]}
+        >
+          <Input.Password autoComplete="new-password" />
+        </Form.Item>
+      </Form>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        修改成功后将退出登录，请使用新密码重新登录。
+      </Typography.Text>
+    </Modal>
+  );
+
+  /* ================= 移动端布局 ================= */
+  if (isMobile) {
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <div className="dm-mobile-topbar">
+          <Button
+            type="text"
+            icon={<MenuOutlined />}
+            onClick={() => setNavOpen(true)}
+            style={{ color: '#fff' }}
+          />
+          <span style={{ color: '#fff', fontWeight: 600, flex: 1 }}>DocMind</span>
+          <Dropdown
+            menu={{ items: userMenuItems, onClick: handleUserMenu }}
+            placement="bottomRight"
+            trigger={['click']}
+          >
+            <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
+            <UserAvatar avatar={me.avatar} name={me.user} size={30} />
+          </span>
+          </Dropdown>
+        </div>
+        <Drawer
+          placement="left"
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          width={280}
+          closable={false}
+          styles={{ body: { padding: 0, background: '#001529' } }}
+        >
+          <div style={{ background: '#001529', minHeight: '100%' }}>
+            <div
+              style={{
+                padding: 16,
+                color: '#fff',
+                fontWeight: 600,
+                borderBottom: '1px solid rgba(255,255,255,0.08)',
+              }}
+            >
+              DocMind
+            </div>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+              {userDropdown}
+            </div>
+            <Menu
+              theme="dark"
+              mode="inline"
+              selectedKeys={[selectedKey]}
+              defaultOpenKeys={openKeys}
+              items={menuItems}
+              onClick={(e) => {
+                handleMenuClick(e);
+                setNavOpen(false);
+              }}
+              style={{ borderRight: 0 }}
+            />
+          </div>
+        </Drawer>
+        <Layout>
+          <Content style={{ overflow: 'auto', height: 'calc(100vh - 48px)' }}>
+            <Outlet />
+          </Content>
+        </Layout>
+        {pwdModal}
+      </Layout>
+    );
+  }
+
+  /* ================= PC 布局 ================= */
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
@@ -220,7 +387,6 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
           </Typography.Text>
         </div>
 
-        {/* 用户菜单：常驻顶部，登出不再需要翻到菜单底部 */}
         <div
           style={{
             padding: collapsed ? '12px 0' : '12px 16px',
@@ -229,47 +395,15 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
             justifyContent: 'center',
           }}
         >
-          <Dropdown
-            menu={{ items: userMenuItems, onClick: handleUserMenu }}
-            placement="bottomLeft"
-            trigger={['click']}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                cursor: 'pointer',
-                width: collapsed ? 'auto' : '100%',
-              }}
-            >
-              <Avatar size={collapsed ? 28 : 34} style={{ backgroundColor: '#6366f1', flex: 'none' }}>
-                {me.user.slice(0, 1).toUpperCase()}
-              </Avatar>
-              {!collapsed && (
-                <>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div
-                      style={{
-                        color: '#fff',
-                        fontSize: 13,
-                        fontWeight: 600,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {me.user}
-                    </div>
-                    <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
-                      {me.is_admin ? '管理员' : '普通用户'}
-                    </div>
-                  </div>
-                  <DownOutlined style={{ color: 'rgba(255,255,255,0.45)', fontSize: 10 }} />
-                </>
-              )}
-            </div>
-          </Dropdown>
+          {collapsed ? (
+            <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenu }} trigger={['click']}>
+              <span style={{ display: 'inline-flex', cursor: 'pointer' }}>
+            <UserAvatar avatar={me.avatar} name={me.user} size={28} />
+          </span>
+            </Dropdown>
+          ) : (
+            userDropdown
+          )}
         </div>
 
         <Menu
@@ -283,8 +417,7 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
         />
       </Sider>
       <Layout>
-        {/* 内容区：不加全局 padding/容器，由各页面自管宽度；
-            对话页等需要精确占满视口的页面依赖这里的 100vh */}
+        {/* 内容区：不加全局 padding/容器，由各页面自管宽度 */}
         <Content
           style={{
             overflow: 'auto',
@@ -294,59 +427,7 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
           <Outlet />
         </Content>
       </Layout>
-
-      {/* ---- 修改密码 Modal ---- */}
-      <Modal
-        title="修改密码"
-        open={pwdOpen}
-        onOk={handleChangePassword}
-        onCancel={() => setPwdOpen(false)}
-        confirmLoading={pwdLoading}
-        okText="确认修改"
-        cancelText="取消"
-        destroyOnClose
-      >
-        <Form form={pwdForm} layout="vertical" style={{ marginTop: 12 }}>
-          <Form.Item
-            name="oldPassword"
-            label="当前密码"
-            rules={[{ required: true, message: '请输入当前密码' }]}
-          >
-            <Input.Password autoComplete="current-password" />
-          </Form.Item>
-          <Form.Item
-            name="newPassword"
-            label="新密码"
-            rules={[
-              { required: true, message: '请输入新密码' },
-              { min: 8, message: '新密码至少 8 个字符' },
-            ]}
-          >
-            <Input.Password autoComplete="new-password" placeholder="至少 8 位" />
-          </Form.Item>
-          <Form.Item
-            name="confirmPassword"
-            label="确认新密码"
-            dependencies={['newPassword']}
-            rules={[
-              { required: true, message: '请再次输入新密码' },
-              ({ getFieldValue }) => ({
-                validator(_, value: string) {
-                  if (!value || getFieldValue('newPassword') === value) {
-                    return Promise.resolve();
-                  }
-                  return Promise.reject(new Error('两次输入的新密码不一致'));
-                },
-              }),
-            ]}
-          >
-            <Input.Password autoComplete="new-password" />
-          </Form.Item>
-        </Form>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          修改成功后将退出登录，请使用新密码重新登录。
-        </Typography.Text>
-      </Modal>
+      {pwdModal}
     </Layout>
   );
 }

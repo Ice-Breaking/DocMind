@@ -3,8 +3,10 @@ import {
   Alert,
   App,
   Button,
+  Card,
   Form,
   Input,
+  List,
   Modal,
   Popconfirm,
   Space,
@@ -14,33 +16,39 @@ import {
   Typography,
 } from 'antd';
 import {
+  CheckOutlined,
   CrownOutlined,
   DeleteOutlined,
   KeyOutlined,
   PlusOutlined,
-  UserOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
+import UserAvatar from '../components/UserAvatar';
 import {
   createUser,
   deleteUser,
+  fetchAvatarReviews,
   fetchUsers,
   resetUserPassword,
+  reviewAvatar,
   setUserAdmin,
   type AdminUser,
   type Me,
+  type PendingAvatarReview,
 } from '../api';
 
 const { Text } = Typography;
 
 /**
- * 用户管理（仅管理员）：新增账号、重置密码、授予/收回管理员、删除账号。
- * 安全约束由后端保证：不能删自己、不能移除最后一个管理员、代建账号强制首登改密。
+ * 用户管理（仅管理员）：新增账号、重置密码、授予/收回管理员、删除账号、
+ * 头像上传人工审核队列。安全约束由后端保证。
  */
 export default function Users({ me }: { me: Me }) {
   const { message: msgApi, modal: modalApi } = App.useApp();
 
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [reviews, setReviews] = useState<PendingAvatarReview[]>([]);
   const [loading, setLoading] = useState(true);
 
   /* ---- 新建用户 Modal ---- */
@@ -59,7 +67,9 @@ export default function Users({ me }: { me: Me }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setUsers(await fetchUsers());
+      const [us, rv] = await Promise.all([fetchUsers(), fetchAvatarReviews()]);
+      setUsers(us);
+      setReviews(rv);
     } catch (e: unknown) {
       msgApi.error(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -68,6 +78,17 @@ export default function Users({ me }: { me: Me }) {
   }, [msgApi]);
 
   useEffect(() => { load(); }, [load]);
+
+  /* ---- 头像审核 ---- */
+  const handleReview = async (username: string, action: 'approve' | 'reject') => {
+    try {
+      await reviewAvatar(username, action);
+      msgApi.success(action === 'approve' ? `已通过 ${username} 的头像` : `已驳回 ${username} 的头像`);
+      await load();
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '操作失败');
+    }
+  };
 
   /* ---- 新建 ---- */
   const handleCreate = async () => {
@@ -109,7 +130,6 @@ export default function Users({ me }: { me: Me }) {
       msgApi.success(`${pwdTarget.username} 密码已重置，下次登录须修改`);
       setPwdTarget(null);
       setPwdText('');
-      await load();
     } catch (e: unknown) {
       msgApi.error(e instanceof Error ? e.message : '重置失败');
     } finally {
@@ -147,10 +167,10 @@ export default function Users({ me }: { me: Me }) {
       title: '用户名',
       dataIndex: 'username',
       key: 'username',
-      width: 220,
-      render: (v: string) => (
+      width: 200,
+      render: (v: string, u: any) => (
         <Space>
-          <UserOutlined style={{ color: '#1677ff' }} />
+          <UserAvatar avatar={u.avatar} name={v} size={28} />
           <Text strong>{v}</Text>
           {v === me.user && <Tag>当前登录</Tag>}
         </Space>
@@ -160,13 +180,12 @@ export default function Users({ me }: { me: Me }) {
       title: '角色',
       dataIndex: 'is_admin',
       key: 'is_admin',
-      width: 130,
+      width: 150,
       render: (v: number, u) => (
         <Space>
           {v === 1
             ? <Tag color="gold" icon={<CrownOutlined />}>管理员</Tag>
             : <Tag>普通用户</Tag>}
-          {/* 自己不能改自己；最后一个管理员的收回由后端拦截 */}
           {u.username !== me.user && (
             <Switch
               size="small"
@@ -179,19 +198,22 @@ export default function Users({ me }: { me: Me }) {
     },
     {
       title: '状态',
-      dataIndex: 'must_change_pwd',
-      key: 'must_change_pwd',
-      width: 110,
-      render: (v: number) =>
-        v === 1 ? <Tag color="orange">待改密</Tag> : <Tag color="green">正常</Tag>,
+      key: 'status',
+      width: 130,
+      render: (_: any, u: any) => (
+        <Space direction="vertical" size={2}>
+          {u.must_change_pwd === 1 ? <Tag color="orange">待改密</Tag> : <Tag color="green">正常</Tag>}
+          {u.pending_avatar ? <Tag color="blue">头像审核中</Tag> : null}
+        </Space>
+      ),
     },
-    { title: '会话数', dataIndex: 'sessions', key: 'sessions', width: 90 },
-    { title: '消息数', dataIndex: 'messages', key: 'messages', width: 90 },
+    { title: '会话数', dataIndex: 'sessions', key: 'sessions', width: 80 },
+    { title: '消息数', dataIndex: 'messages', key: 'messages', width: 80 },
     {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 170,
+      width: 160,
       render: (ts: number) => (ts ? new Date(ts * 1000).toLocaleString() : '—'),
     },
     {
@@ -225,7 +247,7 @@ export default function Users({ me }: { me: Me }) {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -236,7 +258,7 @@ export default function Users({ me }: { me: Me }) {
       >
         <div>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>用户管理</h1>
-          <Text type="secondary">新增账号、重置密码、授予管理员、删除账号（均写入审计日志）</Text>
+          <Text type="secondary">新增账号、重置密码、授予管理员、删除账号、头像审核（均写入审计日志）</Text>
         </div>
         <Button
           type="primary"
@@ -247,11 +269,50 @@ export default function Users({ me }: { me: Me }) {
         </Button>
       </div>
 
+      {/* ---- 头像审核队列 ---- */}
+      {reviews.length > 0 && (
+        <Card size="small" title={`头像审核（${reviews.length} 条待处理）`} style={{ marginBottom: 16 }}>
+          <List
+            dataSource={reviews}
+            renderItem={(r) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="ok"
+                    size="small"
+                    type="primary"
+                    icon={<CheckOutlined />}
+                    onClick={() => handleReview(r.username, 'approve')}
+                  >
+                    通过
+                  </Button>,
+                  <Button
+                    key="no"
+                    size="small"
+                    danger
+                    icon={<StopOutlined />}
+                    onClick={() => handleReview(r.username, 'reject')}
+                  >
+                    驳回
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  avatar={<UserAvatar avatar={`file:${r.pending_avatar}`} name={r.username} size={44} />}
+                  title={r.username}
+                  description={`上传于 ${new Date(r.pending_avatar_at * 1000).toLocaleString()} · 审核通过前展示旧头像`}
+                />
+              </List.Item>
+            )}
+          />
+        </Card>
+      )}
+
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="密码以 PBKDF2 加盐哈希存储，任何人（含管理员）都无法查看明文；用户忘记密码时使用「重置密码」，新密码强制下次登录修改。新建账号的初始密码仅在创建成功时展示一次。"
+        message="密码以 PBKDF2 加盐哈希存储，任何人（含管理员）无法查看明文；忘记密码用「重置密码」。自定义头像需人工审核通过后生效。"
       />
 
       <Table
@@ -261,6 +322,7 @@ export default function Users({ me }: { me: Me }) {
         loading={loading}
         pagination={false}
         size="middle"
+        scroll={{ x: 'max-content' }}
       />
 
       {/* ---- 新建用户 Modal ---- */}
@@ -301,23 +363,6 @@ export default function Users({ me }: { me: Me }) {
         </Form>
       </Modal>
 
-      {/* ---- 重置密码 Modal ---- */}
-      <Modal
-        title={`重置密码 — ${pwdTarget?.username || ''}`}
-        open={!!pwdTarget}
-        onOk={handleResetPwd}
-        onCancel={() => setPwdTarget(null)}
-        confirmLoading={pwdSaving}
-        okText="重置"
-        cancelText="取消"
-      >
-        <Input.Password
-          placeholder="新密码（至少 8 位），用户下次登录须修改"
-          value={pwdText}
-          onChange={(e) => setPwdText(e.target.value)}
-        />
-      </Modal>
-
       {/* ---- 初始密码一次性展示 ---- */}
       <Modal
         title="账号创建成功"
@@ -347,6 +392,23 @@ export default function Users({ me }: { me: Me }) {
             <Typography.Text code copyable>{credModal?.password}</Typography.Text>
           </div>
         </Space>
+      </Modal>
+
+      {/* ---- 重置密码 Modal ---- */}
+      <Modal
+        title={`重置密码 — ${pwdTarget?.username || ''}`}
+        open={!!pwdTarget}
+        onOk={handleResetPwd}
+        onCancel={() => setPwdTarget(null)}
+        confirmLoading={pwdSaving}
+        okText="重置"
+        cancelText="取消"
+      >
+        <Input.Password
+          placeholder="新密码（至少 8 位），用户下次登录须修改"
+          value={pwdText}
+          onChange={(e) => setPwdText(e.target.value)}
+        />
       </Modal>
     </div>
   );

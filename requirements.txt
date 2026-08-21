@@ -38,3 +38,6 @@ prometheus-client>=0.20
 
 # 企业 LDAP 登录（可选：未安装时 LDAP 登录自动禁用，不影响本地账号）
 ldap3>=2.9
+
+# 语音能力：Paraformer ASR + CosyVoice TTS（百炼 SDK）
+dashscope>=1.20

@@ -24,6 +24,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // 内网穿透（cloudflared trycloudflare 等）时 Host 非 localhost，
+    // vite 5.4+ 默认拦截外部 Host（CVE-2025-30208 防护）；此处按需放开
+    allowedHosts: true,
     proxy: {
       // 注意结尾斜杠：避免前缀匹配误伤 SPA 路由 /api-keys
       '/api/': sseSafe,

@@ -189,7 +189,7 @@ export default function Usage() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       {/* ---- 页头：标题 + 时间范围 ---- */}
       <div
         style={{
@@ -306,7 +306,7 @@ export default function Usage() {
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
           <Card title="按模型成本统计" size="small" style={{ height: '100%' }}>
-            <Table
+            <Table scroll={{ x: "max-content" }}
               size="small"
               columns={modelColumns}
               dataSource={by_model}
@@ -323,7 +323,7 @@ export default function Usage() {
             extra={<Tag color="red">优化重点</Tag>}
             style={{ height: '100%' }}
           >
-            <Table
+            <Table scroll={{ x: "max-content" }}
               size="small"
               columns={topColumns}
               dataSource={topQueries}

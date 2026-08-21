@@ -95,7 +95,9 @@ def register_admin_routes(app) -> None:
         return {
             "user": user,
             "is_admin": bool(user and store.is_admin(user)),
-            "must_change_pwd": bool(user and store.get_must_change_pwd(user))
+            "must_change_pwd": bool(user and store.get_must_change_pwd(user)),
+            "avatar": store.get_user_avatar(user) if user else "",
+            "pending_avatar": (store.get_pending_avatar(user)[0] if user else "")
         }
 
     @app.get("/api/admin/overview", include_in_schema=False)

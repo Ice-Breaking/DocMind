@@ -217,7 +217,7 @@ export default function Models() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -242,7 +242,7 @@ export default function Models() {
             size="small"
             style={{ marginBottom: 16 }}
           >
-            <Table
+            <Table scroll={{ x: "max-content" }}
               columns={columns}
               dataSource={rows}
               rowKey="id"

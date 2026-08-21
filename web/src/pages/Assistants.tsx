@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   App,
-  Avatar,
   Button,
   Card,
   Col,
@@ -23,7 +22,6 @@ import {
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
-  RobotOutlined,
 } from '@ant-design/icons';
 import {
   createAssistant,
@@ -35,37 +33,14 @@ import {
   type KnowledgeBase,
   type Me,
 } from '../api';
+import AvatarPicker from '../components/AvatarPicker';
+import UserAvatar from '../components/UserAvatar';
 
 const { Text, Paragraph } = Typography;
 
 /* ------------------------------------------------------------------ */
 /*  头像预设：emoji 直接渲染，颜色 token 作为 Avatar 背景色              */
 /* ------------------------------------------------------------------ */
-
-const AVATAR_PRESETS: string[] = [
-  '🤖', '🦊', '🐱', '🦉', '🐳', '🚀', '🌙', '⚡', '📚', '🧠',
-  '#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2',
-];
-
-const isColorToken = (token: string): boolean => token.startsWith('#');
-
-function AssistantAvatar({ avatar, size = 48 }: { avatar: string; size?: number }) {
-  if (avatar && isColorToken(avatar)) {
-    return (
-      <Avatar size={size} style={{ backgroundColor: avatar }}>
-        <RobotOutlined />
-      </Avatar>
-    );
-  }
-  if (avatar) {
-    return <Avatar size={size}>{avatar}</Avatar>;
-  }
-  return (
-    <Avatar size={size} style={{ backgroundColor: '#1677ff' }}>
-      <RobotOutlined />
-    </Avatar>
-  );
-}
 
 /* ------------------------------------------------------------------ */
 /*  表单值类型                                                          */
@@ -204,7 +179,7 @@ export default function Assistants({ me }: { me: Me }) {
   /* ---- Render ---- */
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -270,7 +245,7 @@ export default function Assistants({ me }: { me: Me }) {
                   ]}
                 >
                   <Space align="start" style={{ width: '100%' }}>
-                    <AssistantAvatar avatar={a.avatar} />
+                    <UserAvatar avatar={a.avatar} name={a.name} size={48} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <Space>
                         <Text strong style={{ fontSize: 16 }}>{a.name}</Text>
@@ -334,32 +309,7 @@ export default function Assistants({ me }: { me: Me }) {
             label="头像"
             rules={[{ required: true, message: '请选择头像' }]}
           >
-            <Select
-              options={AVATAR_PRESETS.map((p) => ({
-                value: p,
-                label: (
-                  <Space>
-                    {isColorToken(p) ? (
-                      <span
-                        style={{
-                          display: 'inline-block',
-                          width: 14,
-                          height: 14,
-                          borderRadius: 3,
-                          backgroundColor: p,
-                          verticalAlign: 'middle',
-                        }}
-                      />
-                    ) : (
-                      <span>{p}</span>
-                    )}
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {isColorToken(p) ? p : 'emoji'}
-                    </Text>
-                  </Space>
-                ),
-              }))}
-            />
+            <AvatarPicker username={editing?.name || 'assistant'} />
           </Form.Item>
 
           <Form.Item name="system_prompt" label="系统提示词">

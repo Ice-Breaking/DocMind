@@ -112,4 +112,6 @@ def stream_events(agent, question: str, session_id: str = "",
         except Exception as e:  # noqa: BLE001
             logger.warning(f"语义缓存写入失败: {e}")
 
-    yield {"kind": "final", "answer": final_answer}
+    # failed 标记：兜底答案（⚠️ 开头）告知前端展示内联重试按钮
+    yield {"kind": "final", "answer": final_answer,
+           "failed": final_answer.startswith("⚠️")}

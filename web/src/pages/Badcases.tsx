@@ -159,7 +159,7 @@ export default function Badcases() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -213,7 +213,7 @@ export default function Badcases() {
           <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
         </Card>
       ) : (
-        <Table
+        <Table scroll={{ x: "max-content" }}
           columns={columns}
           dataSource={filtered}
           rowKey="id"

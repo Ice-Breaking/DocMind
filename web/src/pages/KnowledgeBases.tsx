@@ -388,7 +388,7 @@ export default function KnowledgeBases() {
   /* ---- Render ---- */
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -418,7 +418,7 @@ export default function KnowledgeBases() {
           <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
         </Card>
       ) : (
-        <Table
+        <Table scroll={{ x: "max-content" }}
           columns={columns}
           dataSource={kbs}
           rowKey="id"
@@ -551,7 +551,7 @@ export default function KnowledgeBases() {
                     ) : tasks.length === 0 ? (
                       <Empty description="暂无任务记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
                     ) : (
-                      <Table
+                      <Table scroll={{ x: "max-content" }}
                         columns={taskColumns}
                         dataSource={tasks}
                         rowKey="id"

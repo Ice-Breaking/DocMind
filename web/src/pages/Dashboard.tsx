@@ -72,7 +72,7 @@ export default function Dashboard({ me }: { me: Me }) {
   const showOnboarding = recentSessions.length === 0;
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       {/* ---- 页头 ---- */}
       <div
         style={{

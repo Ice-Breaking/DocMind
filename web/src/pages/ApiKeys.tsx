@@ -200,7 +200,7 @@ export default function ApiKeys() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -224,7 +224,7 @@ export default function ApiKeys() {
         </Button>
       </div>
 
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={keys}
         rowKey="id"

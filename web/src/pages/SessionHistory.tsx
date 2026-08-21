@@ -1,16 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
-import { MessageOutlined } from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { MessageOutlined, RobotOutlined } from '@ant-design/icons';
 import {
   Alert,
-  Card,
+  App,
   Collapse,
   Drawer,
   Empty,
   List,
+  Modal,
   Spin,
   Tag,
   Typography,
 } from 'antd';
+import Bubble from '@ant-design/x/es/bubble';
+import type { BubbleDataType } from '@ant-design/x/es/bubble/BubbleList';
+import MarkdownContent from '../components/MarkdownContent';
+import UserAvatar from '../components/UserAvatar';
 import {
   fetchAssistants,
   fetchMessages,
@@ -36,6 +41,7 @@ function formatTime(ts: number): string {
 }
 
 export default function SessionHistory({ me }: { me: Me }) {
+  const { message: msgApi } = App.useApp();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,6 +53,11 @@ export default function SessionHistory({ me }: { me: Me }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [msgLoading, setMsgLoading] = useState(false);
   const [msgError, setMsgError] = useState<string | null>(null);
+
+  /* 引用定位 Modal */
+  const [locateOpen, setLocateOpen] = useState(false);
+  const [locateTitle, setLocateTitle] = useState('');
+  const [locateText, setLocateText] = useState('');
 
   /* ---- 初始加载 ---- */
   useEffect(() => {
@@ -89,7 +100,6 @@ export default function SessionHistory({ me }: { me: Me }) {
       g.sessions.push(s);
     }
 
-    // 组内按最近活动降序；默认助手组排在最后
     const list = Array.from(map.values());
     for (const g of list) {
       g.sessions.sort((a, b) => b.updated_at - a.updated_at);
@@ -119,13 +129,83 @@ export default function SessionHistory({ me }: { me: Me }) {
     }
   };
 
+  /* ---- 引用定位（与对话页同款） ---- */
+  const handleLocate = useCallback(
+    async (filename: string, page: string | undefined) => {
+      try {
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+        const params = new URLSearchParams({ doc: filename });
+        if (lastUser?.content) params.set('q', String(lastUser.content));
+        const r = await fetch('/api/locate?' + params.toString());
+        if (r.status === 401) return;
+        if (!r.ok) {
+          msgApi.warning('定位失败');
+          return;
+        }
+        const data = await r.json();
+        if (!data.found) {
+          msgApi.warning('未定位到引用片段');
+          return;
+        }
+        setLocateTitle(`来源: ${filename}${page ? ` · 第${page}页` : ''}`);
+        setLocateText(data.text);
+        setLocateOpen(true);
+      } catch {
+        msgApi.warning('定位请求失败');
+      }
+    },
+    [messages, msgApi],
+  );
+
+  /* ---- 与对话页一致的气泡角色 ---- */
+  const sessionAssistant = assistants.find(
+    (a) => a.id === (activeSession?.assistant_id || ''),
+  );
+  const roles = useMemo(
+    () => ({
+      user: {
+        placement: 'end' as const,
+        avatar: {
+          icon: <UserAvatar avatar={me.avatar} name={me.user} size={28} />,
+          style: { background: 'transparent' },
+        },
+        variant: 'filled' as const,
+      },
+      assistant: {
+        placement: 'start' as const,
+        avatar: sessionAssistant?.avatar
+          ? {
+              icon: (
+                <UserAvatar
+                  avatar={sessionAssistant.avatar}
+                  name={sessionAssistant.name}
+                  size={28}
+                />
+              ),
+              style: { background: 'transparent' },
+            }
+          : { icon: <RobotOutlined />, style: { background: '#6366f1', color: '#fff' } },
+        variant: 'filled' as const,
+        messageRender: (content: string) => (
+          <MarkdownContent content={content} onLocate={handleLocate} />
+        ),
+      },
+    }),
+    [me.avatar, me.user, sessionAssistant, handleLocate],
+  );
+
+  const bubbleItems: BubbleDataType[] = useMemo(
+    () => messages.map((m) => ({ key: m.id, role: m.role, content: m.content })),
+    [messages],
+  );
+
   /* ---- 渲染 ---- */
   if (loading) {
     return <Spin style={{ display: 'block', margin: '120px auto' }} size="large" />;
   }
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1000, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1000, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>会话历史</h1>
         <Typography.Text type="secondary">{me.user} 的全部对话记录</Typography.Text>
@@ -176,7 +256,7 @@ export default function SessionHistory({ me }: { me: Me }) {
         />
       )}
 
-      {/* ---- 会话详情 Drawer ---- */}
+      {/* ---- 会话详情 Drawer：与对话页同款气泡样式 ---- */}
       <Drawer
         title={activeSession ? activeSession.title || '（未命名会话）' : '会话详情'}
         placement="right"
@@ -197,29 +277,18 @@ export default function SessionHistory({ me }: { me: Me }) {
         ) : messages.length === 0 ? (
           <Empty description="该会话暂无消息" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {messages.map((m) => (
-              <Card
-                key={m.id}
-                size="small"
-                style={{
-                  background: m.role === 'user' ? '#e6f4ff' : '#f5f5f5',
-                  alignSelf: m.role === 'user' ? 'flex-start' : 'flex-end',
-                  maxWidth: '85%',
-                }}
-              >
-                <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 12, color: '#666' }}>
-                  {m.role === 'user' ? '用户' : '助手'}
-                  <span style={{ fontWeight: 400, marginLeft: 8 }}>
-                    {formatTime(m.created_at)}
-                  </span>
-                </div>
-                <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
-              </Card>
-            ))}
+          <div className="dm-chat dm-history">
+            <Bubble.List items={bubbleItems} roles={roles as any} />
           </div>
         )}
       </Drawer>
+
+      {/* ---- 引用定位 Modal ---- */}
+      <Modal title={locateTitle} open={locateOpen} onCancel={() => setLocateOpen(false)} footer={null} width={640}>
+        <Typography.Paragraph style={{ maxHeight: 400, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+          {locateText}
+        </Typography.Paragraph>
+      </Modal>
     </div>
   );
 }

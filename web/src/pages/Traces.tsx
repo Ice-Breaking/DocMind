@@ -147,7 +147,7 @@ export default function Traces() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>检索日志</h1>
         <Text type="secondary">LLM / 检索 / 工具调用的 trace 记录（最近 5000 条）</Text>
@@ -204,7 +204,7 @@ export default function Traces() {
         </Card>
       )}
 
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={items}
         rowKey={(r) => r.id || `${r.ts}-${r.name}`}

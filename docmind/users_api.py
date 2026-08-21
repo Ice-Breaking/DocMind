@@ -5,19 +5,96 @@
 - 管理员新建的账号强制首登改密（must_change_pwd=1）
 - 所有操作写审计日志
 """
+import os
 import re
+import time
 
 import fastapi
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from docmind import store
 from docmind.admin import _require_admin
+from docmind.docs_api import _require_user
 
 _USERNAME_RE = re.compile(r"^[\w.@-]{2,64}$")
 
+AVATAR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "data", "avatars")
+_MAX_AVATAR = 2 * 1024 * 1024
+
 
 def register_users_routes(app) -> None:
+
+    @app.post("/api/me/avatar", include_in_schema=False)
+    async def _set_my_avatar(request: fastapi.Request):
+        """任何登录用户（含管理员）修改自己的头像"""
+        user = _require_user(request, app)
+        body = await request.json()
+        avatar = str(body.get("avatar") or "")[:64]
+        store.set_user_avatar(user, avatar)
+        store.record_audit(user, "user.avatar", f"user:{user}", avatar[:24])
+        return {"ok": True}
+
+    @app.post("/api/me/avatar-upload", include_in_schema=False)
+    async def _upload_avatar(request: fastapi.Request, file: fastapi.UploadFile = fastapi.File(...)):
+        """上传自定义头像：存为待审核（pending_avatar），审核通过前展示旧头像"""
+        user = _require_user(request, app)
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="空文件")
+        if len(data) > _MAX_AVATAR:
+            raise HTTPException(status_code=400, detail="图片过大（上限 2MB，请先压缩）")
+        ok_png = data[:4] == b"\x89PNG"
+        ok_jpg = data[:2] == b"\xff\xd8"
+        ok_webp = data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+        if not (ok_png or ok_jpg or ok_webp):
+            raise HTTPException(status_code=400, detail="仅支持 PNG/JPG/WebP 图片")
+        ext = "png" if ok_png else ("jpg" if ok_jpg else "webp")
+        os.makedirs(AVATAR_DIR, exist_ok=True)
+        fname = f"pending_{user}_{int(time.time() * 1000)}.{ext}"
+        with open(os.path.join(AVATAR_DIR, fname), "wb") as f:
+            f.write(data)
+        store.set_pending_avatar(user, fname)
+        store.record_audit(user, "user.avatar-upload", f"user:{user}", fname)
+        return {"ok": True, "pending": fname}
+
+    @app.get("/api/avatar-file/{name}", include_in_schema=False)
+    async def _avatar_file(name: str, request: fastapi.Request):
+        """头像文件（登录态可读，img 标签同源自动带 cookie）"""
+        _require_user(request, app)
+        safe = os.path.basename(name)
+        path = os.path.join(AVATAR_DIR, safe)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="头像不存在")
+        media = {"png": "image/png", "jpg": "image/jpeg",
+                 "webp": "image/webp"}.get(safe.rsplit(".", 1)[-1], "image/png")
+        return FileResponse(path, media_type=media)
+
+    @app.get("/api/admin/avatar-reviews", include_in_schema=False)
+    async def _avatar_reviews(request: fastapi.Request):
+        _require_admin(request, app)
+        return JSONResponse(store.list_pending_avatars())
+
+    @app.post("/api/admin/avatar-review/{username}", include_in_schema=False)
+    async def _avatar_review(username: str, request: fastapi.Request):
+        """人工审核：approve → 待审核转正为正式头像；reject → 丢弃保留旧头像"""
+        admin = _require_admin(request, app)
+        body = await request.json()
+        action = str(body.get("action") or "")
+        pend, _ts = store.get_pending_avatar(username)
+        if not pend:
+            raise HTTPException(status_code=400, detail="该用户没有待审核头像")
+        if action == "approve":
+            store.set_user_avatar(username, f"file:{pend}")
+        else:
+            try:
+                os.remove(os.path.join(AVATAR_DIR, os.path.basename(pend)))
+            except OSError:
+                pass
+        store.clear_pending_avatar(username)
+        store.record_audit(admin, f"admin.avatar-{action}", f"user:{username}", pend)
+        return {"ok": True}
 
     @app.get("/api/admin/users", include_in_schema=False)
     async def _users(request: fastapi.Request):

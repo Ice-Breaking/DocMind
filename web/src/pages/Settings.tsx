@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   App,
   Button,
+  Segmented,
   Card,
   Descriptions,
   Divider,
@@ -11,15 +12,20 @@ import {
   Space,
   Tag,
   Typography,
+  Upload,
 } from 'antd';
 import {
   DeleteOutlined,
   DownloadOutlined,
   ExportOutlined,
   LockOutlined,
+  UploadOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { deleteAccount, type Me } from '../api';
+import { changeAvatar, deleteAccount, uploadAvatar, type Me } from '../api';
+import { compressImageToAvatar } from '../img';
+import AvatarPicker from '../components/AvatarPicker';
+import UserAvatar from '../components/UserAvatar';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -27,9 +33,51 @@ const { Title, Text, Paragraph } = Typography;
  * 个人设置：账号信息 / 数据导出 / 注销账号。
  * 修改密码已独立为顶部用户菜单的弹窗入口，本页不再重复。
  */
-export default function Settings({ me, onLogout }: { me: Me; onLogout: () => void }) {
+export default function Settings({
+  me,
+  onLogout,
+  onRefreshMe,
+}: {
+  me: Me;
+  onLogout: () => void;
+  onRefreshMe?: () => Promise<void> | void;
+}) {
   const { message: msgApi } = App.useApp();
   const navigate = useNavigate();
+
+  /* ---- 我的头像 ---- */
+  const [draftAvatar, setDraftAvatar] = useState(me.avatar || '');
+  const [avatarSaving, setAvatarSaving] = useState(false);
+
+  /* ---- 上传自定义头像（待审核） ---- */
+  const [uploading, setUploading] = useState(false);
+
+  const handleUploadAvatar = async (file: File) => {
+    setUploading(true);
+    try {
+      const blob = await compressImageToAvatar(file);
+      await uploadAvatar(blob);
+      await onRefreshMe?.();
+      msgApi.success('已上传，等待管理员审核；审核通过前继续展示当前头像');
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '上传失败');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleSaveAvatar = async () => {
+    setAvatarSaving(true);
+    try {
+      await changeAvatar(draftAvatar);
+      await onRefreshMe?.();
+      msgApi.success('头像已保存');
+    } catch (e: unknown) {
+      msgApi.error(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setAvatarSaving(false);
+    }
+  };
 
   /* ---- 注销账号 ---- */
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -57,7 +105,7 @@ export default function Settings({ me, onLogout }: { me: Me; onLogout: () => voi
   };
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 760, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 760, margin: '0 auto' }}>
       <Title level={3} style={{ marginBottom: 8 }}>个人设置</Title>
       <Text type="secondary">账号信息、个人数据与账号安全</Text>
 
@@ -78,6 +126,75 @@ export default function Settings({ me, onLogout }: { me: Me; onLogout: () => voi
         <Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
           <LockOutlined /> 修改密码请点击右上角（侧边栏顶部）用户菜单中的「修改密码」。
         </Paragraph>
+      </Card>
+
+      <Divider />
+
+      {/* ---- 字号大小 ---- */}
+      <Card>
+        <Space align="center" style={{ marginBottom: 12 }}>
+          <Title level={5} style={{ margin: 0 }}>字号大小</Title>
+        </Space>
+        <Segmented
+          value={localStorage.getItem('dm_fontscale') || 'md'}
+          onChange={(v) => {
+            const val = String(v);
+            localStorage.setItem('dm_fontscale', val);
+            document.documentElement.dataset.fontscale = val;
+            msgApi.success('字号已调整，全站即时生效');
+          }}
+          options={[
+            { value: 'sm', label: '小' },
+            { value: 'md', label: '标准' },
+            { value: 'lg', label: '大' },
+          ]}
+        />
+        <div style={{ marginTop: 8, color: '#8a94a6', fontSize: 12 }}>
+          移动端基线已比 PC 略大；此设置在当前设备保存，即时生效。
+        </div>
+      </Card>
+
+      <Divider />
+
+      {/* ---- 我的头像 ---- */}
+      <Card>
+        <Space align="center" style={{ marginBottom: 16 }}>
+          <UserAvatar avatar={draftAvatar} name={me.user} size={20} />
+          <Title level={5} style={{ margin: 0 }}>我的头像</Title>
+        </Space>
+        <AvatarPicker
+          value={draftAvatar}
+          onChange={setDraftAvatar}
+          username={me.user}
+        />
+        <Button
+          type="primary"
+          style={{ marginTop: 16 }}
+          loading={avatarSaving}
+          onClick={handleSaveAvatar}
+        >
+          保存头像
+        </Button>
+        <Divider style={{ margin: '16px 0' }} />
+        <Space wrap>
+          <Upload
+            accept="image/png,image/jpeg,image/webp"
+            showUploadList={false}
+            beforeUpload={(f) => {
+              handleUploadAvatar(f);
+              return false;
+            }}
+          >
+            <Button icon={<UploadOutlined />} loading={uploading}>
+              上传自定义头像
+            </Button>
+          </Upload>
+          {me.pending_avatar ? (
+            <Tag color="orange">新头像审核中，当前展示旧头像</Tag>
+          ) : (
+            <Tag>自定义头像需管理员审核后生效</Tag>
+          )}
+        </Space>
       </Card>
 
       <Divider />

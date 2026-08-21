@@ -230,7 +230,7 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
       <div style={{ marginBottom: 16 }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建评测集</Button>
       </div>
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={datasets}
         rowKey="id"
@@ -417,7 +417,7 @@ function RunsTab() {
           运行中的任务每 4 秒自动刷新；展开行查看未命中明细
         </Text>
       </div>
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={runs}
         rowKey="id"
@@ -449,7 +449,7 @@ function RunDetails({ runId, status }: { runId: number; status: string }) {
     return <Text type="success">🎉 全部样本命中</Text>;
   }
   return (
-    <Table
+    <Table scroll={{ x: "max-content" }}
       size="small"
       pagination={false}
       rowKey="question"
@@ -545,7 +545,7 @@ function QualityTab() {
         {data.eval_trend.length === 0 ? (
           <Text type="secondary">暂无评测运行记录，先到「评测集」页运行一次评测</Text>
         ) : (
-          <Table
+          <Table scroll={{ x: "max-content" }}
             size="small"
             pagination={false}
             rowKey={(r) => `${r.date}-${r.mode}`}
@@ -605,7 +605,7 @@ export default function Eval() {
   }, []);
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div style={{ marginBottom: 16 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>评测与质量</h1>
         <Text type="secondary">离线评测检索质量，聚合线上反馈信号，形成质量闭环</Text>

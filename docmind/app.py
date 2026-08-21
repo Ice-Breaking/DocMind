@@ -6,6 +6,14 @@
 """
 import os
 
+# macOS venv 常缺系统根证书：必须在任何网络库（gradio/openai/aiohttp）初始化
+# OpenSSL 默认证书库之前指向 certifi 证书包，否则进程内首次 TLS 会缓存空证书库，
+# 导致后续 ASR websocket 报 CERTIFICATE_VERIFY_FAILED
+import certifi as _certifi
+
+os.environ["SSL_CERT_FILE"] = _certifi.where()
+os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi.where())
+
 import gradio as gr
 
 from docmind.logging_setup import setup_logging
@@ -2003,6 +2011,8 @@ if __name__ == "__main__":
     register_eval_routes(demo.app)
     from docmind.platform_api import register_platform_routes
     register_platform_routes(demo.app)
+    from docmind.voice_api import register_voice_routes
+    register_voice_routes(demo.app)
     from docmind.governance_api import register_governance_routes
     register_governance_routes(demo.app)
     from docmind.users_api import register_users_routes

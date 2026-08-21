@@ -171,7 +171,7 @@ export default function Alerts() {
   const availabilityPct = sla ? (sla.availability * 100).toFixed(2) : '—';
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -240,7 +240,7 @@ export default function Alerts() {
       {/* ---- SLA 每日趋势 ---- */}
       {sla && sla.daily.length > 0 && (
         <Card title="近 7 天 SLA 趋势" size="small" style={{ marginBottom: 16 }}>
-          <Table
+          <Table scroll={{ x: "max-content" }}
             size="small"
             pagination={false}
             rowKey="date"
@@ -266,7 +266,7 @@ export default function Alerts() {
       )}
 
       {/* ---- 告警列表 ---- */}
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={alerts}
         rowKey="id"

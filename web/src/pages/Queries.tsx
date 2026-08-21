@@ -75,7 +75,7 @@ export default function Queries() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>提问记录</h1>
         <Text type="secondary">全部用户的检索提问流水，用于行为审计与高频问题挖掘</Text>
@@ -112,7 +112,7 @@ export default function Queries() {
         <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
       </Space>
 
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={rows}
         rowKey={(r) => `${r.session_id}-${r.created_at}-${r.question.slice(0, 12)}`}

@@ -111,7 +111,7 @@ export default function App() {
           <Route path="/assistants" element={<Assistants me={me!} />} />
           <Route path="/kbs" element={<KnowledgeBases />} />
           <Route path="/sessions" element={<SessionHistory me={me!} />} />
-          <Route path="/settings" element={<Settings me={me!} onLogout={() => setMe(null)} />} />
+          <Route path="/settings" element={<Settings me={me!} onLogout={() => setMe(null)} onRefreshMe={refresh} />} />
           <Route
             path="/usage"
             element={me?.is_admin ? <Usage /> : <Navigate to="/dashboard" replace />}

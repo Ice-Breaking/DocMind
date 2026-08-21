@@ -77,7 +77,7 @@ export default function RetrievalLab() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>检索调优实验室</h1>
         <Text type="secondary">输入问题查看召回结果、分数与检索路线，定位召回质量问题</Text>
@@ -88,7 +88,7 @@ export default function RetrievalLab() {
         {stageStats.length === 0 ? (
           <Text type="secondary">暂无阶段埋点数据（发生检索后自动积累）</Text>
         ) : (
-          <Table
+          <Table scroll={{ x: "max-content" }}
             size="small"
             columns={stageColumns}
             dataSource={stageStats}
@@ -147,7 +147,7 @@ export default function RetrievalLab() {
           <Row gutter={[16, 16]}>
             <Col xs={24} lg={8}>
               <Card title="各阶段耗时" size="small">
-                <Table
+                <Table scroll={{ x: "max-content" }}
                   size="small"
                   pagination={false}
                   rowKey="stage"

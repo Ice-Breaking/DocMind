@@ -88,7 +88,7 @@ export default function Backups() {
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div
         style={{
           display: 'flex',
@@ -114,7 +114,7 @@ export default function Backups() {
         </Space>
       </div>
 
-      <Table
+      <Table scroll={{ x: "max-content" }}
         columns={columns}
         dataSource={backups}
         rowKey="name"

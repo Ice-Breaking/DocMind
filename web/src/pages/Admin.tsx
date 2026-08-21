@@ -99,7 +99,7 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
   ];
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+    <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>会话审计</h1>
         <Text type="secondary">管理员：{me.user}，可回看全部用户的会话记录</Text>
@@ -113,7 +113,7 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
           <Button style={{ marginLeft: 12 }} onClick={() => window.location.reload()}>重试</Button>
         </Card>
       ) : (
-        <Table
+        <Table scroll={{ x: "max-content" }}
           columns={columns}
           dataSource={sessions}
           rowKey="id"
