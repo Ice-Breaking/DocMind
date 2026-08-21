@@ -43,6 +43,7 @@ import {
   type KbDoc,
   type KnowledgeBase,
 } from '../api';
+import { DocumentPreviewModal } from '../components/DocumentPreviewModal';
 
 const { Text } = Typography;
 
@@ -96,6 +97,10 @@ export default function KnowledgeBases() {
   const [tasksLoading, setTasksLoading] = useState(false);
   const [reindexing, setReindexing] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
+
+  /* ---- 文档预览 Modal ---- */
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewFilename, setPreviewFilename] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -521,7 +526,17 @@ export default function KnowledgeBases() {
                           >
                             <List.Item.Meta
                               avatar={<FileTextOutlined style={{ fontSize: 18, color: '#1677ff' }} />}
-                              title={<Text style={{ fontSize: 13 }}>{d.name}</Text>}
+                              title={
+                                <a
+                                  onClick={() => {
+                                    setPreviewFilename(d.name);
+                                    setPreviewVisible(true);
+                                  }}
+                                  style={{ cursor: 'pointer', color: '#1677ff', fontSize: 13 }}
+                                >
+                                  {d.name}
+                                </a>
+                              }
                               description={`${formatSize(d.size)} · 更新于 ${new Date(d.modified).toLocaleString()}`}
                             />
                           </List.Item>
@@ -578,6 +593,16 @@ export default function KnowledgeBases() {
           />
         )}
       </Drawer>
+
+      {/* 文档预览 Modal */}
+      {activeKb && (
+        <DocumentPreviewModal
+          visible={previewVisible}
+          onClose={() => setPreviewVisible(false)}
+          kbId={activeKb.id}
+          filename={previewFilename}
+        />
+      )}
     </div>
   );
 }
