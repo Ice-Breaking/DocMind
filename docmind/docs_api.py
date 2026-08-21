@@ -147,12 +147,12 @@ def register_docs_routes(app) -> None:
         from docmind.rag.kb_registry import get_registry
 
         kb_registry = get_registry()
-        kb_info = kb_registry.get(kb_id)
+        result = kb_registry.get(kb_id)
 
-        if kb_info is None:
-            raise HTTPException(status_code=404, detail="知识库不存在")
+        if result is None or result == (None, None):
+            raise HTTPException(status_code=404, detail="知识库不存在或未初始化")
 
-        vector_store = kb_info['vector_store']
+        vector_store, _ = result  # 解包 tuple
 
         # 从向量存储中查找该文件的所有切片
         chunks = []
