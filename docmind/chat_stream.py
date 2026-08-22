@@ -111,8 +111,10 @@ def stream_events(agent, question: str, session_id: str = "",
             else:
                 yield {"kind": "step", "step_kind": step.kind, "text": step.text}
     except Exception as e:  # noqa: BLE001
-        final_answer = f"⚠️ 处理过程中出现异常：{e}\n请重试，若持续失败请检查 API 额度与网络。"
-        yield {"kind": "error", "message": str(e)}
+        logger.exception("Agent 应答链路异常")   # 细节只进日志，不透给用户
+        final_answer = ("⚠️ 抱歉，处理您的问题时出现了内部故障，请稍后重试；"
+                        "若持续失败请联系管理员。")
+        yield {"kind": "error", "message": "处理过程中出现异常，请稍后重试"}
     if not final_answer:
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
 

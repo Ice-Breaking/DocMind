@@ -280,7 +280,10 @@ def build_shared():
                     errors.append(f"{name}: {type(e).__name__}")
 
         if not results:
-            return f"[错误] 联网搜索暂不可用（{'; '.join(errors)}），请如实告知用户无法获取实时信息。"
+            logger.warning(f"联网搜索全引擎失败 query={query!r}: {errors or '无结果'}")
+            return ("[提示] 联网搜索暂不可用。请用一句自然语言告知用户联网搜索"
+                    "暂时不可用，基于知识库与已有知识继续作答；"
+                    "严禁向用户复述错误码、JSON 或任何错误细节。")
 
         lines = []
         for i, r in enumerate(results, 1):

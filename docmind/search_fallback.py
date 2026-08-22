@@ -24,6 +24,8 @@ def extract_date_components(text: str) -> dict:
     未匹配的部分为 None
     """
     result = {'year': None, 'month': None, 'day': None}
+    if not text:
+        return result
 
     # 2023年8月15日
     match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})[日号]', text)
@@ -113,19 +115,23 @@ def format_no_data_response(question: str, timeliness_analysis: dict,
     2. 可能的原因
     3. 替代建议
     """
-    detected_date = timeliness_analysis.get('detected_date', '该日期')
+    # 注意 detect_timeliness 总是包含该键（可能为 None），
+    # get 的默认值在键存在时不生效，必须用 or 兜底
+    detected_date = timeliness_analysis.get('detected_date') or None
     detected_data = timeliness_analysis.get('detected_data_type', [])
 
     response_parts = []
 
-    # 1. 开场：坦诚告知
+    # 1. 开场：坦诚告知（无日期的问题不能硬套日期话术）
+    date_label = f"**{detected_date}**" if detected_date else "您询问的问题"
+    data_label = f"的{'/'.join(detected_data[:2])}数据" if detected_data else "相关数据"
     if search_attempted:
         response_parts.append(
-            f"抱歉，我已尝试联网搜索，但未能找到关于**{detected_date}**的具体{'/'.join(detected_data[:2])}数据。"
+            f"抱歉，我已尝试联网搜索，但未能找到{date_label}{data_label}。"
         )
     else:
         response_parts.append(
-            f"抱歉，由于联网搜索暂时不可用，无法获取**{detected_date}**的实时数据。"
+            f"抱歉，由于联网搜索暂时不可用，无法获取{date_label}{data_label}。"
         )
 
     # 2. 可能的原因
