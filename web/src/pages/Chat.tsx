@@ -23,7 +23,7 @@ import {
   PauseOutlined,
   SoundOutlined,
 } from '@ant-design/icons';
-import { App, Button, Modal, Select, Space, Typography } from 'antd';
+import { App, Button, Image, Modal, Select, Space, Typography } from 'antd';
 import { blobToWav16k } from '../voice';
 import UserAvatar from '../components/UserAvatar';
 import {
@@ -851,6 +851,41 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         style: { background: 'transparent' },
       },
       variant: 'filled' as const,
+      messageRender: (content: string) => {
+        // 图片消息：提取 markdown 图片（当轮为 dataUrl、历史为 /files/uploads 短链），
+        // 以缩略图展示 + 点击预览；避免 base64 长 URL 以文本形式露出
+        const imgs: string[] = [];
+        const text = content
+          .replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, url: string) => {
+            imgs.push(url);
+            return '';
+          })
+          .trim();
+        return (
+          <div>
+            {imgs.length > 0 && (
+              <div
+                style={{
+                  display: 'flex', gap: 8, flexWrap: 'wrap',
+                  marginBottom: text ? 6 : 0, justifyContent: 'flex-end',
+                }}
+              >
+                {imgs.map((u, i) => (
+                  <Image
+                    key={i}
+                    src={u}
+                    alt="图片"
+                    width={200}
+                    style={{ borderRadius: 8, objectFit: 'cover' }}
+                    preview={{ mask: '预览' }}
+                  />
+                ))}
+              </div>
+            )}
+            {text && <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>}
+          </div>
+        );
+      },
     },
     assistant: {
       placement: 'start' as const,
@@ -1067,19 +1102,28 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             loading={streaming}
             placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
             prefix={
-              <button
-                className="dm-img-btn"
-                title="附加图片（AI 直接看图作答）"
-                onClick={() => imgInputRef.current?.click()}
+              <div
                 style={{
-                  border: 'none', background: 'none', cursor: 'pointer',
-                  display: 'inline-flex', alignItems: 'center',
-                  padding: 0, margin: 0, fontSize: 17, color: '#8c8c8c',
-                  lineHeight: 1, height: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  alignSelf: 'stretch',
+                  paddingLeft: 4,
                 }}
               >
-                <FileImageOutlined />
-              </button>
+                <button
+                  className="dm-img-btn"
+                  title="附加图片（AI 直接看图作答）"
+                  onClick={() => imgInputRef.current?.click()}
+                  style={{
+                    border: 'none', background: 'none', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    padding: 0, margin: 0, fontSize: 17, color: '#8c8c8c',
+                    lineHeight: 1,
+                  }}
+                >
+                  <FileImageOutlined />
+                </button>
+              </div>
             }
           />
           <input

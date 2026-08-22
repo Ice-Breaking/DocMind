@@ -2,6 +2,7 @@ import { memo, useMemo, type AnchorHTMLAttributes } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Components } from 'react-markdown';
+import { Image } from 'antd';
 
 function citationToMarkdown(text: string): string {
   const regex =
@@ -43,6 +44,14 @@ const MarkdownContent = memo(function MarkdownContent({
         if (isMermaidLike(className || '', txt)) return null;
         return <code className={className}>{children}</code>;
       },
+      img: ({ src, alt }: any) => (
+        <Image
+          src={src}
+          alt={alt || ''}
+          style={{ maxWidth: 280, borderRadius: 8, margin: '4px 0' }}
+          preview={{ mask: '点击预览' }}
+        />
+      ),
       a: ({ href, children }: AnchorHTMLAttributes<HTMLAnchorElement>) => {
         if (href?.startsWith('#source-')) {
           return (
