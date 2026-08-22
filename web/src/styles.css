@@ -394,3 +394,35 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 }
 .dm-page { font-size: calc(var(--dm-fs) + var(--dm-fs-d)); }
 .dm-welcome-title { font-size: calc(var(--dm-fs) + var(--dm-fs-d) + 4px); }
+
+/* ---- 对话输入框图片附件按钮 ---- */
+/* antd-x Sender 的 prefix 容器默认顶对齐,强制与输入行垂直居中 */
+.dm-chat .ant-sender-prefix,
+.ant-sender-prefix {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  padding-left: 6px;
+}
+/* 品牌色圆形附件按钮(微信式回形针心智),hover 反馈 */
+.dm-img-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(99, 102, 241, 0.10);
+  color: #6366f1;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.1s ease;
+}
+.dm-img-btn:hover {
+  background: rgba(99, 102, 241, 0.22);
+  color: #4f46e5;
+}
+.dm-img-btn:active {
+  transform: scale(0.92);
+}

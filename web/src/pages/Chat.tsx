@@ -13,7 +13,7 @@ import {
   LikeOutlined,
   LikeFilled,
   DislikeFilled,
-  FileImageOutlined,
+  PaperClipOutlined,
   CloseOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -1102,28 +1102,13 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             loading={streaming}
             placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
             prefix={
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  alignSelf: 'stretch',
-                  paddingLeft: 4,
-                }}
+              <button
+                className="dm-img-btn"
+                title="附加图片（AI 直接看图作答）"
+                onClick={() => imgInputRef.current?.click()}
               >
-                <button
-                  className="dm-img-btn"
-                  title="附加图片（AI 直接看图作答）"
-                  onClick={() => imgInputRef.current?.click()}
-                  style={{
-                    border: 'none', background: 'none', cursor: 'pointer',
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    padding: 0, margin: 0, fontSize: 17, color: '#8c8c8c',
-                    lineHeight: 1,
-                  }}
-                >
-                  <FileImageOutlined />
-                </button>
-              </div>
+                <PaperClipOutlined />
+              </button>
             }
           />
           <input
