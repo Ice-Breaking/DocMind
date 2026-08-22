@@ -14,6 +14,7 @@ import {
   LikeFilled,
   DislikeFilled,
   PaperClipOutlined,
+  SearchOutlined,
   DownloadOutlined,
   CloseOutlined,
   PlusOutlined,
@@ -24,7 +25,7 @@ import {
   PauseOutlined,
   SoundOutlined,
 } from '@ant-design/icons';
-import { App, Button, Image, Modal, Select, Space, Typography } from 'antd';
+import { App, Button, Image, Input, Modal, Select, Space, Typography } from 'antd';
 import { blobToWav16k } from '../voice';
 import UserAvatar from '../components/UserAvatar';
 import {
@@ -97,6 +98,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [recording, setRecording] = useState(false);
   const [imageAttach, setImageAttach] = useState<{ dataUrl: string; base64: string } | null>(null);
+  const [convSearch, setConvSearch] = useState('');
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -754,11 +756,14 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     return opts;
   }, [assistants, assistantId]);
 
-  /* ---- conversation items ---- */
-  const convItems: Conversation[] = sessions.map((s) => ({
-    key: s.id,
-    label: s.title || s.id.slice(0, 16),
-  }));
+  /* ---- conversation items（按搜索词过滤） ---- */
+  const kw = convSearch.trim().toLowerCase();
+  const convItems: Conversation[] = sessions
+    .filter((s) => !kw || (s.title || '').toLowerCase().includes(kw))
+    .map((s) => ({
+      key: s.id,
+      label: s.title || s.id.slice(0, 16),
+    }));
 
   /* ---- menu for conversations ---- */
   const convMenu = (conv: Conversation) => ({
@@ -964,6 +969,15 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       {/* Sidebar（移动端为抽屉，见 styles.css 媒体查询） */}
       <div className={`dm-chat-sidebar${sidebarOpen ? ' dm-open' : ''}`}>
         <div className="dm-chat-sidebar-header">
+          <Input
+            allowClear
+            size="small"
+            prefix={<SearchOutlined style={{ color: '#999' }} />}
+            placeholder="搜索对话"
+            value={convSearch}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConvSearch(e.target.value)}
+            style={{ marginBottom: 8 }}
+          />
           <Button
             type="primary"
             icon={<PlusOutlined />}
@@ -992,6 +1006,10 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
               onClick={async () => {
                 const sid = activeSidRef.current;
                 if (!sid) return;
+                if (messagesRef.current.length === 0) {
+                  msgApi.warning('当前对话暂无内容，先聊点什么再导出吧');
+                  return;
+                }
                 try {
                   const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/export`);
                   if (!r.ok) throw new Error('导出失败');
@@ -1021,16 +1039,20 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
 
       {/* Main */}
       <div className="dm-chat-main">
-        <div className="dm-chat-mobile-toggle">
-          <button onClick={() => setSidebarOpen(v => !v)}>
-            <MenuOutlined /> 会话列表
-          </button>
+        <div className="dm-chat-topbar">
           <button
-            style={{ marginLeft: 'auto', color: '#6366f1', fontWeight: 600 }}
-            onClick={() => { handleNewChat(); setSidebarOpen(false); }}
+            className="dm-topbar-menu"
+            onClick={() => setSidebarOpen(v => !v)}
+            title="会话列表"
           >
-            <PlusOutlined /> 新对话
+            <MenuOutlined />
           </button>
+          <span className="dm-topbar-title">
+            {sessions.find((x) => x.id === activeSid)?.title || '新对话'}
+          </span>
+          <span className="dm-topbar-assistant">
+            {currentAssistant?.name || '默认助手'}
+          </span>
         </div>
         {sidebarOpen && (
           <div className="dm-chat-mask" onClick={() => setSidebarOpen(false)} />
