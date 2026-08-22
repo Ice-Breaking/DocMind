@@ -570,3 +570,17 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
   align-self: center;
   margin: 0;
 }
+
+/* 侧栏收放动画 */
+.dm-chat-sidebar {
+  transition: width 0.25s ease, min-width 0.25s ease;
+}
+
+/* 精确对齐:实际容器为 .ant-sender-actions-list(实测两者顶部对齐导致 4px 中心偏差) */
+.ant-sender .ant-sender-actions-list {
+  display: flex;
+  align-items: center;
+}
+.ant-sender .ant-sender-actions-list .ant-select {
+  align-self: center;
+}
