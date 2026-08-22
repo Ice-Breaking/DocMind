@@ -612,9 +612,12 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
   /* 欢迎卡片紧凑 */
   .dm-welcome-feats span { font-size: 11px; }
 }
-/* 移动端:prefix 隐藏新对话按钮(会话抽屉内已有入口),输入区最大化 */
+/* 移动端:新对话按钮保留在输入框左侧(用户要求),音色下拉进一步收窄补空间 */
 @media (max-width: 767px) {
-  .ant-sender .dm-newchat-btn { display: none; }
+  .ant-sender .ant-select {
+    max-width: 72px !important;
+    min-width: 56px !important;
+  }
 }
 
 /* 移动端会话抽屉内的新对话入口(PC 有 prefix 按钮,隐藏此按钮) */
