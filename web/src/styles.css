@@ -90,7 +90,7 @@ body {
   white-space: nowrap;
 }
 .dm-topbar-menu {
-  display: none;   /* 仅移动端显示 */
+  display: inline-flex;   /* PC=全局导航入口 / 移动=会话抽屉 */
   border: none; background: none; cursor: pointer;
   font-size: 17px; color: #4a4f57; padding: 4px;
 }
@@ -466,3 +466,12 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 }
 .dm-mic.dm-mic-inline:hover { background: rgba(99, 102, 241, 0.12); }
 .dm-mic.dm-mic-inline.recording { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+
+/* 输入框内附件条(Sender header):宽度约束防布局错乱 */
+.dm-attach-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px;
+}
+.dm-attach-tip { flex: 1; font-size: 12px; color: #888; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-attach-close { color: '#999'; cursor: pointer; font-size: 13px; color: #999; padding: 2px; }

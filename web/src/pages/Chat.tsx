@@ -1080,8 +1080,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         <div className="dm-chat-topbar">
           <button
             className="dm-topbar-menu"
-            onClick={() => setSidebarOpen(v => !v)}
-            title="会话列表"
+            onClick={() => {
+              if (window.innerWidth < 768) setSidebarOpen(v => !v);   // 移动端:会话抽屉
+              else window.dispatchEvent(new CustomEvent('dm-open-nav')); // PC:全局导航抽屉
+            }}
+            title="导航菜单"
           >
             <MenuOutlined />
           </button>
@@ -1125,10 +1128,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
                 }
               }}
             />
-            <Button size="small" type="primary" ghost icon={<PlusOutlined />}
-              onClick={() => { handleNewChat(); setSidebarOpen(false); }}>
-              新对话
-            </Button>
           </div>
         </div>
         {sidebarOpen && (
@@ -1223,17 +1222,22 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
             header={
               imageAttach ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
-                  <img src={imageAttach.dataUrl} alt="附件"
-                    style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6 }} />
-                  <span style={{ fontSize: 12, color: '#888', flex: 1 }}>
-                    {uploadPct != null ? `正在上传 ${uploadPct}%` : '图片将随消息发送'}
+                <div className="dm-attach-bar" style={{ width: '100%' }}>
+                  <Image
+                    src={imageAttach.dataUrl}
+                    alt="附件"
+                    width={40}
+                    height={40}
+                    style={{ objectFit: 'cover', borderRadius: 6, cursor: 'pointer' }}
+                    preview={{ mask: '预览' }}
+                  />
+                  <span className="dm-attach-tip">
+                    {uploadPct != null ? `正在上传 ${uploadPct}%` : '图片将随消息发送（点击图片可预览）'}
                   </span>
                   {uploadPct != null ? (
                     <Progress type="circle" size={22} percent={uploadPct} showInfo={false} />
                   ) : (
-                    <CloseOutlined onClick={() => setImageAttach(null)}
-                      style={{ color: '#999', cursor: 'pointer', fontSize: 12 }} />
+                    <CloseOutlined onClick={() => setImageAttach(null)} className="dm-attach-close" />
                   )}
                 </div>
               ) : undefined
@@ -1268,13 +1272,23 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
               </button>,
             ]}
             prefix={
-              <button
-                className="dm-img-btn"
-                title="附加图片（AI 直接看图作答）"
-                onClick={() => imgInputRef.current?.click()}
-              >
-                <PaperClipOutlined />
-              </button>
+              <>
+                <button
+                  className="dm-img-btn"
+                  title="开始新对话"
+                  onClick={() => { handleNewChat(); setSidebarOpen(false); }}
+                >
+                  <PlusOutlined />
+                </button>
+                <button
+                  className="dm-img-btn"
+                  title="附加图片（AI 直接看图作答）"
+                  onClick={() => imgInputRef.current?.click()}
+                  style={{ marginLeft: 4 }}
+                >
+                  <PaperClipOutlined />
+                </button>
+              </>
             }
           />
           <input
