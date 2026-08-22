@@ -25,7 +25,7 @@ import {
   PauseOutlined,
   SoundOutlined,
 } from '@ant-design/icons';
-import { App, Button, Image, Input, Modal, Select, Space, Typography } from 'antd';
+import { App, Button, Image, Input, Modal, Progress, Select, Space, Typography } from 'antd';
 import { blobToWav16k } from '../voice';
 import UserAvatar from '../components/UserAvatar';
 import {
@@ -99,6 +99,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const [recording, setRecording] = useState(false);
   const [imageAttach, setImageAttach] = useState<{ dataUrl: string; base64: string } | null>(null);
   const [convSearch, setConvSearch] = useState('');
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -326,7 +327,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       const imgB64 = overrideImage ?? attach?.base64;
       const q = question.trim() || (imgB64 ? '请看这张图片。' : '');
       if (!q || streaming) return;
-      if (!overrideImage) setImageAttach(null);
+      if (overrideImage) setImageAttach(null);
+      if (imgB64) setUploadPct(0);   // 带图发送:展示上行进度,完成后再清附件
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -360,7 +362,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       try {
         while (retryCount <= MAX_RETRIES) {
           try {
-            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, imgB64)) {
+            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, imgB64,
+              imgB64 ? (pct) => {
+                setUploadPct(pct);
+                if (pct >= 100) { setImageAttach(null); setUploadPct(null); }
+              } : undefined)) {
               if (ctrl.signal.aborted) break;
 
               switch (ev.event) {
@@ -1043,56 +1049,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             placeholder="搜索对话"
             value={convSearch}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConvSearch(e.target.value)}
-            style={{ marginBottom: 8 }}
           />
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            block
-            onClick={() => { handleNewChat(); setSidebarOpen(false); }}
-          >
-            新对话
-          </Button>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <Select
-              size="small"
-              value={assistantId}
-              options={assistantOptions}
-              onChange={(v: string) => {
-                setAssistantId(v);
-                assistantIdRef.current = v;
-                localStorage.setItem('dm_assistant_id', v);
-              }}
-              style={{ flex: 1 }}
-            />
-            <Button
-              size="small"
-              icon={<DownloadOutlined />}
-              title="导出当前会话为 Markdown"
-              disabled={!activeSidRef.current}
-              onClick={async () => {
-                const sid = activeSidRef.current;
-                if (!sid) return;
-                if (messagesRef.current.length === 0) {
-                  msgApi.warning('当前对话暂无内容，先聊点什么再导出吧');
-                  return;
-                }
-                try {
-                  const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/export`);
-                  if (!r.ok) throw new Error('导出失败');
-                  const blob = await r.blob();
-                  const a = document.createElement('a');
-                  a.href = URL.createObjectURL(blob);
-                  a.download = `docmind-${sid}.md`;
-                  a.click();
-                  URL.revokeObjectURL(a.href);
-                  msgApi.success('已导出 Markdown');
-                } catch {
-                  msgApi.error('导出失败，请重试');
-                }
-              }}
-            />
-          </div>
         </div>
         <div className="dm-chat-sidebar-list">
           {kw ? (
@@ -1131,9 +1088,48 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
           <span className="dm-topbar-title">
             {sessions.find((x) => x.id === activeSid)?.title || '新对话'}
           </span>
-          <span className="dm-topbar-assistant">
-            {currentAssistant?.name || '默认助手'}
-          </span>
+          <div className="dm-topbar-actions">
+            <Select
+              size="small"
+              variant="borderless"
+              value={assistantId}
+              options={assistantOptions}
+              onChange={(v: string) => {
+                setAssistantId(v);
+                assistantIdRef.current = v;
+                localStorage.setItem('dm_assistant_id', v);
+              }}
+              style={{ width: 140 }}
+            />
+            <Button size="small" type="text" icon={<DownloadOutlined />}
+              title="导出当前会话为 Markdown" disabled={!activeSidRef.current}
+              onClick={async () => {
+                const sid = activeSidRef.current;
+                if (!sid) return;
+                if (messagesRef.current.length === 0) {
+                  msgApi.warning('当前对话暂无内容，先聊点什么再导出吧');
+                  return;
+                }
+                try {
+                  const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/export`);
+                  if (!r.ok) throw new Error('导出失败');
+                  const blob = await r.blob();
+                  const a = document.createElement('a');
+                  a.href = URL.createObjectURL(blob);
+                  a.download = `docmind-${sid}.md`;
+                  a.click();
+                  URL.revokeObjectURL(a.href);
+                  msgApi.success('已导出 Markdown');
+                } catch {
+                  msgApi.error('导出失败，请重试');
+                }
+              }}
+            />
+            <Button size="small" type="primary" ghost icon={<PlusOutlined />}
+              onClick={() => { handleNewChat(); setSidebarOpen(false); }}>
+              新对话
+            </Button>
+          </div>
         </div>
         {sidebarOpen && (
           <div className="dm-chat-mask" onClick={() => setSidebarOpen(false)} />
@@ -1208,61 +1204,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
 
         {/* Input */}
         <div className="dm-chat-input">
-          <div className="dm-voice-bar">
-            <Select
-              size="small"
-              value={voiceId}
-              onChange={(v) => {
-                setVoiceId(v);
-                localStorage.setItem('dm_voice', v);
-              }}
-              options={voiceOptions.map((o) => ({ value: o.id, label: o.label }))}
-              style={{ width: 220 }}
-              placeholder="播报音色"
-            />
-            <button
-              ref={micRef}
-              className={`dm-mic${recording ? ' recording' : ''}`}
-              onPointerDown={beginRecord}
-              onPointerMove={moveRecord}
-              onPointerUp={endRecord}
-              onPointerCancel={endRecord}
-              onContextMenu={(e) => e.preventDefault()}
-              style={{ touchAction: 'none' }}
-            >
-              <AudioOutlined /> {recording ? (cancelMode ? '松开取消' : '松开发送') : '按住说话'}
-            </button>
-            <button className="dm-newchat-mobile" onClick={handleNewChat}>
-              <PlusOutlined /> 新对话
-            </button>
-          </div>
           {recording && (
             <div className={`dm-voice-overlay${cancelMode ? ' cancel' : ''}`}>
               <div className="dm-voice-overlay-tip">
                 {cancelMode ? '松开手指，取消输入' : '正在聆听，松开发送 · 上滑取消'}
               </div>
-            </div>
-          )}
-          {imageAttach && (
-            <div
-              className="dm-img-chip"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '6px 10px', margin: '0 0 6px',
-                background: 'rgba(0,0,0,0.04)', borderRadius: 8,
-                width: 'fit-content',
-              }}
-            >
-              <img
-                src={imageAttach.dataUrl}
-                alt="附件"
-                style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6 }}
-              />
-              <span style={{ fontSize: 12, color: '#888' }}>图片将随消息发送</span>
-              <CloseOutlined
-                onClick={() => setImageAttach(null)}
-                style={{ color: '#999', cursor: 'pointer', fontSize: 12 }}
-              />
             </div>
           )}
           <Sender
@@ -1275,6 +1221,52 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             onCancel={handleCancel}
             loading={streaming}
             placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
+            header={
+              imageAttach ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px' }}>
+                  <img src={imageAttach.dataUrl} alt="附件"
+                    style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6 }} />
+                  <span style={{ fontSize: 12, color: '#888', flex: 1 }}>
+                    {uploadPct != null ? `正在上传 ${uploadPct}%` : '图片将随消息发送'}
+                  </span>
+                  {uploadPct != null ? (
+                    <Progress type="circle" size={22} percent={uploadPct} showInfo={false} />
+                  ) : (
+                    <CloseOutlined onClick={() => setImageAttach(null)}
+                      style={{ color: '#999', cursor: 'pointer', fontSize: 12 }} />
+                  )}
+                </div>
+              ) : undefined
+            }
+            actions={[
+              <Select
+                key="voice"
+                size="small"
+                variant="borderless"
+                value={voiceId}
+                onChange={(v) => {
+                  setVoiceId(v);
+                  localStorage.setItem('dm_voice', v);
+                }}
+                options={voiceOptions.map((o) => ({ value: o.id, label: o.label }))}
+                style={{ width: 150 }}
+                popupMatchSelectWidth={false}
+              />,
+              <button
+                key="mic"
+                ref={micRef}
+                className={`dm-mic dm-mic-inline${recording ? ' recording' : ''}`}
+                onPointerDown={beginRecord}
+                onPointerMove={moveRecord}
+                onPointerUp={endRecord}
+                onPointerCancel={endRecord}
+                onContextMenu={(e) => e.preventDefault()}
+                title="按住说话"
+                style={{ touchAction: 'none' }}
+              >
+                <AudioOutlined />
+              </button>,
+            ]}
             prefix={
               <button
                 className="dm-img-btn"

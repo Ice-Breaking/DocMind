@@ -452,3 +452,17 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
   font-size: 11px; font-weight: 600; color: #9a9a9a;
   text-transform: uppercase; letter-spacing: 0.4px;
 }
+
+/* 顶栏右侧操作区(助手选择/导出/新对话) */
+.dm-topbar-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+}
+
+/* 输入框内按住说话(图标按钮,与发送键同排) */
+.dm-mic.dm-mic-inline {
+  border: none; background: none; cursor: pointer; padding: 4px;
+  font-size: 16px; color: #6366f1; line-height: 1;
+  border-radius: 50%; transition: background 0.15s;
+}
+.dm-mic.dm-mic-inline:hover { background: rgba(99, 102, 241, 0.12); }
+.dm-mic.dm-mic-inline.recording { background: rgba(239, 68, 68, 0.15); color: #ef4444; }

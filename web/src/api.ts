@@ -76,10 +76,18 @@ export async function* chatStream(
   signal?: AbortSignal,
   assistantId?: string,
   imageData?: string,
+  onUploadProgress?: (pct: number) => void,
 ): AsyncGenerator<ChatEvent> {
   const payload: Record<string, unknown> = { question, session_id: sessionId };
   if (assistantId) payload.assistant_id = assistantId;
   if (imageData) payload.image_data = imageData;
+
+  // 带图 + 需要进度：走 XHR（upload.onprogress 真实上行百分比），
+  // SSE 帧从 responseText 增量解析（与 fetch 路径同一解析逻辑）
+  if (imageData && onUploadProgress) {
+    yield* chatStreamXHR(payload, signal, onUploadProgress);
+    return;
+  }
   const resp = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1316,4 +1324,75 @@ export async function deleteUser(
     throw new Error(typeof d.detail === 'string' ? d.detail : 'HTTP ' + r.status);
   }
   return r.json();
+}
+
+
+function chatStreamXHR(
+  payload: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  onUploadProgress: (pct: number) => void,
+): AsyncGenerator<ChatEvent> {
+  const queue: ChatEvent[] = [];
+  let wake: (() => void) | null = null;
+  let finished = false;
+  let failure: Error | null = null;
+  let buf = '';
+  let lastLen = 0;
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/chat/stream');
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  signal?.addEventListener('abort', () => xhr.abort());
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable && e.total > 0) {
+      onUploadProgress(Math.min(100, Math.round((e.loaded / e.total) * 100)));
+    }
+  };
+  const drain = () => {
+    const text = xhr.responseText;
+    buf += text.slice(lastLen);
+    lastLen = text.length;
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let event = 'message';
+      let data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event: ')) event = line.slice(7);
+        else if (line.startsWith('data: ')) data = line.slice(6);
+      }
+      if (!data) continue;
+      try {
+        queue.push({ event: event as ChatEventKind, data: JSON.parse(data) });
+      } catch {
+        /* 忽略残帧 */
+      }
+    }
+  };
+  xhr.onprogress = () => { drain(); wake?.(); };
+  const finish = (err?: Error) => {
+    failure = err ?? null;
+    finished = true;
+    wake?.();
+  };
+  xhr.onload = () => {
+    if (xhr.status === 401) finish(new Error('UNAUTHORIZED'));
+    else if (xhr.status >= 400) finish(new Error('HTTP ' + xhr.status));
+    else { drain(); finish(); }
+  };
+  xhr.onerror = () => finish(new Error('HTTP ' + xhr.status));
+  xhr.onabort = () => finish();
+  xhr.send(JSON.stringify(payload));
+
+  return (async function* () {
+    while (true) {
+      while (queue.length) yield queue.shift()!;
+      if (finished) {
+        if (failure) throw failure;
+        return;
+      }
+      await new Promise<void>((r) => { wake = r; });
+    }
+  })();
 }
