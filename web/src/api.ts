@@ -143,6 +143,7 @@ export interface Session {
   title: string;
   msg_count: number;
   updated_at: number;
+  last_msg?: string;
   assistant_id?: string;
 }
 

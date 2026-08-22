@@ -445,3 +445,10 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 .dm-img-btn:active {
   transform: scale(0.92);
 }
+
+/* 会话分组标签(今天/昨天/7天内/更早) */
+.dm-conv-group-label {
+  padding: 10px 16px 4px;
+  font-size: 11px; font-weight: 600; color: #9a9a9a;
+  text-transform: uppercase; letter-spacing: 0.4px;
+}

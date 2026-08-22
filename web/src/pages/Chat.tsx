@@ -171,7 +171,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
           key: String(m.id),
           role: m.role === 'user' ? 'user' : 'assistant',
           content: m.content,
-        }));
+          ts: (m.created_at || 0) * 1000,
+        } as BubbleDataType));
         setMessages(bubbles);
       } catch (e: any) {
         if (activeSidRef.current !== sid) return;
@@ -340,8 +341,9 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
           key: userKey,
           role: 'user',
           content: imgB64 ? `![图片](${imgB64})\n\n${q}` : q,
-        },
-        { key: assistantKey, role: 'assistant', content: '', loading: true },
+          ts: Date.now(),
+        } as BubbleDataType,
+        { key: assistantKey, role: 'assistant', content: '', loading: true, ts: Date.now() } as BubbleDataType,
       ]);
       setStreaming(true);
       setThinkingSteps([]);
@@ -756,14 +758,63 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     return opts;
   }, [assistants, assistantId]);
 
+  /* ---- 会话列表:时间格式化 + 分组（参考 IM 惯例 Today/Yesterday/7天内/更早） ---- */
+  const fmtSessionTime = (ts: number) => {
+    const d = new Date(ts * 1000);
+    const now = new Date();
+    const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
+    if (sameDay(d, now)) return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const yest = new Date(now); yest.setDate(now.getDate() - 1);
+    if (sameDay(d, yest)) return '昨天';
+    if (now.getTime() - d.getTime() < 7 * 86400_000) return `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  const sessionGroups = (() => {
+    const now = new Date();
+    const startOfDay = (dt: Date) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+    const today0 = startOfDay(now);
+    const groups: { label: string; items: typeof sessions }[] = [
+      { label: '今天', items: [] }, { label: '昨天', items: [] },
+      { label: '7 天内', items: [] }, { label: '更早', items: [] },
+    ];
+    for (const sess of sessions) {
+      const t = (sess.updated_at || 0) * 1000;
+      if (t >= today0) groups[0].items.push(sess);
+      else if (t >= today0 - 86400_000) groups[1].items.push(sess);
+      else if (t >= today0 - 7 * 86400_000) groups[2].items.push(sess);
+      else groups[3].items.push(sess);
+    }
+    return groups.filter((g) => g.items.length > 0);
+  })();
+
   /* ---- conversation items（按搜索词过滤） ---- */
+
   const kw = convSearch.trim().toLowerCase();
+  const toConv = (s: typeof sessions[number]): Conversation => ({
+    key: s.id,
+    label: (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontWeight: 600, fontSize: 13.5, overflow: 'hidden',
+                         textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+            {s.title || s.id.slice(0, 16)}
+          </span>
+          <span style={{ fontSize: 11, color: '#9a9a9a', flexShrink: 0 }}>
+            {fmtSessionTime(s.updated_at || 0)}
+          </span>
+        </div>
+        {s.last_msg && (
+          <span style={{ fontSize: 12, color: '#9a9a9a', overflow: 'hidden',
+                         textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {s.last_msg}
+          </span>
+        )}
+      </div>
+    ),
+  });
   const convItems: Conversation[] = sessions
     .filter((s) => !kw || (s.title || '').toLowerCase().includes(kw))
-    .map((s) => ({
-      key: s.id,
-      label: s.title || s.id.slice(0, 16),
-    }));
+    .map(toConv);
 
   /* ---- menu for conversations ---- */
   const convMenu = (conv: Conversation) => ({
@@ -851,8 +902,14 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       );
     }
     const isLastMsg = idx === curMsgs.length - 1 && !streaming;
+    const ts = (curMsgs[idx] as any)?.ts as number | undefined;
+    const tsText = ts
+      ? (() => { const d = new Date(ts);
+          return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; })()
+      : null;
     return (
       <div className="dm-feedback">
+        {tsText && <span style={{ fontSize: 11, color: '#9a9a9a', marginRight: 4 }}>{tsText}</span>}
         {isLastMsg && (
           <Button
             type="text"
@@ -934,6 +991,16 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
               </div>
             )}
             {text && <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>}
+          </div>
+        );
+      },
+      footer: (_c: string, info: { key?: string | number }) => {
+        const m = messagesRef.current.find((x) => x.key === info.key);
+        if (!(m as any)?.ts) return null;
+        const d = new Date((m as any).ts);
+        return (
+          <div style={{ fontSize: 11, color: '#9a9a9a', textAlign: 'right' }}>
+            {`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`}
           </div>
         );
       },
@@ -1028,12 +1095,26 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
           </div>
         </div>
         <div className="dm-chat-sidebar-list">
-          <Conversations
-            items={convItems}
-            activeKey={activeSid}
-            onActiveChange={(key) => { switchSession(key); setSidebarOpen(false); }}
-            menu={convMenu}
-          />
+          {kw ? (
+            <Conversations
+              items={convItems}
+              activeKey={activeSid}
+              onActiveChange={(key) => { switchSession(key); setSidebarOpen(false); }}
+              menu={convMenu}
+            />
+          ) : (
+            sessionGroups.map((g) => (
+              <div key={g.label}>
+                <div className="dm-conv-group-label">{g.label}</div>
+                <Conversations
+                  items={g.items.map(toConv)}
+                  activeKey={activeSid}
+                  onActiveChange={(key) => { switchSession(key); setSidebarOpen(false); }}
+                  menu={convMenu}
+                />
+              </div>
+            ))
+          )}
         </div>
       </div>
 

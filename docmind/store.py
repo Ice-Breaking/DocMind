@@ -317,7 +317,10 @@ def list_sessions(user: str | None = None, limit: int = 50,
     返回项含 assistant_id（空值归一为 "default"）。
     """
     c = _conn()
-    sql = """SELECT s.id, s.title, s.updated_at, s.assistant_id, COUNT(m.id) AS msg_count
+    sql = """SELECT s.id, s.title, s.updated_at, s.assistant_id, COUNT(m.id) AS msg_count,
+           (SELECT substr(REPLACE(COALESCE(m2.raw, m2.content), char(10), ' '), 1, 60)
+              FROM messages m2 WHERE m2.session_id = s.id
+             ORDER BY m2.seq DESC LIMIT 1) AS last_msg
            FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
            WHERE (s.user = '' OR s.user = ?)"""
     params: list = [user or ""]
@@ -329,6 +332,7 @@ def list_sessions(user: str | None = None, limit: int = 50,
     rows = c.execute(sql, params).fetchall()
     return [{"id": r["id"], "title": r["title"], "msg_count": r["msg_count"],
              "updated_at": r["updated_at"],
+             "last_msg": (r["last_msg"] or "") if "last_msg" in r.keys() else "",
              "assistant_id": (r["assistant_id"] or "default") if "assistant_id" in r.keys() else "default"}
             for r in rows]
 
