@@ -51,8 +51,6 @@ export default defineConfig({
           'vendor-antd': ['antd', '@ant-design/icons', '@ant-design/x'],
           // markdown 渲染单独打包（按需加载）
           'markdown': ['react-markdown', 'remark-gfm'],
-          // 图表库单独打包（仅管理页用，懒加载）
-          'charts': ['recharts'],
         },
       },
     },

@@ -35,7 +35,7 @@ def build_shared():
     retriever = HybridRetriever(store)
     retriever.build()
     logger.info(f"知识库加载完成：{n} 个切片，混合索引已构建")
-    _shared_state.update(store=store, retriever=retriever)
+    _shared_state.update(store=store, retriever=retriever, registry=registry)
     try:
         from docmind.metrics import KNOWLEDGE_CHUNKS
         KNOWLEDGE_CHUNKS.set(n)

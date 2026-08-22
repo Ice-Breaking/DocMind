@@ -82,6 +82,45 @@ def _errors_last_hours(hours: float) -> int:
 
 # ================= 规则引擎 =================
 
+def _webhook_payload(alert_type: str, message: str, url: str) -> dict | None:
+    """按平台构造 webhook 消息体（企微/钉钉/飞书群机器人 + 通用 JSON）"""
+    kind = config.ALERT_WEBHOOK_TYPE
+    if kind == "auto":
+        if "qyapi.weixin.qq.com" in url:
+            kind = "wecom"
+        elif "oapi.dingtalk.com" in url:
+            kind = "dingtalk"
+        elif "open.feishu.cn" in url:
+            kind = "feishu"
+        else:
+            kind = "generic"
+    text = f"[DocMind 告警·{alert_type}] {message}"
+    if kind in ("wecom", "dingtalk"):
+        return {"msgtype": "text", "text": {"content": text}}
+    if kind == "feishu":
+        return {"msg_type": "text", "content": {"text": text}}
+    return {"type": alert_type, "text": text}
+
+
+def _notify_webhook(alert_type: str, message: str) -> None:
+    """告警外发：POST 到配置的 Webhook（企微/钉钉/飞书/通用）。
+    独立线程发送——告警主流程绝不因外发失败/超时阻塞"""
+    url = config.ALERT_WEBHOOK_URL
+    if not url:
+        return
+
+    def _send():
+        try:
+            import requests
+            resp = requests.post(
+                url, json=_webhook_payload(alert_type, message, url), timeout=5)
+            logger.info(f"告警已外发 webhook status={resp.status_code}")
+        except Exception as e:  # noqa: BLE001 - 外发失败不影响告警系统
+            logger.warning(f"告警 webhook 外发失败: {e}")
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 def evaluate_all() -> list[dict]:
     """执行全部规则，返回本次新创建的告警列表"""
     created = []
@@ -91,6 +130,7 @@ def evaluate_all() -> list[dict]:
         if aid:
             created.append({"id": aid, "type": type_,
                             "severity": severity, "message": message})
+            _notify_webhook(type_, f"[{severity}] {message}")
 
     # 1. 质量：待处理 Badcase 积压
     try:

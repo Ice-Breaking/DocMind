@@ -58,6 +58,14 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+def _decode_vec(raw) -> np.ndarray:
+    """解码向量：新条目为 float32 BLOB（O(1) 反序列化），
+    旧条目为 JSON 文本（升级前写入的，向后兼容读取）"""
+    if isinstance(raw, (bytes, bytearray)):
+        return np.frombuffer(raw, dtype=np.float32)
+    return np.asarray(json.loads(raw), dtype=np.float32)
+
+
 def lookup(vec: list[float] | np.ndarray) -> tuple[str, str, int] | None:
     """返回最相似且 ≥ 阈值的 (缓存问题, 缓存答案, 条目id)；无命中返回 None
 
@@ -71,7 +79,7 @@ def lookup(vec: list[float] | np.ndarray) -> tuple[str, str, int] | None:
         LIMIT 500
     """
     for row in _conn().execute(query):
-        sim = _cosine(qv, np.asarray(json.loads(row["vec"]), dtype=np.float32))
+        sim = _cosine(qv, _decode_vec(row["vec"]))
         if sim >= best_sim:
             best_sim, best = sim, (row["question"], row["answer"], row["id"])
     if best:
@@ -81,14 +89,16 @@ def lookup(vec: list[float] | np.ndarray) -> tuple[str, str, int] | None:
 
 
 def save(question: str, answer: str, vec: list[float] | np.ndarray) -> None:
-    """写入缓存（同问题去重：先删旧条目）"""
+    """写入缓存（同问题去重：先删旧条目；向量以 float32 BLOB 存储）"""
     if contains_pii(question):
         return  # Don't cache questions containing PII
     c = _conn()
     c.execute("DELETE FROM semantic_cache WHERE question = ?", (question,))
     c.execute(
         "INSERT INTO semantic_cache(question, answer, vec, created_at) VALUES(?,?,?,?)",
-        (question, answer, json.dumps([float(x) for x in vec]), time.time()),
+        (question, answer,
+         sqlite3.Binary(np.asarray(vec, dtype=np.float32).tobytes()),
+         time.time()),
     )
     c.commit()
 

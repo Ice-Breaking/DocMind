@@ -23,6 +23,7 @@ import numpy as np
 from docmind import config
 from docmind.llm import embed
 from docmind.rag import cache as cache_mod
+from docmind.rag.embed_cache import embed_cached
 from docmind.rag.cache import (
     compute_file_manifest,
     compute_fingerprint,
@@ -145,6 +146,19 @@ class VectorStore:
         save_manifest(self._index_dir, compute_file_manifest(knowledge_dir))
         save_global_fingerprint(self._index_dir, compute_global_fingerprint())
 
+    def chunks_by_source(self, source: str) -> list[tuple[int, dict]]:
+        """按来源文件取全部切片 [(全局序号, chunk)]。
+
+        倒排索引懒构建、随 version 失效重建——文档预览等按文件取切片的
+        场景从 O(全部切片) 降为 O(该文件切片数)"""
+        if getattr(self, "_src_idx_version", -1) != self.version:
+            idx: dict[str, list[tuple[int, dict]]] = {}
+            for i, c in enumerate(self.chunks):
+                idx.setdefault(c.get("source", ""), []).append((i, c))
+            self._src_idx = idx
+            self._src_idx_version = self.version
+        return self._src_idx.get(source, [])
+
     def _refresh_matrix(self) -> None:
         """刷新内存向量矩阵。
 
@@ -189,7 +203,7 @@ class VectorStore:
                 self._persist_index_meta(knowledge_dir)
             return 0
 
-        vectors = embed([c["text"] for c in self.chunks])
+        vectors = embed_cached(embed, [c["text"] for c in self.chunks])
         collection = self._get_collection()
         self._clear_collection()
         collection.add(
@@ -254,7 +268,8 @@ class VectorStore:
         if new_chunks:
             # 批量向量化优化：一次性处理所有文本，减少网络往返
             texts = [c["text"] for c in new_chunks]
-            embeddings = embed(texts)  # llm.py 内部已支持批量（每批10条）
+            # 切片级缓存：文本未变的切片（文件内改动只影响局部切片时）免重嵌
+            embeddings = embed_cached(embed, texts)
 
             collection.add(
                 ids=self._make_ids(new_chunks),

@@ -16,6 +16,72 @@ from docmind import store
 _ALLOWED_EXT = {".pdf", ".md", ".txt", ".docx", ".csv", ".json"}
 _MAX_SIZE = 50 * 1024 * 1024  # 50 MB
 
+# magic bytes 签名：防扩展名伪装（恶意/误传二进制混进解析层）
+_MAGIC_SIGNATURES = {
+    ".pdf": (b"%PDF-", 0),
+    ".png": (b"\x89PNG", 0),
+    ".jpg": (b"\xff\xd8\xff", 0),
+    ".jpeg": (b"\xff\xd8\xff", 0),
+    ".docx": (b"PK\x03\x04", 0),
+    ".xlsx": (b"PK\x03\x04", 0),
+}
+_TEXT_EXT = {".md", ".txt", ".csv", ".json"}
+_VERSIONS_DIR = os.path.join("data", "kb_versions")
+_KEEP_VERSIONS = 3
+
+
+def _validate_content(filename: str, content: bytes) -> None:
+    """内容校验：二进制格式核对 magic bytes；文本格式须可 UTF-8 解码"""
+    ext = os.path.splitext(filename)[1].lower()
+    sig = _MAGIC_SIGNATURES.get(ext)
+    if sig and not content.startswith(sig[0]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件内容与扩展名 {ext} 不符，请检查文件是否损坏或重命名")
+    if ext in _TEXT_EXT:
+        try:
+            content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{ext} 文件须为 UTF-8 编码（Excel 导出的 CSV 常为 GBK，请另存为 UTF-8）")
+
+
+def _backup_existing(kb_id: str, filename: str, doc_dir: str) -> None:
+    """同名覆盖前备份旧文件（保留最近 N 版），防内容意外丢失"""
+    fp = os.path.join(doc_dir, filename)
+    if not os.path.isfile(fp):
+        return
+    vdir = os.path.join(_VERSIONS_DIR, kb_id)
+    os.makedirs(vdir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = os.path.join(vdir, f"{filename}.{ts}.bak")
+    try:
+        os.replace(fp, dst)
+        # 只保留最近 N 版
+        versions = sorted(
+            v for v in os.listdir(vdir) if v.startswith(f"{filename}."))
+        for old in versions[:-_KEEP_VERSIONS]:
+            os.remove(os.path.join(vdir, old))
+    except OSError:
+        pass   # 备份失败不阻断上传
+
+
+def _check_quota(doc_dir: str, incoming: int) -> None:
+    """KB 配额：文档数与总大小（自动重建上线后防滥用）"""
+    total_bytes, count = 0, 0
+    for name in os.listdir(doc_dir):
+        fp = os.path.join(doc_dir, name)
+        if os.path.isfile(fp):
+            count += 1
+            total_bytes += os.path.getsize(fp)
+    from docmind import config as _config
+    if count + 1 > _config.MAX_DOCS_PER_KB:
+        raise HTTPException(400, detail=f"文档数超限（≤{_config.MAX_DOCS_PER_KB}），请先清理")
+    if total_bytes + incoming > _config.MAX_KB_TOTAL_BYTES:
+        gb = _config.MAX_KB_TOTAL_BYTES / (1024 * 1024 * 1024)
+        raise HTTPException(400, detail=f"总大小超限（≤{gb:.0f}GB），请先清理")
+
 
 # ---- 当前用户解析：复用 Gradio 登录 cookie（与 assistants_api.py 保持一致） ----
 def _current_user(request, app) -> str:
@@ -47,8 +113,111 @@ def _resolve_doc_dir(kb_id: str) -> str:
     return doc_dir
 
 
+def _extract_html_article(html: str) -> tuple[str, str]:
+    """轻量正文提取：去 script/style/nav/footer 等噪声后取 title + 文本段落。
+    不引入 readability 类重依赖；内部 wiki/文档站正文结构简单，够用"""
+    import re as _re
+
+    title_m = _re.search(r"<title[^>]*>(.*?)</title>", html, _re.IGNORECASE | _re.DOTALL)
+    title = (title_m.group(1).strip() if title_m else "") or "未命名"
+    noise = _re.compile(
+        r"<(script|style|nav|header|footer|aside|noscript)[^>]*>.*?</\1>",
+        _re.IGNORECASE | _re.DOTALL)
+    html = noise.sub("", html)
+    html = _re.sub(r"<!--.*?-->", "", html, flags=_re.DOTALL)
+    # 块级标签转换行，压缩空白
+    html = _re.sub(r"<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", html, flags=_re.IGNORECASE)
+    text = _re.sub(r"<[^>]+>", " ", html)
+    lines, seen = [], set()
+    for ln in text.split("\n"):
+        ln = _re.sub(r"\s+", " ", ln).strip()
+        if len(ln) >= 8 and ln not in seen:   # 去短行/重复行（导航残留）
+            seen.add(ln)
+            lines.append(ln)
+    return title[:60], "\n\n".join(lines[:200])   # 上限防超大页面
+
+
 def register_docs_routes(app) -> None:
     """注册文档管理路由到 FastAPI app。"""
+
+    @app.post("/api/kbs/{kb_id}/import-url", include_in_schema=False)
+    async def _import_url(kb_id: str, request: fastapi.Request):
+        """网页导入：抓取 URL 正文 → 存为 Markdown → 走既有入库管线（含自动重建）。
+        body: {"url": "https://..."}；企业 wiki/文档站内容一键入库"""
+        user = _require_user(request, app)
+        doc_dir = _resolve_doc_dir(kb_id)
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是合法 JSON")
+        url = str(body.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail="url 必须以 http(s):// 开头")
+
+        import requests as _requests
+
+        try:
+            resp = _requests.get(url, timeout=15, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; DocMindBot/1.0)"})
+            resp.raise_for_status()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"网页抓取失败: {e}")
+
+        title, text = _extract_html_article(resp.text)
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="未能从网页提取到正文内容")
+
+        # 文件名：域名 + 标题（截断 sanitize），存为 md 走统一管线
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.replace(".", "_") or "web"
+        safe_title = "".join(c for c in title if c.isalnum() or c in "（）()-_" )[:40] or "未命名"
+        filename = f"{host}_{safe_title}.md"
+        content = f"---\nsource_url: {url}\n抓取时间: {datetime.now().isoformat()}\n---\n\n{text}".encode("utf-8")
+
+        _check_quota(doc_dir, len(content))
+        _backup_existing(kb_id, filename, doc_dir)
+        with open(os.path.join(doc_dir, filename), "wb") as f:
+            f.write(content)
+
+        store.create_ingest_task(kb_id, filename, "import-url", "pending",
+                                 "已抓取网页，等待重建索引后生效", user)
+        store.record_audit(user, "doc.import-url", f"kb:{kb_id}/{filename}", url)
+        from docmind.auto_reindex import schedule_reindex
+        schedule_reindex(kb_id)
+        return {"ok": True, "name": filename, "size": len(content),
+                "title": title, "chars": len(text)}
+
+    @app.post("/api/ocr-image", include_in_schema=False)
+    async def _ocr_image(request: fastapi.Request,
+                         file: UploadFile = File(...)):
+        """对话传图：图片 → 文字（复用索引侧百炼 OCR 与磁盘缓存）。
+        前端把识别文本回填输入框由用户确认后发送，保持对话流不变"""
+        user = _require_user(request, app)
+
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise HTTPException(status_code=400, detail="仅支持 png/jpg/jpeg/webp 图片")
+        content = await file.read()
+        if len(content) > _MAX_SIZE:
+            raise HTTPException(status_code=400,
+                                detail=f"图片过大，上限 {_MAX_SIZE // (1024*1024)} MB")
+
+        import tempfile
+        from docmind.rag.chunker import _ocr_image as _ocr
+        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+        try:
+            tmp.write(content)
+            tmp.close()
+            text = _ocr(tmp.name)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"图片识别失败: {e}")
+        finally:
+            os.unlink(tmp.name)
+
+        store.record_audit(user, "image.ocr", file.filename or "",
+                           f"{len(content)} bytes")
+        return {"text": text}
 
     @app.get("/api/kbs/{kb_id}/docs", include_in_schema=False)
     async def _list_docs(kb_id: str, request: fastapi.Request):
@@ -93,6 +262,12 @@ def register_docs_routes(app) -> None:
         if len(content) > _MAX_SIZE:
             raise HTTPException(status_code=400,
                                 detail=f"文件过大，上限 {_MAX_SIZE // (1024*1024)} MB")
+        if not content.strip():
+            raise HTTPException(status_code=400, detail="文件内容为空")
+
+        _validate_content(filename, content)
+        _check_quota(doc_dir, len(content))
+        _backup_existing(kb_id, filename, doc_dir)
 
         dest = os.path.join(doc_dir, filename)
         with open(dest, "wb") as f:
@@ -104,6 +279,10 @@ def register_docs_routes(app) -> None:
                                  "已上传，等待重建索引后生效", user)
         store.record_audit(user, "doc.upload", f"kb:{kb_id}/{filename}",
                            f"{len(content)} bytes")
+
+        # 自动重建：防抖窗口后增量重建（免手动点按钮，窗口内多次上传合并）
+        from docmind.auto_reindex import schedule_reindex
+        schedule_reindex(kb_id)
         return {"ok": True, "name": filename, "size": len(content)}
 
     @app.delete("/api/kbs/{kb_id}/docs/{filename}", include_in_schema=False)
@@ -124,6 +303,9 @@ def register_docs_routes(app) -> None:
         store.create_ingest_task(kb_id, filename, "delete", "pending",
                                  "已删除，等待重建索引后从检索移除", user)
         store.record_audit(user, "doc.delete", f"kb:{kb_id}/{filename}")
+
+        from docmind.auto_reindex import schedule_reindex
+        schedule_reindex(kb_id)
         return {"ok": True}
 
     @app.get("/api/kbs/{kb_id}/docs/{filename}/preview", include_in_schema=False)
@@ -154,15 +336,11 @@ def register_docs_routes(app) -> None:
 
         vector_store, _ = result  # 解包 tuple
 
-        # 从向量存储中查找该文件的所有切片
-        chunks = []
-        for i, chunk in enumerate(vector_store.chunks):
-            if chunk.get('source', '') == filename:
-                chunks.append({
-                    'index': i,
-                    'text': chunk.get('text', ''),
-                    'page': chunk.get('page'),
-                })
+        # 从向量存储中查找该文件的所有切片（倒排索引，避免全量扫描）
+        chunks = [
+            {"index": i, "text": c.get("text", ""), "page": c.get("page")}
+            for i, c in vector_store.chunks_by_source(filename)
+        ]
 
         if not chunks:
             raise HTTPException(status_code=404, detail="文件尚未索引或不存在")
@@ -228,4 +406,6 @@ def register_docs_routes(app) -> None:
         store.create_ingest_task(kb_id, filename, "edit", "pending",
                                 "已修改，等待重建索引后生效", user)
 
+        from docmind.auto_reindex import schedule_reindex
+        schedule_reindex(kb_id)
         return {"ok": True, "size": len(new_content.encode('utf-8'))}

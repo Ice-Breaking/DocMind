@@ -62,6 +62,19 @@ BING_SEARCH_KEY = os.getenv("BING_SEARCH_KEY", "")  # Azure Bing Search API
 WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "8"))  # 单引擎超时秒数
 WEB_SEARCH_CACHE_TTL = int(os.getenv("WEB_SEARCH_CACHE_TTL", "1800"))  # 搜索结果缓存30分钟
 
+# 知识库自动重建：文档变更后防抖窗口（秒），窗口内多次变更合并为一次增量重建
+REINDEX_DEBOUNCE = int(os.getenv("REINDEX_DEBOUNCE", "60"))
+# 会话滑动窗口：进 prompt 的最大历史消息条数（含问答，超过截断+注记）
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "24"))
+# 知识库配额：单库文档数 / 总字节数（防滥用；超限拒绝上传并提示）
+MAX_DOCS_PER_KB = int(os.getenv("MAX_DOCS_PER_KB", "500"))
+MAX_KB_TOTAL_BYTES = int(os.getenv("MAX_KB_TOTAL_BYTES", str(1024 * 1024 * 1024)))  # 1GB
+
+# 告警外发：Webhook URL（企微/钉钉/飞书群机器人或通用 JSON 端点），空=禁用
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+# webhook 类型：auto（按 URL 特征识别）/ wecom / dingtalk / feishu / generic
+ALERT_WEBHOOK_TYPE = os.getenv("ALERT_WEBHOOK_TYPE", "auto")
+
 # 调用链追踪：配置了 Langfuse 凭证则上报 Langfuse，否则降级写本地 JSONL
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")

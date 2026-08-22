@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Modal, Spin, Button, message, Alert } from 'antd';
-import { EditOutlined, SaveOutlined, EyeOutlined } from '@ant-design/icons';
+import { EditOutlined, SaveOutlined } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 
 interface Chunk {

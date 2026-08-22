@@ -13,6 +13,8 @@ import {
   LikeOutlined,
   LikeFilled,
   DislikeFilled,
+  LoadingOutlined,
+  PictureOutlined,
   PlusOutlined,
   RobotOutlined,
   MenuOutlined,
@@ -93,6 +95,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   );
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [recording, setRecording] = useState(false);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const imgInputRef = useRef<HTMLInputElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [assistantId, setAssistantId] = useState<string>(
@@ -1034,6 +1038,41 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             onCancel={handleCancel}
             loading={streaming}
             placeholder="输入问题，Enter 发送…"
+            prefix={
+              <button
+                className="dm-img-btn"
+                title="上传图片识别文字（识别结果填入输入框）"
+                disabled={ocrLoading}
+                onClick={() => imgInputRef.current?.click()}
+                style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4 }}
+              >
+                {ocrLoading ? <LoadingOutlined /> : <PictureOutlined />}
+              </button>
+            }
+          />
+          <input
+            ref={imgInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            style={{ display: 'none' }}
+            onChange={async (e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (!f) return;
+              setOcrLoading(true);
+              try {
+                const fd = new FormData();
+                fd.append('file', f);
+                const r = await fetch('/api/ocr-image', { method: 'POST', body: fd });
+                const d = await r.json();
+                if (!r.ok) throw new Error(d.detail || '识别失败');
+                if (d.text) setSenderValue((v) => (v ? `${v}\n${d.text}` : d.text));
+              } catch (err: any) {
+                msgApi.error('图片识别失败：' + (err?.message || '请重试'));
+              } finally {
+                setOcrLoading(false);
+              }
+            }}
           />
         </div>
       </div>

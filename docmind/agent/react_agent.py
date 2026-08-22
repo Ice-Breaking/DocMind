@@ -33,7 +33,12 @@ def _load_glossary() -> str:
         return ""
     if not text:
         return ""
-    return f"\n附：术语俚语表（行业黑话/俚语释义参考，可在 docs/glossary.md 持续扩充）：\n{text}\n"
+    # 不再全量注入术语表：命中术语时 glossary_note() 会把确定性释义作为
+    # 系统消息动态注入（更精准且每轮省几百 token）；此处只保留机制说明，
+    # 未命中词表的俚语由 interpret_terms 的模型解读 + NEED_SEARCH 联网兜底
+    return ("\n附：系统内置术语俚语表机制——问题命中术语时，前置检测会自动"
+            "注入确定性释义（以注入内容为准）；未命中但疑似俚语时按规则 4 "
+            "联网查证，不要按字面直译。\n")
 
 
 _GLOSSARY = _load_glossary()
@@ -288,82 +293,41 @@ class ReActAgent:
         # 层1+2：术语解读前置步（模型知识解读 + NEED_SEARCH 联网查词兜底），
         # 再与本地术语表命中合并；整步确定性执行，不依赖模型自觉
         gloss = glossary_note(question)
-        interp = interpret_terms(question)
-        if interp.startswith("NEED_SEARCH:"):
-            need = interp[len("NEED_SEARCH:"):]
-            interp = ""
-            for term in [t.strip() for t in need.split(",") if t.strip()][:2]:
-                try:
-                    wr = self.registry.execute(
-                        "web_search", {"query": f"{term} 是什么意思 俚语"})
-                    hit = f"{term}＝{str(wr)[:200]}"
-                    interp = "；".join(x for x in [interp, hit] if x)
-                except Exception:  # noqa: BLE001 - 查词失败跳过该词
-                    pass
-        elif interp in ("", "无"):
-            interp = ""
-
-        # 层3：时效性强制联网（增强版）+ 梗类问句联网 + 术语/俚语联网交叉验证
+        # 层1+2：术语解读（模型知识解读 + NEED_SEARCH 联网查词兜底）；
+        # 层3：时效性强制联网 + 梗类问句联网 + 术语联网交叉验证。
+        # 并行优化：时效性问题的强制联网与术语解读互不依赖，串行会累加
+        # 4-10s 首响应延迟——用双线程并行，总耗时取两者较大者
         meme_hit = bool(_MEME_RE.search(question))
         web_note = ""
         web_search_failed = False
 
-        # 优先级1：高优先级时效性问题（具体日期+数据类型）→ 强制联网 + 降级重试
         if force_web_search:
-            from docmind.search_fallback import (
-                generate_fallback_queries,
-                is_search_result_relevant,
-                format_no_data_response,
-            )
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
+                _f_interp = _ex.submit(self._interpret_step, question)
+                _f_web = _ex.submit(self._force_web_step,
+                                    question, timeliness_analysis)
+                interp = _f_interp.result()
+                web_note, web_search_failed = _f_web.result()
+        else:
+            interp = self._interpret_step(question)
 
-            optimized_query = extract_search_query(question, timeliness_analysis)
-            search_success = False
-
-            # 尝试原始优化查询
-            try:
-                wr = self.registry.execute("web_search", {"query": optimized_query})
-                if is_search_result_relevant(wr, question, timeliness_analysis):
-                    web_note = f"时效性强制联网（优化查询）＝{str(wr)[:400]}"
-                    search_success = True
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"时效性搜索失败（优化查询）: {e}")
-
-            # 降级重试：逐步放宽查询范围
-            if not search_success:
-                fallback_queries = generate_fallback_queries(question, timeliness_analysis)
-                for fallback_q in fallback_queries[:2]:  # 最多尝试2个降级查询
-                    try:
-                        wr = self.registry.execute("web_search", {"query": fallback_q})
-                        if is_search_result_relevant(wr, question, timeliness_analysis):
-                            web_note = f"时效性联网（范围放宽：{fallback_q[:30]}...）＝{str(wr)[:400]}"
-                            search_success = True
-                            break
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"降级搜索失败（{fallback_q[:30]}）: {e}")
-
-            # 所有尝试均失败：生成友好的"无数据"回复
-            if not search_success:
-                web_search_failed = True
-                no_data_msg = format_no_data_response(question, timeliness_analysis, search_attempted=True)
-                web_note = f"联网搜索未找到相关数据，已生成替代建议＝{no_data_msg[:300]}"
-
-        # 优先级2：梗类问句联网
-        elif meme_hit:
-            web_q = f"{question} 梗 出处 含义"
-            try:
-                wr = self.registry.execute("web_search", {"query": web_q})
-                web_note = f"梗类联网参考＝{str(wr)[:300]}"
-            except Exception:  # noqa: BLE001
-                web_note = ""
-
-        # 优先级3：术语/俚语联网交叉验证
-        elif gloss or interp:
-            web_q = f"{question} 术语 俚语 含义"
-            try:
-                wr = self.registry.execute("web_search", {"query": web_q})
-                web_note = f"术语联网参考＝{str(wr)[:300]}"
-            except Exception:  # noqa: BLE001
-                web_note = ""
+            # 优先级2：梗类问句联网
+            if meme_hit:
+                web_q = f"{question} 梗 出处 含义"
+                try:
+                    wr = self.registry.execute("web_search", {"query": web_q})
+                    web_note = f"梗类联网参考＝{str(wr)[:300]}"
+                except Exception:  # noqa: BLE001
+                    web_note = ""
+            # 优先级3：术语/俚语联网交叉验证
+            elif gloss or interp:
+                web_q = f"{question} 术语 俚语 含义"
+                try:
+                    wr = self.registry.execute("web_search", {"query": web_q})
+                    web_note = f"术语联网参考＝{str(wr)[:300]}"
+                except Exception:  # noqa: BLE001
+                    web_note = ""
 
         note = "；".join(x for x in [intent_note, timeliness_note, ambiguity_hint, gloss, interp, web_note] if x)
         if note:
@@ -525,6 +489,65 @@ class ReActAgent:
         fallback = "抱歉，我尝试了多个步骤仍未能得出结论，请简化问题后重试。"
         self.history.append({"role": "assistant", "content": fallback})
         yield AgentStep("final", fallback)
+
+    def _interpret_step(self, question: str) -> str:
+        """术语解读步（含 NEED_SEARCH 联网查词兜底），可在线程中执行"""
+        interp = interpret_terms(question)
+        if interp.startswith("NEED_SEARCH:"):
+            need = interp[len("NEED_SEARCH:"):]
+            interp = ""
+            for term in [t.strip() for t in need.split(",") if t.strip()][:2]:
+                try:
+                    wr = self.registry.execute(
+                        "web_search", {"query": f"{term} 是什么意思 俚语"})
+                    hit = f"{term}＝{str(wr)[:200]}"
+                    interp = "；".join(x for x in [interp, hit] if x)
+                except Exception:  # noqa: BLE001 - 查词失败跳过该词
+                    pass
+        elif interp in ("", "无"):
+            interp = ""
+        return interp
+
+    def _force_web_step(self, question: str,
+                        timeliness_analysis: dict) -> tuple[str, bool]:
+        """时效性强制联网：优化查询 → 降级重试 → 无数据兜底。
+        返回 (web_note, 是否失败)；可与术语解读并行执行"""
+        from docmind.search_fallback import (
+            generate_fallback_queries,
+            is_search_result_relevant,
+            format_no_data_response,
+        )
+
+        optimized_query = extract_search_query(question, timeliness_analysis)
+        search_success = False
+        web_note = ""
+
+        try:
+            wr = self.registry.execute("web_search", {"query": optimized_query})
+            if is_search_result_relevant(wr, question, timeliness_analysis):
+                web_note = f"时效性强制联网（优化查询）＝{str(wr)[:400]}"
+                search_success = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"时效性搜索失败（优化查询）: {e}")
+
+        if not search_success:
+            fallback_queries = generate_fallback_queries(question, timeliness_analysis)
+            for fallback_q in fallback_queries[:2]:
+                try:
+                    wr = self.registry.execute("web_search", {"query": fallback_q})
+                    if is_search_result_relevant(wr, question, timeliness_analysis):
+                        web_note = f"时效性联网（范围放宽：{fallback_q[:30]}...）＝{str(wr)[:400]}"
+                        search_success = True
+                        break
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"降级搜索失败（{fallback_q[:30]}）: {e}")
+
+        if not search_success:
+            no_data_msg = format_no_data_response(
+                question, timeliness_analysis, search_attempted=True)
+            web_note = f"联网搜索未找到相关数据，已生成替代建议＝{no_data_msg[:300]}"
+            return web_note, True
+        return web_note, False
 
     def _rewrite_if_followup(self, question: str) -> str | None:
         """多轮追问消解指代：返回改写后的问题；首轮/自包含/失败均返回 None"""

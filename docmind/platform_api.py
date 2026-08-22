@@ -132,6 +132,73 @@ def register_platform_routes(app) -> None:
             ],
         })
 
+    @app.post("/open/v1/chat", include_in_schema=False)
+    async def _open_chat(request: fastapi.Request):
+        """开放问答 API：question → 完整回答（含引用），供企业系统嵌入集成。
+        body: {question, kb_ids?}；走 Agent 主链路（检索+推理），
+        不做用户级 ACL（API Key 的 scope 即授权边界），不写会话库"""
+        auth = request.headers.get("authorization", "")
+        if not auth.lower().startswith("bearer "):
+            raise HTTPException(status_code=401,
+                                detail="需要 Authorization: Bearer <API Key>")
+        key_row = store.validate_api_key(auth[7:].strip())
+        if not key_row:
+            raise HTTPException(status_code=401, detail="API Key 无效、已吊销或已过期")
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="请求体必须是合法 JSON")
+        question = str(body.get("question") or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="question 必填")
+        kb_ids = [str(k) for k in (body.get("kb_ids") or ["default"]) if k]
+
+        scope = key_row["scope_kb_ids"]
+        if scope:
+            denied = [k for k in kb_ids if k not in scope]
+            if denied:
+                raise HTTPException(status_code=403,
+                                    detail=f"知识库超出密钥授权范围: {', '.join(denied)}")
+
+        from docmind import core
+        from docmind.chat_stream import stream_events
+        registry = core._shared_state.get("registry")
+        if registry is None:
+            raise HTTPException(status_code=503, detail="服务尚未就绪")
+
+        # API Key 不关联终端用户：检索不做文档级 ACL（scope 即边界），
+        # 传非 default 的 assistant_id 跳过缓存读写（开放接口语义要求
+        # 每次现算，且不污染用户缓存）
+        from docmind import acl
+        acl.set_current_user("")
+        agent = core.create_agent(registry)
+        kb_tok = None
+        try:
+            from docmind.chat_stream import current_kb_ids
+            kb_tok = current_kb_ids.set([k for k in kb_ids if k != "default"])
+            final_answer = ""
+            for ev in stream_events(agent, question, user="",
+                                     assistant_id="api"):
+                if ev.get("kind") == "final" and not ev.get("failed"):
+                    final_answer = ev["answer"]
+            if not final_answer:
+                raise HTTPException(status_code=502, detail="回答生成失败，请重试")
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"问答失败: {e}")
+        finally:
+            if kb_tok is not None:
+                current_kb_ids.reset(kb_tok)
+
+        try:
+            store.touch_api_key(key_row["id"])
+        except Exception:  # noqa: BLE001
+            pass
+
+        return JSONResponse({"question": question, "answer": final_answer})
+
     # ================= 模型在线配置（管理端） =================
     @app.get("/api/admin/models", include_in_schema=False)
     async def _list_models(request: fastapi.Request, kind: str = ""):

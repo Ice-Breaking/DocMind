@@ -78,13 +78,21 @@ def stream_events(agent, question: str, session_id: str = "",
     use_cache = not assistant_id or assistant_id == "default"
 
     # 1) 多轮上下文：从 DB raw 对确定性重建（切换会话/并发请求均不串上下文）
-    # 注意：agent 现在是每请求独立实例，无需 reset
+    #    滑动窗口：仅带最近 MAX_HISTORY_TURNS 条消息进 prompt——长会话下
+    #    全量历史会让 token 与延迟线性膨胀；被截断轮次以注记替代，
+    #    模型仍知晓存在更早对话（指代消解所需的近邻轮次完整保留）
     if session_id:
         try:
             pairs = store.load_raw_pairs(session_id)
         except Exception as e:  # noqa: BLE001
             pairs = []
             logger.warning(f"SSE 上下文重建失败: {e}")
+        if len(pairs) > config.MAX_HISTORY_TURNS:
+            dropped = len(pairs) - config.MAX_HISTORY_TURNS
+            pairs = pairs[-config.MAX_HISTORY_TURNS:]
+            pairs = [("system",
+                      f"[上下文窗口注记] 更早的 {dropped} 条消息未载入，"
+                      "如用户提及更早内容请说明记忆范围有限")] + pairs
         if pairs:
             agent.history.append({"role": "system", "content": sp})
             agent.history.extend({"role": r, "content": c} for r, c in pairs)
