@@ -325,25 +325,26 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
           onClose={() => setNavOpen(false)}
           width={280}
           closable={false}
-          styles={{ body: { padding: 0, background: '#001529' } }}
+          styles={{ body: { padding: 0, background: '#fcfcfc' } }}
         >
-          <div style={{ background: '#001529', minHeight: '100%' }}>
+          <div style={{ background: '#fcfcfc', minHeight: '100%' }}>
             <div
               style={{
                 padding: 16,
-                color: '#fff',
-                fontWeight: 600,
-                borderBottom: '1px solid rgba(255,255,255,0.08)',
+                color: '#1f2328',
+                fontWeight: 700,
+                borderBottom: '1px solid #ececec',
               }}
             >
               DocMind
             </div>
-            <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid #ececec' }}>
               {userDropdown}
             </div>
             <Menu
-              theme="dark"
+              theme="light"
               mode="inline"
+              className="dm-side-nav"
               selectedKeys={[selectedKey]}
               defaultOpenKeys={openKeys}
               items={menuItems}
@@ -351,7 +352,7 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
                 handleMenuClick(e);
                 setNavOpen(false);
               }}
-              style={{ borderRight: 0 }}
+              style={{ borderRight: 0, background: 'transparent' }}
             />
           </div>
         </Drawer>
@@ -384,7 +385,8 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
-        theme="dark"
+        theme="light"
+        className="dm-global-sider"
         style={{
           display: 'flex',
           flexDirection: 'column',
@@ -392,16 +394,18 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
           top: 0,
           height: '100vh',
           overflow: 'auto',
+          background: '#fcfcfc',
+          borderRight: '1px solid #ececec',
         }}
       >
         <div
           style={{
             padding: collapsed ? '16px 8px' : '16px',
             textAlign: 'center',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+            borderBottom: '1px solid #ececec',
           }}
         >
-          <Typography.Text strong style={{ color: '#fff', fontSize: collapsed ? 14 : 16 }}>
+          <Typography.Text strong style={{ color: '#1f2328', fontSize: collapsed ? 14 : 16 }}>
             {collapsed ? 'DM' : 'DocMind'}
           </Typography.Text>
         </div>
@@ -409,7 +413,7 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
         <div
           style={{
             padding: collapsed ? '12px 0' : '12px 16px',
-            borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+            borderBottom: '1px solid #ececec',
             display: 'flex',
             justifyContent: 'center',
           }}
@@ -426,13 +430,14 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
         </div>
 
         <Menu
-          theme="dark"
+          theme="light"
           mode="inline"
+          className="dm-side-nav"
           selectedKeys={[selectedKey]}
           defaultOpenKeys={openKeys}
           items={menuItems}
           onClick={handleMenuClick}
-          style={{ flex: 1, borderRight: 0 }}
+          style={{ flex: 1, borderRight: 0, background: 'transparent' }}
         />
       </Sider>
       <Layout>

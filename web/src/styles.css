@@ -519,3 +519,23 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 .dm-attach-thumb .dm-attach-close:hover { background: rgba(220, 38, 38, 0.85); }
+
+/* 全站风格统一:非对话页内容区与对话页一致(浅灰白) */
+.dm-page, .ant-layout-content > div {
+  background: transparent;
+}
+.ant-layout {
+  background: #f7f7f6 !important;
+}
+.ant-layout .ant-layout {
+  background: transparent !important;
+}
+
+/* Sender 操作区垂直居中(麦克风/音色与发送键对齐) */
+.ant-sender .ant-sender-actions {
+  align-items: center;
+}
+.dm-mic.dm-mic-inline {
+  align-self: center;
+  vertical-align: middle;
+}
