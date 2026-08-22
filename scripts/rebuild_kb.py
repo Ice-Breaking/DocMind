@@ -6,7 +6,7 @@
 import sys
 sys.path.insert(0, '.')
 
-from docmind.rag.vector_store import VectorStore
+from docmind.rag.vector_store import VectorStore, COLLECTION_NAME
 from docmind import config
 import os
 
@@ -18,7 +18,10 @@ def main():
     print(f"知识库目录: {kb_dir}")
 
     # 直接创建 VectorStore 实例
-    vector_store = VectorStore(collection_name=kb_id)
+    # 注意：collection 名必须与服务一致（COLLECTION_NAME="knowledge"），
+    # 不能用 kb_id——否则切片写入孤立 collection，服务读不到，
+    # 且共享 manifest 会让服务的增量重建误判"已索引"而永远跳过
+    vector_store = VectorStore(collection_name=COLLECTION_NAME)
 
     print("正在扫描文档并重建索引...")
     result = vector_store.rebuild_incremental(kb_dir)

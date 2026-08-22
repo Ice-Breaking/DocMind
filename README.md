@@ -119,6 +119,11 @@ cd web && npm install && npm run dev     # 监听 127.0.0.1:5173，代理 /api�
 
 测试：`python -m pytest tests/ -q`（71 个离线单测，无需 API Key）。
 
+索引维护：知识库页上传文档后需重建索引才可检索/预览（页面一键重建，或 `python scripts/rebuild_kb.py`）。
+增量重建按逐文件 manifest 指纹判定，只重新嵌入变化的文件；脚本必须使用与服务一致的
+Chroma collection（`knowledge`），否则切片写入孤立 collection 且污染 manifest，
+服务会误判"已索引"而永远跳过这些文件（表现为预览报"文件尚未索引或不存在"）。
+
 ---
 
 ## 五、生产部署与外网开放
@@ -192,6 +197,7 @@ web/src/
 └── components/AppLayout.tsx  # 一二级菜单 + 用户菜单（改密/登出）
 scripts/                # bench_report / load_test / eval_retrieval / backup / view_traces
                         # test_improvements_with_auth（质量改进验证）
+                        # rebuild_kb（手动重建知识库索引，collection 名须与服务一致）
 docs/
 ├── 面试准备.md         # 量化数据 + 设计取舍 Q&A + 演示脚本
 ├── glossary.md         # 术语/俚语/黑话释义表（行业术语、版本号规则、时效性关键词）
