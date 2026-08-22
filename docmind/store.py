@@ -288,6 +288,27 @@ def load_raw_pairs(session_id: str) -> list[tuple[str, str]]:
     return [(r["role"], r["raw"]) for r in rows if r["raw"]]
 
 
+def load_pairs_with_images(session_id: str) -> list[tuple[str, str, str | None]]:
+    """按序返回 [(role, raw, image_path)]，多轮上下文重建用。
+
+    image_path：该轮 user 消息携带的附件路径（/files/uploads/…，从
+    content 的 markdown 提取）；无图为 None。追问图片细节（"右边那张
+    是什么"）时模型需要重新看到图——历史重建须回填多模态消息。"""
+    import re as _re
+    _IMG_RE = _re.compile(r'!\[图片\]\((/files/uploads/[^)]+)\)')
+    c = _conn()
+    rows = c.execute(
+        "SELECT role, raw, content FROM messages WHERE session_id = ? ORDER BY seq",
+        (session_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        raw = r["raw"] or ""
+        m = _IMG_RE.search(r["content"] or "")
+        out.append((r["role"], raw, m.group(1) if m else None))
+    return out
+
+
 def list_sessions(user: str | None = None, limit: int = 50,
                   assistant_id: str | None = None) -> list[dict]:
     """会话列表（按最近活跃倒序）：只看本人会话 + 尚未归属的历史会话（打开即认领）

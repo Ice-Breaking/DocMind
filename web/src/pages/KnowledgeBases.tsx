@@ -40,6 +40,7 @@ import {
   reindexKb,
   uploadKbDoc,
   type IngestTask,
+  type ContentHit,
   type KbDoc,
   type KnowledgeBase,
 } from '../api';
@@ -93,6 +94,8 @@ export default function KnowledgeBases() {
   const [drawerTab, setDrawerTab] = useState('docs');
   const [docs, setDocs] = useState<KbDoc[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const [contentSearching, setContentSearching] = useState(false);
+  const [contentResults, setContentResults] = useState<{ kw: string; results: ContentHit[] } | null>(null);
   const [tasks, setTasks] = useState<IngestTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [reindexing, setReindexing] = useState<string | null>(null);
@@ -499,6 +502,54 @@ export default function KnowledgeBases() {
                         刷新
                       </Button>
                     </div>
+
+                    {/* 内容搜索：哪份文档提到 XX（基于索引切片，不逐个点开） */}
+                    <Input.Search
+                      placeholder="搜索文档内容（如：部署端口）"
+                      allowClear
+                      loading={contentSearching}
+                      enterButton
+                      onSearch={async (v: string) => {
+                        const kw = v.trim();
+                        setContentResults(null);
+                        if (kw.length < 2) return;
+                        setContentSearching(true);
+                        try {
+                          const r = await fetch(
+                            `/api/kbs/${activeKb.id}/docs/search?q=${encodeURIComponent(kw)}`,
+                          );
+                          const d = await r.json();
+                          if (!r.ok) throw new Error(d.detail || '搜索失败');
+                          setContentResults({ kw, results: d as ContentHit[] });
+                        } catch (e) {
+                          msgApi.error(e instanceof Error ? e.message : '搜索失败');
+                        } finally {
+                          setContentSearching(false);
+                        }
+                      }}
+                    />
+                    {contentResults && (
+                      <div style={{ background: 'rgba(99,102,241,0.05)', borderRadius: 8, padding: 12 }}>
+                        <Text strong>
+                          内容「{contentResults.kw}」命中 {contentResults.results.length} 个文档
+                        </Text>
+                        {contentResults.results.length === 0 ? (
+                          <div style={{ marginTop: 6 }}><Text type="secondary">无命中</Text></div>
+                        ) : (
+                          <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                            {contentResults.results.map((h) => (
+                              <li key={h.name} style={{ marginBottom: 6 }}>
+                                <Text strong>{h.name}</Text>
+                                <Text type="secondary">（{h.count} 处）</Text>
+                                {h.snippets.map((s, i) => (
+                                  <div key={i} style={{ fontSize: 12, color: '#666' }}>{s}</div>
+                                ))}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
 
                     {docsLoading ? (
                       <Spin style={{ display: 'block', margin: '40px auto' }} />

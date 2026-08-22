@@ -36,6 +36,29 @@ _TIME_SENSITIVE = {"get_weather", "get_current_time"}
 _FRESHNESS_GATE_WORDS = ("最新", "新闻", "热点", "刚刚", "实时", "今天", "今日",
                          "现在", "目前", "当前", "最近", "近期", "昨天", "今年")
 
+# 多轮上下文中最多回填的图片数（VL token 成本高，只保留最近的图）
+_MAX_HISTORY_IMAGES = 2
+
+
+def _image_file_to_data_url(path: str | None) -> str | None:
+    """/files/uploads/xxx → data URL（多轮重建回填多模态消息用）。
+    文件缺失/读取失败返回 None（降级为纯文本，不阻断重建）"""
+    if not path:
+        return None
+    try:
+        import base64
+        import mimetypes
+        import os
+        fname = os.path.basename(path.split("/uploads/")[-1])
+        fp = os.path.join("data", "uploads", fname)
+        if not os.path.isfile(fp):
+            return None
+        mime = mimetypes.guess_type(fname)[0] or "image/png"
+        with open(fp, "rb") as f:
+            return f"data:{mime};base64,{base64.b64encode(f.read()).decode()}"
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def _is_freshness_critical(question: str) -> bool:
     """时效闸门：纯本地规则判定该问题是否必须绕过缓存获取最新信息"""
@@ -84,21 +107,40 @@ def stream_events(agent, question: str, session_id: str = "",
     #    滑动窗口：仅带最近 MAX_HISTORY_TURNS 条消息进 prompt——长会话下
     #    全量历史会让 token 与延迟线性膨胀；被截断轮次以注记替代，
     #    模型仍知晓存在更早对话（指代消解所需的近邻轮次完整保留）
+    #    图片上下文：user 轮次携带的附件重新编码进多模态消息——
+    #    追问"右边那张是什么"时模型必须还能看到图（只回填最近
+    #    _MAX_HISTORY_IMAGES 张，VL token 成本高，更早的图丢弃）
     if session_id:
         try:
-            pairs = store.load_raw_pairs(session_id)
+            triples = store.load_pairs_with_images(session_id)
         except Exception as e:  # noqa: BLE001
-            pairs = []
+            triples = []
             logger.warning(f"SSE 上下文重建失败: {e}")
+        keep_imgs: set[str] = set()
+        for _r, _t, p in reversed(triples):
+            if p:
+                keep_imgs.add(p)
+                if len(keep_imgs) >= _MAX_HISTORY_IMAGES:
+                    break
+        pairs = [(r, t, p if (r == "user" and p in keep_imgs) else None)
+                 for r, t, p in triples if t]
         if len(pairs) > config.MAX_HISTORY_TURNS:
             dropped = len(pairs) - config.MAX_HISTORY_TURNS
             pairs = pairs[-config.MAX_HISTORY_TURNS:]
             pairs = [("system",
                       f"[上下文窗口注记] 更早的 {dropped} 条消息未载入，"
-                      "如用户提及更早内容请说明记忆范围有限")] + pairs
+                      "如用户提及更早内容请说明记忆范围有限", None)] + pairs
         if pairs:
             agent.history.append({"role": "system", "content": sp})
-            agent.history.extend({"role": r, "content": c} for r, c in pairs)
+            for r, t, img in pairs:
+                data_url = _image_file_to_data_url(img) if img else None
+                if data_url:
+                    agent.history.append({"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": t},
+                    ]})
+                else:
+                    agent.history.append({"role": r, "content": t})
 
     # 2) 语义缓存：高频问题秒回，跳过整个 Agent 链路
     #    时效闸门在前：时效性问题跳过缓存读写，强制走联网链路（铁律保证）；

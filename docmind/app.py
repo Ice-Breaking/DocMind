@@ -1739,17 +1739,45 @@ if __name__ == "__main__":
     # 认证门禁：无任何账号时播种 admin（密码取 ADMIN_PASSWORD 环境变量）
     chatstore.ensure_seed_admin()
 
+    # 登录防爆破：同一用户名 15 分钟内失败 5 次即锁定（内存计数，
+    # 重启清零——单进程部署下足够；锁定期间一律拒绝，包括正确密码）
+    _LOGIN_MAX_FAILS = 5
+    _LOGIN_LOCK_SECONDS = 900
+    _login_failures: dict[str, list[float]] = {}
+
+    def _is_login_locked(username: str) -> int:
+        """锁定中返回剩余秒数，未锁定返回 0"""
+        import time as _time
+        fails = [t for t in _login_failures.get(username, [])
+                 if _time.time() - t < _LOGIN_LOCK_SECONDS]
+        _login_failures[username] = fails
+        if len(fails) >= _LOGIN_MAX_FAILS:
+            return int(_LOGIN_LOCK_SECONDS - (_time.time() - fails[0]))
+        return 0
+
     def _login_auth(username: str, password: str) -> bool:
         """登录链：本地账号优先；配置了企业 LDAP 时本地失败降级 LDAP 绑定，
         LDAP 首登自动开通本地账号（is_admin 默认关，需管理员另行授权）"""
+        import time as _time
         from docmind import ldap_auth
+        remaining = _is_login_locked(username)
+        if remaining:
+            logger.warning(f"登录锁定中，拒绝尝试 user={username} 剩余{remaining}s")
+            return False
         if chatstore.verify_user(username, password):
+            _login_failures.pop(username, None)   # 成功即清零
             chatstore.record_audit(username, "login", "local")
             return True
         if ldap_auth.authenticate(username, password):
+            _login_failures.pop(username, None)
             chatstore.ensure_external_user(username)
             chatstore.record_audit(username, "login", "ldap")
             return True
+        # 记录失败（本地与 LDAP 均未通过）
+        _login_failures.setdefault(username, []).append(_time.time())
+        fails = len(_login_failures[username])
+        logger.warning(f"登录失败 user={username} 第{fails}次"
+                       + ("（已锁定15分钟）" if fails >= _LOGIN_MAX_FAILS else ""))
         return False
     #
     # Mermaid 图表库：通过 FastAPI 路由 serve 本地 JS 文件
@@ -2165,6 +2193,44 @@ if __name__ == "__main__":
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"会话删除失败: {e}")
         return {"ok": True}
+
+    @demo.app.get("/api/sessions/{session_id}/export", include_in_schema=False)
+    async def _export_session(session_id: str, request: _fastapi.Request):
+        """导出会话为 Markdown（存档/分享）：user/assistant 逐轮输出，
+        图片附件以链接形式保留"""
+        _require_active_user(request)
+        _check_session_access(request, session_id)
+        rows = chatstore.get_messages_full(session_id) or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="会话不存在或无消息")
+        import datetime as _dt
+        from urllib.parse import quote as _quote
+        # 会话标题：优先取列表中的会话（title），取不到用 id 兜底
+        title = session_id
+        try:
+            for s in chatstore.list_sessions(user=_current_user(request)):
+                if s.get("id") == session_id:
+                    title = s.get("title") or session_id
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        lines = [f"# DocMind 对话导出：{title or session_id}",
+                 f"> 导出时间：{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+        for r in rows:
+            role = r.get("role")
+            content = r.get("content") or ""
+            if role == "user":
+                lines += [f"## 🧑 用户", content, ""]
+            elif role == "assistant":
+                lines += [f"## 🤖 DocMind", content, ""]
+        from fastapi.responses import Response
+        safe_title = "".join(c for c in str(title or session_id)
+                             if c.isalnum() or c in "-_")[:30] or "session"
+        return Response(
+            content="\n".join(lines),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition":
+                     f"attachment; filename*=UTF-8''{_quote(f'{safe_title}.md')}"})
 
     @demo.app.get("/api/sessions/{session_id}/messages", include_in_schema=False)
     async def _get_messages(session_id: str, request: _fastapi.Request):

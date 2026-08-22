@@ -14,6 +14,7 @@ import {
   LikeFilled,
   DislikeFilled,
   PaperClipOutlined,
+  DownloadOutlined,
   CloseOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -317,11 +318,12 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
 
   /* ---- SSE send ---- */
   const handleSend = useCallback(
-    async (question: string) => {
+    async (question: string, overrideImage?: string) => {
       const attach = imageAttach;
-      const q = question.trim() || (attach ? '请看这张图片。' : '');
+      const imgB64 = overrideImage ?? attach?.base64;
+      const q = question.trim() || (imgB64 ? '请看这张图片。' : '');
       if (!q || streaming) return;
-      setImageAttach(null);
+      if (!overrideImage) setImageAttach(null);
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -335,7 +337,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         {
           key: userKey,
           role: 'user',
-          content: attach ? `![图片](${attach.dataUrl})\n\n${q}` : q,
+          content: imgB64 ? `![图片](${imgB64})\n\n${q}` : q,
         },
         { key: assistantKey, role: 'assistant', content: '', loading: true },
       ]);
@@ -354,7 +356,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       try {
         while (retryCount <= MAX_RETRIES) {
           try {
-            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, attach?.base64)) {
+            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, imgB64)) {
               if (ctrl.signal.aborted) break;
 
               switch (ev.event) {
@@ -502,6 +504,40 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     },
     [streaming, imageAttach, msgApi, handleAuthError, loadSessions],
   );
+
+  /* ---- 重新生成：取最后一条 assistant 前的 user 消息重发（含图） ---- */
+  const handleRegenerate = useCallback(async () => {
+    if (streaming) return;
+    const msgs = messagesRef.current;
+    let ai = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'assistant') { ai = i; break; }
+    }
+    if (ai < 0) return;
+    let ui = -1;
+    for (let i = ai - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') { ui = i; break; }
+    }
+    if (ui < 0) return;
+    const uContent = msgs[ui].content || '';
+    const m = uContent.match(/!\[[^\]]*\]\(([^)]+)\)/);
+    let b64: string | undefined;
+    if (m?.[1]?.startsWith('data:')) b64 = m[1];
+    else if (m?.[1]) {
+      try {
+        const r = await fetch(m[1]);
+        const blob = await r.blob();
+        b64 = await new Promise<string>((res) => {
+          const fr = new FileReader();
+          fr.onload = () => res(String(fr.result || ''));
+          fr.readAsDataURL(blob);
+        });
+      } catch { b64 = undefined; }
+    }
+    const q = uContent.replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
+    setMessages((prev) => prev.slice(0, ui));   // 移除旧问答对（前端）
+    handleSend(q || '请描述这张图片。', b64);
+  }, [streaming, handleSend]);
 
   /* ---- cancel stream ---- */
   const handleCancel = useCallback(() => {
@@ -809,8 +845,18 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         </div>
       );
     }
+    const isLastMsg = idx === curMsgs.length - 1 && !streaming;
     return (
       <div className="dm-feedback">
+        {isLastMsg && (
+          <Button
+            type="text"
+            size="small"
+            title="重新生成（基于上一条问题重问）"
+            icon={<ReloadOutlined />}
+            onClick={handleRegenerate}
+          />
+        )}
         <Button
           type="text"
           size="small"
@@ -926,17 +972,42 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
           >
             新对话
           </Button>
-          <Select
-            size="small"
-            value={assistantId}
-            options={assistantOptions}
-            onChange={(v: string) => {
-              setAssistantId(v);
-              assistantIdRef.current = v;
-              localStorage.setItem('dm_assistant_id', v);
-            }}
-            style={{ width: '100%', marginTop: 8 }}
-          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Select
+              size="small"
+              value={assistantId}
+              options={assistantOptions}
+              onChange={(v: string) => {
+                setAssistantId(v);
+                assistantIdRef.current = v;
+                localStorage.setItem('dm_assistant_id', v);
+              }}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="small"
+              icon={<DownloadOutlined />}
+              title="导出当前会话为 Markdown"
+              disabled={!activeSidRef.current}
+              onClick={async () => {
+                const sid = activeSidRef.current;
+                if (!sid) return;
+                try {
+                  const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/export`);
+                  if (!r.ok) throw new Error('导出失败');
+                  const blob = await r.blob();
+                  const a = document.createElement('a');
+                  a.href = URL.createObjectURL(blob);
+                  a.download = `docmind-${sid}.md`;
+                  a.click();
+                  URL.revokeObjectURL(a.href);
+                  msgApi.success('已导出 Markdown');
+                } catch {
+                  msgApi.error('导出失败，请重试');
+                }
+              }}
+            />
+          </div>
         </div>
         <div className="dm-chat-sidebar-list">
           <Conversations
@@ -1124,12 +1195,29 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
                 msgApi.error('图片过大（上限 8MB），请压缩后重试');
                 return;
               }
-              const reader = new FileReader();
-              reader.onload = () => {
-                const dataUrl = String(reader.result || '');
+              // canvas 重绘：①剥离 EXIF（手机照片含 GPS 定位/设备信息，隐私）
+              // ②等比压缩到最长边 2048（原图 4096 级上传慢且浪费）
+              const img = new window.Image();
+              img.onload = () => {
+                const MAX_EDGE = 2048;
+                const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.round(img.width * scale);
+                canvas.height = Math.round(img.height * scale);
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                  msgApi.error('图片处理失败，请重试');
+                  return;
+                }
+                // 透明 PNG 垫白底（JPEG 无透明通道）
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
                 setImageAttach({ dataUrl, base64: dataUrl });
               };
-              reader.readAsDataURL(f);
+              img.onerror = () => msgApi.error('图片读取失败，请重试');
+              img.src = URL.createObjectURL(f);
             }}
           />
         </div>

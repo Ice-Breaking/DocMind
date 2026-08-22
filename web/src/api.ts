@@ -510,6 +510,12 @@ export async function deleteAccount(): Promise<{ ok: boolean }> {
 /*  知识库文档                                                          */
 /* ------------------------------------------------------------------ */
 
+export interface ContentHit {
+  name: string;
+  count: number;
+  snippets: string[];
+}
+
 export interface KbDoc {
   name: string;
   size: number;

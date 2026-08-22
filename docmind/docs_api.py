@@ -210,6 +210,37 @@ def register_docs_routes(app) -> None:
         return {"ok": True, "name": filename, "size": len(content),
                 "title": title, "chars": len(text)}
 
+    @app.get("/api/kbs/{kb_id}/docs/search", include_in_schema=False)
+    async def _search_docs(kb_id: str, request: fastapi.Request, q: str = ""):
+        """文档内容搜索：关键词 → 命中文档列表（含片段与次数）。
+        「哪份文档提到 XX」不用逐个点开预览"""
+        _require_user(request, app)
+        q = (q or "").strip()
+        if len(q) < 2:
+            raise HTTPException(status_code=400, detail="关键词至少 2 个字符")
+
+        from docmind.rag.kb_registry import get_registry
+        result = get_registry().get(kb_id)
+        if result is None or result == (None, None):
+            raise HTTPException(status_code=404, detail="知识库不存在或未初始化")
+        vector_store, _ = result
+
+        hits: dict[str, dict] = {}
+        for c in vector_store.chunks:
+            text = c.get("text", "")
+            if q in text:
+                src = c.get("source", "")
+                h = hits.setdefault(src, {"name": src, "count": 0, "snippets": []})
+                h["count"] += 1
+                if len(h["snippets"]) < 2:
+                    idx = text.find(q)
+                    start = max(0, idx - 30)
+                    h["snippets"].append(
+                        ("…" if start > 0 else "") + text[start:idx + len(q) + 50]
+                        + ("…" if idx + len(q) + 50 < len(text) else ""))
+        return JSONResponse(sorted(hits.values(),
+                                   key=lambda x: -x["count"]))
+
     @app.get("/files/uploads/{name}", include_in_schema=False)
     async def _serve_upload(name: str, request: fastapi.Request):
         """对话图片附件（登录可见）；消息 markdown 以此 URL 内嵌展示"""
