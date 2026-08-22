@@ -1086,6 +1086,13 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
               onClick={(e) => navigate(e.key)}
             />
           )}
+          <Button
+            className="dm-mobile-newchat"
+            type="primary" block size="small" icon={<PlusOutlined />}
+            onClick={() => { handleNewChat(); setSidebarOpen(false); }}
+          >
+            新对话
+          </Button>
           <Input
             allowClear
             size="small"
@@ -1093,7 +1100,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             placeholder="搜索对话"
             value={convSearch}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConvSearch(e.target.value)}
-            style={{ marginTop: navOpen ? 8 : 0 }}
+            style={{ marginTop: navOpen ? 8 : 6 }}
           />
         </div>
         <div className="dm-chat-sidebar-list">
@@ -1331,7 +1338,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             prefix={
               <>
                 <button
-                  className="dm-img-btn"
+                  className="dm-img-btn dm-newchat-btn"
                   title="开始新对话"
                   onClick={() => { handleNewChat(); setSidebarOpen(false); }}
                 >

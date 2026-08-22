@@ -584,3 +584,41 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 .ant-sender .ant-sender-actions-list .ant-select {
   align-self: center;
 }
+
+/* ================= 移动端输入区专项优化 =================
+   实测 390px 视口:音色下拉 150px + 双按钮挤占后,输入框仅剩 66px */
+@media (max-width: 767px) {
+  /* 音色下拉:150 → 88px,长音色名省略 */
+  .ant-sender .ant-select {
+    max-width: 88px !important;
+    min-width: 64px !important;
+  }
+  .ant-sender .ant-select .ant-select-selection-item {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: 12px;
+  }
+  /* prefix 按钮紧凑:28px */
+  .ant-sender .dm-img-btn { width: 28px; height: 28px; font-size: 14px; }
+  /* 麦克风稍紧凑 */
+  .ant-sender .dm-mic-inline { font-size: 18px; padding: 4px; }
+  /* 顶栏:隐藏助手名,会话名占满 */
+  .dm-topbar-assistant { display: none; }
+  .dm-topbar-actions .ant-select { display: none; }   /* 顶栏助手下拉移动端隐藏(侧栏可切) */
+  .dm-topbar-title { max-width: 62vw; }
+  /* 输入区外边距收紧 */
+  .dm-chat-input { padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); }
+  /* 消息气泡更贴边 */
+  .dm-chat-messages { padding: 10px; }
+  /* 欢迎卡片紧凑 */
+  .dm-welcome-feats span { font-size: 11px; }
+}
+/* 移动端:prefix 隐藏新对话按钮(会话抽屉内已有入口),输入区最大化 */
+@media (max-width: 767px) {
+  .ant-sender .dm-newchat-btn { display: none; }
+}
+
+/* 移动端会话抽屉内的新对话入口(PC 有 prefix 按钮,隐藏此按钮) */
+.dm-mobile-newchat { display: none; }
+@media (max-width: 767px) {
+  .dm-mobile-newchat { display: inline-flex; margin-top: 6px; }
+}
