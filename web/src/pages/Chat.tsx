@@ -11,9 +11,11 @@ import {
   ApiOutlined,
   DeleteOutlined,
   DislikeOutlined,
+  RightOutlined,
   LikeOutlined,
   LikeFilled,
   DislikeFilled,
+  DownOutlined,
   PaperClipOutlined,
   SearchOutlined,
   DownloadOutlined,
@@ -1060,12 +1062,17 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       {/* Sidebar（移动端为抽屉，见 styles.css 媒体查询） */}
       <div className={`dm-chat-sidebar${sidebarOpen ? ' dm-open' : ''}`}>
         <div className="dm-chat-sidebar-header">
-          <div className="dm-nav-head">
-            <button className="dm-nav-toggle" title={navOpen ? '收起菜单' : '展开菜单'}
-              onClick={() => setNavOpen(v => !v)}>
-              <MenuOutlined />
-            </button>
+          <div
+            className="dm-nav-head"
+            role="button"
+            title={navOpen ? '收起菜单' : '展开菜单'}
+            onClick={() => setNavOpen(v => !v)}
+          >
+            <MenuOutlined className="dm-nav-toggle-icon" />
             <span className="dm-nav-brand">DocMind</span>
+            <span className={`dm-nav-arrow${navOpen ? ' open' : ''}`}>
+              {navOpen ? <DownOutlined /> : <RightOutlined />}
+            </span>
           </div>
           {navOpen && (
             <Menu

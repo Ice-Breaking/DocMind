@@ -539,3 +539,17 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
   align-self: center;
   vertical-align: middle;
 }
+
+/* 侧栏头部整行可点击(收缩/展开菜单),带箭头指示 */
+.dm-nav-head { cursor: pointer; user-select: none; border-radius: 8px;
+  padding: 4px 6px; transition: background 0.15s; }
+.dm-nav-head:hover { background: rgba(99, 102, 241, 0.06); }
+.dm-nav-toggle-icon { color: #6366f1; font-size: 15px; }
+.dm-nav-arrow { margin-left: auto; color: #9a9a9a; font-size: 11px;
+  transition: transform 0.2s; }
+.dm-nav-arrow.open { transform: rotate(0deg); }
+
+/* 音色选择垂直居中(Sender actions) */
+.ant-sender .ant-sender-actions .ant-select {
+  align-self: center;
+}
