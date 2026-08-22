@@ -119,6 +119,65 @@ def test_chunks_by_source():
     assert len(s.chunks_by_source("a.md")) == 3
 
 
+# ---------------- 索引自愈:manifest 有但 Chroma 缺 ----------------
+def test_rebuild_self_heals_orphan_files(tmp_path, monkeypatch):
+    """manifest 记录"已索引"但索引实际缺失的文件,增量重建自动补录"""
+    import threading as _th
+    from unittest.mock import patch
+    from docmind.rag import vector_store as vs
+    from docmind.rag.vector_store import VectorStore
+    from docmind.rag import cache as rcache
+
+    kb = tmp_path / "kb"; kb.mkdir()
+    (kb / "a.md").write_text("文档A内容,用于切片。", encoding="utf-8")
+    (kb / "b.md").write_text("文档B内容,用于切片。", encoding="utf-8")
+
+    idx = tmp_path / "idx"
+    store = VectorStore(collection_name="t_heal", index_dir=str(idx))
+
+    calls = []
+    def fake_embed(texts):
+        calls.append(list(texts))
+        return [[0.1] * 8 for _ in texts]
+
+    with patch.object(vs, "embed", fake_embed):
+        n = store.build(str(kb), use_cache=False)
+        assert n > 0
+        store._persist_index_meta(str(kb))   # 建立与目录一致的 manifest+gfp
+        # 模拟 b.md 切片从 Chroma 丢失(写入中断/外部损坏)
+        store._get_collection().delete(where={"source": "b.md"})
+        store.chunks = [c for c in store.chunks if c["source"] != "b.md"]
+
+        # manifest 仍记录 b.md 已索引 → 重建应检测 orphan 并补录
+        result = store.rebuild_incremental(str(kb))
+        assert result.get("modified", 0) == 1
+        assert {c["source"] for c in store.chunks} == {"a.md", "b.md"}
+
+
+def test_build_cache_hit_requires_full_coverage(tmp_path):
+    """Chroma 缺文件时 build() 不得命中缓存跳过重建"""
+    from unittest.mock import patch
+    from docmind.rag import vector_store as vs
+    from docmind.rag.vector_store import VectorStore
+
+    kb = tmp_path / "kb"; kb.mkdir()
+    (kb / "a.md").write_text("文档A内容。", encoding="utf-8")
+    (kb / "b.md").write_text("文档B内容。", encoding="utf-8")
+    idx = tmp_path / "idx"
+
+    def fake_embed(texts):
+        return [[0.1] * 8 for _ in texts]
+
+    store = VectorStore(collection_name="t_cov", index_dir=str(idx))
+    with patch.object(vs, "embed", fake_embed):
+        store.build(str(kb), use_cache=False)
+        # 伪造:从内存镜像去掉 b.md 但保持 chroma_ready(模拟部分丢失)
+        store.chunks = [c for c in store.chunks if c["source"] != "b.md"]
+        n = store.build(str(kb))          # 应放弃缓存命中,重新全量
+        sources = {c["source"] for c in store.chunks}
+        assert sources == {"a.md", "b.md"} and n >= 2
+
+
 # ---------------- 会话滑动窗口 ----------------
 def test_history_sliding_window(temp_db):
     from docmind import chat_stream, store

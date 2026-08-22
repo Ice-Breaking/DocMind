@@ -169,7 +169,8 @@ class VectorStore:
             try:
                 result = self._get_collection().get(include=["embeddings"])
                 vecs = result.get("embeddings")
-                if vecs and len(vecs) == len(self.chunks):
+                # Chroma 可能返回 ndarray：真值判断有歧义，须显式 None 检查
+                if vecs is not None and len(vecs) == len(self.chunks):
                     self._matrix = np.asarray(vecs, dtype=np.float32)
                     return
                 logger.warning("Chroma 向量数与切片数不一致，回退实时嵌入")
@@ -188,10 +189,26 @@ class VectorStore:
         """
         fingerprint = compute_fingerprint(knowledge_dir)
         if use_cache and self._chroma_ready:
-            self.version += 1
-            self._persist_index_meta(knowledge_dir)
-            logger.info(f"向量索引命中 Chroma 持久化缓存（{len(self.chunks)} 个切片，未调 API）")
-            return len(self.chunks)
+            # 缓存命中前置校验：Chroma 实际内容必须覆盖目录全部支持文件。
+            # 只信 _chroma_ready 会在索引部分丢失（写入中断/外部损坏）时
+            # 跳过重建，并把缺失状态固化进 manifest
+            root_dir = knowledge_dir or config.KNOWLEDGE_DIR
+            from docmind.rag.chunker import SUPPORTED_EXTS
+            dir_files = {n for n in os.listdir(root_dir)
+                         if os.path.splitext(n)[1].lower() in SUPPORTED_EXTS} \
+                if os.path.isdir(root_dir) else set()
+            indexed = {c.get("source", "") for c in self.chunks}
+            if dir_files <= indexed:
+                self.version += 1
+                # 仅当 manifest 尚不存在时才建立（首次/升级场景）；
+                # 命中路径不重写已有 manifest，防止洗白与 Chroma 的背离
+                if not os.path.exists(os.path.join(self._index_dir, "manifest.json")):
+                    self._persist_index_meta(knowledge_dir)
+                logger.info(f"向量索引命中 Chroma 持久化缓存（{len(self.chunks)} 个切片，未调 API）")
+                return len(self.chunks)
+            missing = dir_files - indexed
+            logger.warning(f"Chroma 索引缺失 {len(missing)} 个文件的切片"
+                           f"（如 {sorted(missing)[:2]}），放弃缓存命中执行重建")
 
         self.chunks = load_chunks(knowledge_dir)
         if not self.chunks:
@@ -246,6 +263,16 @@ class VectorStore:
                     if f in cached_manifest and current[f] != cached_manifest[f]}
         unchanged = set(current) - added - modified
 
+        # 自愈：manifest 记录"已索引"但 Chroma 实际没有切片的文件
+        # （写入中断/外部损坏后被 manifest 掩盖）并入 modified 补录
+        indexed_sources = {c.get("source", "") for c in self.chunks}
+        orphan = {f for f in current if f not in indexed_sources}
+        if orphan:
+            modified |= orphan
+            unchanged -= orphan
+            logger.warning(f"检测到 {len(orphan)} 个文件有 manifest 记录但索引缺失，自动补录: "
+                           f"{sorted(orphan)[:3]}")
+
         if not added and not removed and not modified:
             self._persist_index_meta(knowledge_dir)
             return {"added": 0, "removed": 0, "modified": 0,
@@ -271,12 +298,19 @@ class VectorStore:
             # 切片级缓存：文本未变的切片（文件内改动只影响局部切片时）免重嵌
             embeddings = embed_cached(embed, texts)
 
-            collection.add(
-                ids=self._make_ids(new_chunks),
-                embeddings=[list(map(float, v)) for v in embeddings],
-                documents=texts,
-                metadatas=self._metadatas(new_chunks),
-            )
+            try:
+                collection.add(
+                    ids=self._make_ids(new_chunks),
+                    embeddings=[list(map(float, v)) for v in embeddings],
+                    documents=texts,
+                    metadatas=self._metadatas(new_chunks),
+                )
+            except Exception:
+                # 回滚切片缓存：add 失败（维度/存储层拒绝）时刚写入的
+                # 向量不可信，滞留会让后续重建反复命中坏缓存且无法自愈
+                from docmind.rag.embed_cache import invalidate
+                invalidate(texts)
+                raise
 
         self.chunks = ([c for c in self.chunks if c.get("source") in unchanged]
                        + new_chunks)
