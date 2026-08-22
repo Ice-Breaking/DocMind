@@ -553,3 +553,20 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 .ant-sender .ant-sender-actions .ant-select {
   align-self: center;
 }
+
+/* PC:☰ 收起整个会话侧栏(宽度过渡) */
+@media (min-width: 768px) {
+  .dm-chat-sidebar.dm-collapsed {
+    width: 0; min-width: 0; border-right: none; overflow: hidden;
+  }
+}
+
+/* 音色下拉对齐:actions 容器必须显式 flex(默认非 flex 时 align-items 无效) */
+.ant-sender .ant-sender-actions {
+  display: flex;
+  align-items: center;
+}
+.ant-sender .ant-sender-actions .ant-select {
+  align-self: center;
+  margin: 0;
+}

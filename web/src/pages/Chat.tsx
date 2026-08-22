@@ -107,6 +107,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const navigate = useNavigate();
   const location = useLocation();
   const [navOpen, setNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);   // PC:☰ 收起整个侧栏
   const navItems = useMemo(() => buildNavItems(!!_me.is_admin), [_me.is_admin]);
   const navLeafKeys = useMemo(() => flattenNavKeys(navItems), [navItems]);
   const navSelected = navLeafKeys.includes(location.pathname) ? location.pathname : '';
@@ -1060,7 +1061,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   return (
     <div className="dm-chat">
       {/* Sidebar（移动端为抽屉，见 styles.css 媒体查询） */}
-      <div className={`dm-chat-sidebar${sidebarOpen ? ' dm-open' : ''}`}>
+      <div className={`dm-chat-sidebar${sidebarOpen ? ' dm-open' : ''}${sidebarCollapsed ? ' dm-collapsed' : ''}`}>
         <div className="dm-chat-sidebar-header">
           <div
             className="dm-nav-head"
@@ -1124,8 +1125,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         <div className="dm-chat-topbar">
           <button
             className="dm-topbar-menu"
-            onClick={() => setSidebarOpen(v => !v)}
-            title="会话列表"
+            onClick={() => {
+              if (window.innerWidth < 768) setSidebarOpen(v => !v);
+              else setSidebarCollapsed(v => !v);
+            }}
+            title={sidebarCollapsed ? '展开侧栏' : '收起侧栏'}
           >
             <MenuOutlined />
           </button>
