@@ -94,8 +94,25 @@ _INTERPRET_PROMPT = """你是术语解读器。判断问题中是否含行业术
 问题：{q}"""
 
 
+def _skip_interpret(question: str) -> bool:
+    """术语解读步的本地预过滤：明显不含术语的输入直接跳过 LLM 调用。
+
+    条件刻意保守（全部满足才跳），保证俚语/黑话/NEED_SEARCH 联网查词
+    链路不受影响——仅排除「纯 ASCII 短输入且无引用符号且本地术语表
+    零命中」这类确定无术语的场景（如 "hi"、"2+2"、乱码）。"""
+    if question.isascii() and len(question) <= 8 \
+            and not any(c in question for c in '「」《》"\'“”') \
+            and not glossary_note(question):
+        return True
+    return False
+
+
 def interpret_terms(question: str) -> str:
-    """层1 解读前置步：每问必跑，用低成本模型强制输出术语解读（失败静默跳过）"""
+    """层1 解读前置步：每问必跑，用低成本模型强制输出术语解读（失败静默跳过）
+
+    性能：本地预过滤命中时跳过（每次提问省一次 LLM 调用的串行等待）"""
+    if _skip_interpret(question):
+        return ""
     try:
         with trace.span("term-interpret", kind="retrieval",
                         input=question[:80]) as ctx:

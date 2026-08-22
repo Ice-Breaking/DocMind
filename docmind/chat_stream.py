@@ -29,10 +29,39 @@ logger = logging.getLogger(__name__)
 
 _TIME_SENSITIVE = {"get_weather", "get_current_time"}
 
+# 时效敏感词：命中则跳过答案缓存（读与写），强制走主链路联网核实。
+# 铁律「用户搜索必须拿到最新信息」的代码级闸门——时效检测原本在 Agent 内部，
+# 排在缓存 lookup 之后会导致时效问题命中旧缓存秒回、绕过强制联网；
+# 这里用纯本地规则检测（毫秒级、零 API），在缓存之前拦截。
+_FRESHNESS_GATE_WORDS = ("最新", "新闻", "热点", "刚刚", "实时", "今天", "今日",
+                         "现在", "目前", "当前", "最近", "近期", "昨天", "今年")
+
+
+def _is_freshness_critical(question: str) -> bool:
+    """时效闸门：纯本地规则判定该问题是否必须绕过缓存获取最新信息"""
+    if any(w in question for w in _FRESHNESS_GATE_WORDS):
+        return True
+    try:
+        from docmind.timeliness_detector import detect_timeliness
+        if detect_timeliness(question)["is_time_sensitive"]:
+            return True
+        from docmind.intent_understanding import detect_question_intent
+        if detect_question_intent(question)["needs_latest_data"]:
+            return True
+    except Exception:  # noqa: BLE001 - 检测故障放行走缓存（宁快勿断）
+        return False
+    return False
+
 # 助手上下文：端点在请求开始时 set 当前助手绑定的 KB 列表，
 # core.knowledge_search 惰性读取以动态路由检索目标（空列表=默认知识库）
 current_kb_ids: contextvars.ContextVar[list] = contextvars.ContextVar(
     "current_kb_ids", default=[])
+
+# 查询向量复用：语义缓存已对原始问题 embed 过一次，检索层若用同一
+# 文本检索可直接复用（存 (文本, 向量) 二元组，文本一致才复用——
+# 模型改写后的检索词向量不同，不能混用）
+current_query_vec: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "current_query_vec", default=(None, None))
 
 
 def stream_events(agent, question: str, session_id: str = "",
@@ -61,10 +90,13 @@ def stream_events(agent, question: str, session_id: str = "",
             agent.history.extend({"role": r, "content": c} for r, c in pairs)
 
     # 2) 语义缓存：高频问题秒回，跳过整个 Agent 链路
+    #    时效闸门在前：时效性问题跳过缓存读写，强制走联网链路（铁律保证）
     q_vec = None
-    if config.SEMANTIC_CACHE and use_cache:
+    freshness_critical = _is_freshness_critical(question)
+    if config.SEMANTIC_CACHE and use_cache and not freshness_critical:
         try:
             q_vec = embed([question])[0]
+            current_query_vec.set((question, q_vec))   # 供检索层复用（文本一致时）
             hit = semantic_cache.lookup(q_vec)
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             hit = None
@@ -84,8 +116,8 @@ def stream_events(agent, question: str, session_id: str = "",
             yield {"kind": "final", "answer": cached_answer}
             return
 
-    # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理
-    if use_cache:
+    # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理（时效问题同样跳过）
+    if use_cache and not freshness_critical:
         try:
             kb_ids = current_kb_ids.get() if assistant_id else []
             reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids, sp)
@@ -118,8 +150,9 @@ def stream_events(agent, question: str, session_id: str = "",
     if not final_answer:
         final_answer = partial or "⚠️ 未获得模型回复，请重试。"
 
-    # 4) 写语义缓存：与主链路同规则（实时类工具/错误答案/受限引用不入缓存）
+    # 4) 写语义缓存：与主链路同规则（实时类工具/错误答案/受限引用/时效问题不入缓存）
     if (config.SEMANTIC_CACHE and use_cache and q_vec is not None and final_answer
+            and not freshness_critical
             and not final_answer.startswith("⚠️")
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
@@ -128,8 +161,9 @@ def stream_events(agent, question: str, session_id: str = "",
         except Exception as e:  # noqa: BLE001
             logger.warning(f"语义缓存写入失败: {e}")
 
-    # 5) 写 Agent 推理缓存：纯知识检索类问题可缓存
-    if (use_cache and final_answer and not final_answer.startswith("⚠️")
+    # 5) 写 Agent 推理缓存：纯知识检索类问题可缓存（时效问题不入）
+    if (use_cache and final_answer and not freshness_critical
+            and not final_answer.startswith("⚠️")
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
         try:

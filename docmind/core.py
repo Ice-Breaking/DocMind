@@ -50,21 +50,25 @@ def build_shared():
         # 文档级 ACL：只检索当前用户可见的文档
         allowed = acl.allowed_docs(acl.get_current_user())
 
-        # 多 KB 路由
+        # 多 KB 路由 + 查询向量复用（语义缓存已 embed 过原始问题，
+        # 检索词与其完全一致时直接复用，省一次 embedding 调用）
         try:
-            from docmind.chat_stream import current_kb_ids
+            from docmind.chat_stream import current_kb_ids, current_query_vec
             kb_ids = current_kb_ids.get()
+            q_text, q_vec = current_query_vec.get()
+            q_vec = q_vec if (q_text == query and q_vec is not None) else None
         except Exception:  # noqa: BLE001
-            kb_ids = []
+            kb_ids, q_vec = [], None
         kb_ids = [k for k in kb_ids if k and k != "default"]
 
         if kb_ids:
             from docmind.rag.kb_registry import get_registry
             hits = get_registry().search_multi(kb_ids, query, top_k=config.TOP_K,
-                                               allowed_sources=allowed)
+                                               allowed_sources=allowed,
+                                               query_vec=q_vec)
         else:
             hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
-                                    allowed_sources=allowed)
+                                    allowed_sources=allowed, query_vec=q_vec)
 
         if not hits:
             if config.EVIDENCE_REFUSAL:

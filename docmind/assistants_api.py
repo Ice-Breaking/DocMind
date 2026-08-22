@@ -276,5 +276,14 @@ def _do_reindex(kb_id: str, task_id: int) -> None:
             msg = "索引已更新"
         store.update_ingest_task(task_id, "done", msg)
         store.complete_pending_tasks(kb_id)
+        # 索引已变化：清空答案缓存，防止旧缓存继续命中已删除/修改的文档内容
+        try:
+            from docmind import agent_reasoning_cache, semantic_cache
+            n1 = semantic_cache.clear()
+            n2 = agent_reasoning_cache.clear()
+            if n1 or n2:
+                print(f"[reindex] 知识库变更，已清空答案缓存：语义 {n1} 条 / 推理 {n2} 条")
+        except Exception as e:  # noqa: BLE001 - 缓存清理失败不影响重建结果
+            print(f"[reindex] 答案缓存清理失败（不影响索引）: {e}")
     except Exception as e:  # noqa: BLE001 - 后台线程异常收敛为任务失败状态
         store.update_ingest_task(task_id, "error", str(e)[:200])

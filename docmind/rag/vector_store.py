@@ -146,6 +146,21 @@ class VectorStore:
         save_global_fingerprint(self._index_dir, compute_global_fingerprint())
 
     def _refresh_matrix(self) -> None:
+        """刷新内存向量矩阵。
+
+        Chroma 可用时直接读回已持久化的向量（零 embedding API 调用）——
+        增量重建只新增/修改了部分切片，全量重嵌会让"增量"名存实亡；
+        仅在无持久化索引（chunks 直接注入等场景）时才回退实时 embed"""
+        if self._chroma_ready:
+            try:
+                result = self._get_collection().get(include=["embeddings"])
+                vecs = result.get("embeddings")
+                if vecs and len(vecs) == len(self.chunks):
+                    self._matrix = np.asarray(vecs, dtype=np.float32)
+                    return
+                logger.warning("Chroma 向量数与切片数不一致，回退实时嵌入")
+            except Exception as e:  # noqa: BLE001 - 读取失败回退 embed
+                logger.warning(f"从 Chroma 恢复向量矩阵失败，回退实时嵌入: {e}")
         self._matrix = (np.asarray(embed([c["text"] for c in self.chunks]),
                                    dtype=np.float32)
                         if self.chunks else None)
@@ -263,12 +278,15 @@ class VectorStore:
                 "unchanged": len(unchanged), "chunks": len(self.chunks)}
 
     # ---------------- 检索 ----------------
-    def search(self, query: str, top_k: int | None = None) -> list[SearchHit]:
-        """余弦相似度检索 top-k（走 Chroma HNSW 索引；无持久化索引时回退 numpy）"""
+    def search(self, query: str, top_k: int | None = None,
+               query_vec: list[float] | None = None) -> list[SearchHit]:
+        """余弦相似度检索 top-k（走 Chroma HNSW 索引；无持久化索引时回退 numpy）
+
+        query_vec：调用方已对同一 query 文本算过的向量，传入则免重复 embed"""
         if not self.chunks:
             return []
         k = top_k or config.TOP_K
-        q = embed([query])[0]
+        q = query_vec if query_vec is not None else embed([query])[0]
 
         if self._chroma_ready and self._collection is not None:
             return self._search_chroma(q, k)

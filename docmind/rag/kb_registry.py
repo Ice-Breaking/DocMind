@@ -102,9 +102,11 @@ class KBRegistry:
         with self._lock:
             self._entries.pop(kb_id, None)
 
-    def search_multi(self, kb_ids, query, top_k, allowed_sources=None):
+    def search_multi(self, kb_ids, query, top_k, allowed_sources=None,
+                     query_vec=None):
         """跨多库检索：每库双路召回（不精排）→ 合并去重 → 统一精排一次。
-        返回 list[SearchHit]，与单库 retriever.search 的结果类型一致。"""
+        返回 list[SearchHit]，与单库 retriever.search 的结果类型一致。
+        query_vec：已对同一 query 算过的向量，各库复用（否则每库重复 embed 一次）"""
         from docmind.rag.hybrid import filter_reranked
 
         kb_ids = [k for k in (kb_ids or []) if k]
@@ -123,7 +125,7 @@ class KBRegistry:
                 hits = retriever.search(
                     query, top_k=top_k * 2, rerank=False,
                     candidate_k=max(top_k * 2, 10),
-                    allowed_sources=allowed_sources)
+                    allowed_sources=allowed_sources, query_vec=query_vec)
                 candidates.extend(hits)
                 rerank_retriever = retriever
             except Exception as e:  # noqa: BLE001 - 单库失败不阻断整体

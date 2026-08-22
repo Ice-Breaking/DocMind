@@ -78,12 +78,24 @@ def get(query: str) -> Optional[list[dict]]:
     return json.loads(row["results"])
 
 
+# 时效敏感词：命中使用短 TTL——"最新/新闻"类查询结果过时最快，
+# 30 分钟默认 TTL 对这类问题等于返回旧闻
+_FRESH_TTL_WORDS = ("最新", "新闻", "热点", "刚刚", "今天", "现在", "目前",
+                    "当前", "实时", "昨日", "昨天", "跌破", "暴涨")
+_FRESH_TTL_SECONDS = 600   # 时效类 10 分钟
+
+
+def _ttl_for(query: str, default_ttl: int) -> int:
+    return _FRESH_TTL_SECONDS if any(w in query for w in _FRESH_TTL_WORDS) else default_ttl
+
+
 def put(query: str, results: list[dict], ttl: int = None) -> None:
     """写入缓存；超出容量时淘汰最老的
 
-    ttl: 缓存生存时间（秒），None 使用默认值"""
+    ttl: 缓存生存时间（秒），None 按查询内容自动分级：
+    时效敏感词命中的查询用短 TTL（10 分钟），其余用默认 TTL"""
     if ttl is None:
-        ttl = config.WEB_SEARCH_CACHE_TTL
+        ttl = _ttl_for(query, config.WEB_SEARCH_CACHE_TTL)
 
     key = _cache_key(query)
     c = _conn()

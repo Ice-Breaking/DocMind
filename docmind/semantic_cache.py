@@ -117,3 +117,14 @@ def cleanup_stale_entries(days: int = 7) -> int:
     deleted = c.total_changes
     c.commit()
     return deleted
+
+
+def clear() -> int:
+    """清空全部缓存条目，返回删除数。
+
+    知识库重建/文档增删后调用——否则旧缓存答案继续命中，
+    引用已删除或已修改的文档内容（与证据拒答/引用溯源的承诺矛盾）"""
+    c = _conn()
+    deleted = c.execute("DELETE FROM semantic_cache").rowcount
+    c.commit()
+    return deleted

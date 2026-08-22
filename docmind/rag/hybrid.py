@@ -103,9 +103,11 @@ class HybridRetriever:
         rerank: bool = True,
         candidate_k: int = CANDIDATE_K,
         allowed_sources: set[str] | None = None,
+        query_vec: list[float] | None = None,
     ) -> list[SearchHit]:
         """allowed_sources：文档级 ACL 过滤——只保留授权来源的候选（rerank 前过滤，
-        避免无权文档挤占 top_k 名额）；None 表示不过滤"""
+        避免无权文档挤占 top_k 名额）；None 表示不过滤。
+        query_vec：已对同一 query 算过的向量，透传免重复 embed"""
         # 懒重建：store 切片变化（增量索引/全量重建）后 version +1，
         # 此处自动重建 BM25，无需调用方手动同步
         if self._built_version != self.store.version:
@@ -117,7 +119,7 @@ class HybridRetriever:
         # 供检索日志按阶段下钻耗时（链路分析）
         with trace.span("retrieval:dense", kind="retrieval",
                         kb=kb_tag, input=query[:80]) as _dc:
-            vec_hits = self.store.search(query, top_k=candidate_k)
+            vec_hits = self.store.search(query, top_k=candidate_k, query_vec=query_vec)
             _dc["output"] = len(vec_hits)
         with trace.span("retrieval:sparse", kind="retrieval",
                         kb=kb_tag, input=query[:80]) as _sc:

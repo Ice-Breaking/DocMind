@@ -160,3 +160,14 @@ def stats() -> dict:
         "SELECT COUNT(*) AS n, COALESCE(SUM(hits), 0) AS h FROM agent_reasoning_cache"
     ).fetchone()
     return {"entries": row["n"], "total_hits": row["h"]}
+
+
+def clear() -> int:
+    """清空全部缓存条目，返回删除数。
+
+    知识库重建/文档增删后调用——推理缓存不感知 KB 内容变化，
+    不清理会继续返回基于旧文档的回答（虽有 TTL 但最长滞后 24h）"""
+    c = _conn()
+    deleted = c.execute("DELETE FROM agent_reasoning_cache").rowcount
+    c.commit()
+    return deleted
