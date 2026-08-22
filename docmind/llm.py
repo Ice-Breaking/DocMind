@@ -98,6 +98,20 @@ def _brief_messages(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _vl_extra_body(messages: list[dict]) -> dict:
+    """多模态消息自动开启 VL 高分辨率模式。
+
+    大图（如 3072×4096 手机原图）默认被缩到低分辨率处理，封面小字/
+    曲目表全部糊掉，模型只能编造（实测：默认模式曲目表全错，高分辨率
+    模式逐字正确）。检测到 image_url 即开启，调用方无感。"""
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(
+                isinstance(x, dict) and x.get("type") == "image_url" for x in c):
+            return {"vl_high_resolution_images": True}
+    return {}
+
+
 def chat(messages: list[dict], tools: list[dict] | None = None,
          max_tokens: int | None = None, temperature: float | None = None,
          model: str | None = None):
@@ -123,6 +137,7 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
                 model=_model,
                 messages=messages,
                 temperature=temperature if temperature is not None else 0.1,
+                extra_body=_vl_extra_body(messages) or None,
                 **kwargs,
             ))
         except Exception:
@@ -161,12 +176,14 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
     _model = model or _active_cfg("llm")[0]
 
     def _create(thinking: bool):
+        extra = {"enable_thinking": True} if thinking else {}
+        extra.update(_vl_extra_body(messages))   # 多模态消息自动高分辨率
         return get_client().chat.completions.create(
             model=_model,
             messages=messages,
             # 百炼建议：开启思维链时温度不宜过低（0.1 易陷入重复推理）
             temperature=0.6 if thinking else 0.1,
-            extra_body={"enable_thinking": True} if thinking else None,
+            extra_body=extra or None,
             **kwargs,
         )
 

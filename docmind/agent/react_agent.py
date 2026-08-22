@@ -360,7 +360,15 @@ class ReActAgent:
                 yield AgentStep("rewrite", f"多轮改写：{question} → {rewritten}")
                 question = rewritten
         if image_data:
-            # 多模态 user 消息：文本 + 图片（qwen-vl 的 image_url 格式）
+            # 多模态 user 消息：文本 + 图片（qwen-vl 的 image_url 格式）。
+            # 注记防幻觉：VL 看不清的小字最容易触发编造（实测会把曲目表/
+            # 人名整段虚构），明确要求不确定即如实说明
+            self.history.append({
+                "role": "system",
+                "content": "图片理解要求：逐区域仔细观察；对看不清的文字、"
+                           "人名、曲目、编号，如实说明不确定，严禁推测编造；"
+                           "外文/艺文名与人物的对应关系不确定时标注「待确认」，"
+                           "不要直接替换成自己猜测的知名人物。"})
             self.history.append({"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": image_data}},
                 {"type": "text", "text": question or "请描述这张图片的内容。"},
