@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import MarkdownContent from '../components/MarkdownContent';
 import {
   ApiOutlined,
@@ -37,6 +38,8 @@ import {
 import Bubble from '@ant-design/x/es/bubble';
 import type { BubbleDataType } from '@ant-design/x/es/bubble/BubbleList';
 import Conversations from '@ant-design/x/es/conversations';
+import { Menu } from 'antd';
+import { buildNavItems, flattenNavKeys } from '../nav';
 import type { Conversation } from '@ant-design/x/es/conversations/interface';
 import Sender from '@ant-design/x/es/sender';
 import ThoughtChain from '@ant-design/x/es/thought-chain';
@@ -97,9 +100,17 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   );
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [recording, setRecording] = useState(false);
-  const [imageAttach, setImageAttach] = useState<{ dataUrl: string; base64: string } | null>(null);
+  const [imageAttaches, setImageAttaches] = useState<{ dataUrl: string; base64: string }[]>([]);
   const [convSearch, setConvSearch] = useState('');
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [navOpen, setNavOpen] = useState(false);
+  const navItems = useMemo(() => buildNavItems(!!_me.is_admin), [_me.is_admin]);
+  const navLeafKeys = useMemo(() => flattenNavKeys(navItems), [navItems]);
+  const navSelected = navLeafKeys.includes(location.pathname) ? location.pathname : '';
+
   const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const MAX_IMGS = 5;   // 单条消息最多携带图片数
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -323,12 +334,15 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- SSE send ---- */
   const handleSend = useCallback(
     async (question: string, overrideImage?: string) => {
-      const attach = imageAttach;
-      const imgB64 = overrideImage ?? attach?.base64;
-      const q = question.trim() || (imgB64 ? '请看这张图片。' : '');
+      const attaches = imageAttaches;
+      const imgList: string[] = overrideImage
+        ? [overrideImage]
+        : attaches.map((a) => a.base64);
+      const hasImg = imgList.length > 0;
+      const q = question.trim() || (hasImg ? '请看这些图片。' : '');
       if (!q || streaming) return;
-      if (overrideImage) setImageAttach(null);
-      if (imgB64) setUploadPct(0);   // 带图发送:展示上行进度,完成后再清附件
+      if (overrideImage) setImageAttaches([]);
+      if (hasImg) setUploadPct(0);   // 带图发送:展示上行进度,完成后再清附件
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -342,7 +356,9 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         {
           key: userKey,
           role: 'user',
-          content: imgB64 ? `![图片](${imgB64})\n\n${q}` : q,
+          content: hasImg
+            ? imgList.map((b) => `![图片](${b})`).join('\n') + `\n\n${q}`
+            : q,
           ts: Date.now(),
         } as BubbleDataType,
         { key: assistantKey, role: 'assistant', content: '', loading: true, ts: Date.now() } as BubbleDataType,
@@ -362,10 +378,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       try {
         while (retryCount <= MAX_RETRIES) {
           try {
-            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, imgB64,
-              imgB64 ? (pct) => {
+            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current,
+              hasImg ? imgList : undefined,
+              hasImg ? (pct) => {
                 setUploadPct(pct);
-                if (pct >= 100) { setImageAttach(null); setUploadPct(null); }
+                if (pct >= 100) { setImageAttaches([]); setUploadPct(null); }
               } : undefined)) {
               if (ctrl.signal.aborted) break;
 
@@ -512,7 +529,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         abortRef.current = null;
       }
     },
-    [streaming, imageAttach, msgApi, handleAuthError, loadSessions],
+    [streaming, imageAttaches, msgApi, handleAuthError, loadSessions],
   );
 
   /* ---- 重新生成：取最后一条 assistant 前的 user 消息重发（含图） ---- */
@@ -980,7 +997,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             {imgs.length > 0 && (
               <div
                 style={{
-                  display: 'flex', gap: 8, flexWrap: 'wrap',
+                  display: 'flex', gap: 6, flexWrap: 'wrap',
                   marginBottom: text ? 6 : 0, justifyContent: 'flex-end',
                 }}
               >
@@ -989,8 +1006,9 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
                     key={i}
                     src={u}
                     alt="图片"
-                    width={200}
-                    style={{ borderRadius: 8, objectFit: 'cover' }}
+                    width={imgs.length > 1 ? 150 : 200}
+                    height={imgs.length > 1 ? 150 : 200}
+                    style={{ borderRadius: 10, objectFit: 'cover' }}
                     preview={{ mask: '预览' }}
                   />
                 ))}
@@ -1042,6 +1060,24 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       {/* Sidebar（移动端为抽屉，见 styles.css 媒体查询） */}
       <div className={`dm-chat-sidebar${sidebarOpen ? ' dm-open' : ''}`}>
         <div className="dm-chat-sidebar-header">
+          <div className="dm-nav-head">
+            <button className="dm-nav-toggle" title={navOpen ? '收起菜单' : '展开菜单'}
+              onClick={() => setNavOpen(v => !v)}>
+              <MenuOutlined />
+            </button>
+            <span className="dm-nav-brand">DocMind</span>
+          </div>
+          {navOpen && (
+            <Menu
+              mode="inline"
+              theme="light"
+              className="dm-side-nav"
+              selectedKeys={navSelected ? [navSelected] : []}
+              defaultOpenKeys={navItems.filter(i => i.children).map(i => i.key)}
+              items={navItems as any}
+              onClick={(e) => navigate(e.key)}
+            />
+          )}
           <Input
             allowClear
             size="small"
@@ -1049,6 +1085,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             placeholder="搜索对话"
             value={convSearch}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConvSearch(e.target.value)}
+            style={{ marginTop: navOpen ? 8 : 0 }}
           />
         </div>
         <div className="dm-chat-sidebar-list">
@@ -1080,11 +1117,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         <div className="dm-chat-topbar">
           <button
             className="dm-topbar-menu"
-            onClick={() => {
-              if (window.innerWidth < 768) setSidebarOpen(v => !v);   // 移动端:会话抽屉
-              else window.dispatchEvent(new CustomEvent('dm-open-nav')); // PC:全局导航抽屉
-            }}
-            title="导航菜单"
+            onClick={() => setSidebarOpen(v => !v)}
+            title="会话列表"
           >
             <MenuOutlined />
           </button>
@@ -1219,25 +1253,37 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             }}
             onCancel={handleCancel}
             loading={streaming}
-            placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
+            placeholder={imageAttaches.length ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
             header={
-              imageAttach ? (
+              imageAttaches.length > 0 ? (
                 <div className="dm-attach-bar" style={{ width: '100%' }}>
-                  <Image
-                    src={imageAttach.dataUrl}
-                    alt="附件"
-                    width={40}
-                    height={40}
-                    style={{ objectFit: 'cover', borderRadius: 6, cursor: 'pointer' }}
-                    preview={{ mask: '预览' }}
-                  />
-                  <span className="dm-attach-tip">
-                    {uploadPct != null ? `正在上传 ${uploadPct}%` : '图片将随消息发送（点击图片可预览）'}
-                  </span>
+                  {imageAttaches.map((a, i) => (
+                    <div key={i} className="dm-attach-thumb">
+                      <Image
+                        src={a.dataUrl}
+                        alt={`附件${i + 1}`}
+                        width={52}
+                        height={52}
+                        style={{ objectFit: 'cover', borderRadius: 8, cursor: 'pointer' }}
+                        preview={{ mask: '预览' }}
+                      />
+                      {uploadPct == null && (
+                        <CloseOutlined
+                          className="dm-attach-close"
+                          onClick={() => setImageAttaches((prev) => prev.filter((_, j) => j !== i))}
+                        />
+                      )}
+                    </div>
+                  ))}
                   {uploadPct != null ? (
-                    <Progress type="circle" size={22} percent={uploadPct} showInfo={false} />
+                    <span className="dm-attach-tip">
+                      <Progress type="circle" size={20} percent={uploadPct} showInfo={false} />
+                      <span style={{ marginLeft: 6 }}>正在上传 {uploadPct}%</span>
+                    </span>
                   ) : (
-                    <CloseOutlined onClick={() => setImageAttach(null)} className="dm-attach-close" />
+                    <span className="dm-attach-tip">
+                      {imageAttaches.length}/{MAX_IMGS} 张 · 点击图片预览
+                    </span>
                   )}
                 </div>
               ) : undefined
@@ -1323,7 +1369,10 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                 const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-                setImageAttach({ dataUrl, base64: dataUrl });
+                setImageAttaches((prev) =>
+                  prev.length >= MAX_IMGS
+                    ? (msgApi.warning(`最多携带 ${MAX_IMGS} 张图片`), prev)
+                    : [...prev, { dataUrl, base64: dataUrl }]);
               };
               img.onerror = () => msgApi.error('图片读取失败，请重试');
               img.src = URL.createObjectURL(f);

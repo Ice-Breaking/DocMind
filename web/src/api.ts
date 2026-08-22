@@ -75,16 +75,17 @@ export async function* chatStream(
   sessionId: string,
   signal?: AbortSignal,
   assistantId?: string,
-  imageData?: string,
+  imageData?: string | string[],
   onUploadProgress?: (pct: number) => void,
 ): AsyncGenerator<ChatEvent> {
   const payload: Record<string, unknown> = { question, session_id: sessionId };
   if (assistantId) payload.assistant_id = assistantId;
-  if (imageData) payload.image_data = imageData;
+  if (imageData) payload.image_data = imageData;   // str | str[](多图)
 
   // 带图 + 需要进度：走 XHR（upload.onprogress 真实上行百分比），
   // SSE 帧从 responseText 增量解析（与 fetch 路径同一解析逻辑）
-  if (imageData && onUploadProgress) {
+  const hasImg = !!imageData && (Array.isArray(imageData) ? imageData.length > 0 : true);
+  if (hasImg && onUploadProgress) {
     yield* chatStreamXHR(payload, signal, onUploadProgress);
     return;
   }

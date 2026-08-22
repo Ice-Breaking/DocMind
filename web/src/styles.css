@@ -460,8 +460,8 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 
 /* 输入框内按住说话(图标按钮,与发送键同排) */
 .dm-mic.dm-mic-inline {
-  border: none; background: none; cursor: pointer; padding: 4px;
-  font-size: 16px; color: #6366f1; line-height: 1;
+  border: none; background: none; cursor: pointer; padding: 6px;
+  font-size: 20px; color: #6366f1; line-height: 1;
   border-radius: 50%; transition: background 0.15s;
 }
 .dm-mic.dm-mic-inline:hover { background: rgba(99, 102, 241, 0.12); }
@@ -475,3 +475,47 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 .dm-attach-tip { flex: 1; font-size: 12px; color: #888; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dm-attach-close { color: '#999'; cursor: pointer; font-size: 13px; color: #999; padding: 2px; }
+
+/* ---- 侧栏内嵌全局导航(会话列表与菜单同层,☰ 切换) ---- */
+.dm-nav-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.dm-nav-toggle {
+  border: none; background: rgba(99, 102, 241, 0.08); color: #6366f1;
+  width: 28px; height: 28px; border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 15px; transition: background 0.15s;
+}
+.dm-nav-toggle:hover { background: rgba(99, 102, 241, 0.2); }
+.dm-nav-brand { font-weight: 700; font-size: 15px; color: #1f2328; letter-spacing: 0.2px; }
+
+/* 菜单美化:紧凑(管理端菜单多),适配浅色侧栏 */
+.dm-side-nav.ant-menu {
+  border-inline-end: none !important;
+  background: transparent;
+  font-size: 13px;
+}
+.dm-side-nav .ant-menu-item,
+.dm-side-nav .ant-menu-submenu-title {
+  height: 34px; line-height: 34px; margin-inline: 4px;
+  border-radius: 8px;
+}
+.dm-side-nav .ant-menu-item-icon { font-size: 14px; }
+.dm-side-nav .ant-menu-sub.ant-menu-inline > .ant-menu-item {
+  height: 30px; line-height: 30px;
+}
+.dm-side-nav .ant-menu-item-selected {
+  background: rgba(99, 102, 241, 0.1) !important; color: #4f46e5;
+}
+
+/* 附件缩略图:删除按钮悬浮图片右上角 */
+.dm-attach-thumb { position: relative; flex-shrink: 0; }
+.dm-attach-thumb .dm-attach-close {
+  position: absolute; top: -6px; right: -6px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; cursor: pointer; z-index: 2;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.dm-attach-thumb .dm-attach-close:hover { background: rgba(220, 38, 38, 0.85); }

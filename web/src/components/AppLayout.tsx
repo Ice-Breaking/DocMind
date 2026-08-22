@@ -367,33 +367,13 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
 
   /* ================= PC 布局 ================= */
   if (immersive) {
-    /* 对话页：全宽沉浸（单层会话列表），全局导航经顶栏按钮以抽屉唤出 */
+    /* 对话页：全宽沉浸。全局导航内嵌在 Chat 侧栏（buildNavItems 共享），
+       ☰ 按钮在侧栏头部切换菜单显隐——会话列表与菜单同处一层抽屉 */
     return (
       <Layout style={{ minHeight: '100vh' }}>
         <Content style={{ overflow: 'hidden', height: '100vh' }}>
           <Outlet />
         </Content>
-        <Drawer
-          placement="left"
-          open={navOpen}
-          onClose={() => setNavOpen(false)}
-          width={224}
-          closable={false}
-          styles={{ body: { padding: 0, background: '#001529' } }}
-        >
-          <div style={{ padding: 16, textAlign: 'center', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-            <Typography.Text strong style={{ color: '#fff' }}>DocMind</Typography.Text>
-          </div>
-          <Menu
-            theme="dark"
-            mode="inline"
-            selectedKeys={[selectedKey]}
-            defaultOpenKeys={openKeys}
-            items={menuItems}
-            onClick={(e) => { handleMenuClick(e); setNavOpen(false); }}
-            style={{ borderRight: 0 }}
-          />
-        </Drawer>
         {pwdModal}
       </Layout>
     );

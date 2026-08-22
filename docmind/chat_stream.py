@@ -90,7 +90,7 @@ current_query_vec: contextvars.ContextVar[tuple] = contextvars.ContextVar(
 def stream_events(agent, question: str, session_id: str = "",
                   user: str = "", assistant_id: str = "",
                   system_prompt: str | None = None,
-                  image_data: str | None = None) -> Iterator[dict]:
+                  image_data: 'str | list[str] | None' = None) -> Iterator[dict]:
     """核心应答流程，yield 结构化事件；任何异常收敛为 error+final，不挂空流
 
     assistant_id 非空且非 "default" 时视为自定义助手：跳过语义缓存

@@ -248,7 +248,7 @@ class ReActAgent:
         self.system_prompt = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
 
     def ask(self, question: str, note: str | None = None,
-            image_data: str | None = None):
+            image_data: 'str | list[str] | None' = None):
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答。
         note：服务端术语表命中的释义注解，作为系统消息注入（确定性，不依赖模型自觉）。
         image_data：图片 base64（可带 data:image/..;base64, 前缀）——当轮
@@ -369,9 +369,10 @@ class ReActAgent:
                            "人名、曲目、编号，如实说明不确定，严禁推测编造；"
                            "外文/艺文名与人物的对应关系不确定时标注「待确认」，"
                            "不要直接替换成自己猜测的知名人物。"})
+            urls = image_data if isinstance(image_data, list) else [image_data]
             self.history.append({"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": image_data}},
-                {"type": "text", "text": question or "请描述这张图片的内容。"},
+                *[{"type": "image_url", "image_url": {"url": u}} for u in urls],
+                {"type": "text", "text": question or "请描述这些图片的内容。"},
             ]})
         else:
             self.history.append({"role": "user", "content": question})

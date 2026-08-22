@@ -665,8 +665,9 @@ if __name__ == "__main__":
         question: str = Field(..., min_length=1, max_length=4000)
         session_id: str = Field(default="", max_length=64)
         assistant_id: str = Field(default="", max_length=64)
-        # 图片附件（base64，可带 data URL 前缀）：模型真看图（多模态），非仅 OCR
-        image_data: str = Field(default="", max_length=12_000_000)
+        # 图片附件（base64，可带 data URL 前缀）：模型真看图（多模态），非仅 OCR；
+        # 支持单张(str)或多张(list,上限 5)
+        image_data: "str | list[str]" = Field(default="", max_length=60_000_000)
 
     @demo.app.post("/api/chat/stream", include_in_schema=False)
     async def _chat_stream(body: ChatIn, request: _fastapi.Request):
@@ -689,11 +690,18 @@ if __name__ == "__main__":
 
         # 图片附件：落盘（前端 markdown 展示）+ data URL（多模态消息给模型看图）
         image_md = ""
-        img_data_url = None
-        if body.image_data:
+        img_list: list[str] = []
+        raw_imgs = body.image_data or []
+        for one in (raw_imgs if isinstance(raw_imgs, list) else [raw_imgs])[:5]:
+            if not one:
+                continue
             from docmind.docs_api import save_chat_image
-            _fname, img_data_url = save_chat_image(body.image_data)
-            image_md = f"![图片](/files/uploads/{_fname})\n\n"
+            _fname, _url = save_chat_image(one)
+            image_md += f"![图片](/files/uploads/{_fname})\n"
+            img_list.append(_url)
+        if image_md:
+            image_md += "\n"
+        img_data_url = img_list if img_list else None
 
         def gen():
             try:
