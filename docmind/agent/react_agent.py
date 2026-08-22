@@ -247,9 +247,13 @@ class ReActAgent:
     def __post_init__(self):
         self.system_prompt = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
 
-    def ask(self, question: str, note: str | None = None):
+    def ask(self, question: str, note: str | None = None,
+            image_data: str | None = None):
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答。
-        note：服务端术语表命中的释义注解，作为系统消息注入（确定性，不依赖模型自觉）"""
+        note：服务端术语表命中的释义注解，作为系统消息注入（确定性，不依赖模型自觉）。
+        image_data：图片 base64（可带 data:image/..;base64, 前缀）——当轮
+        user 消息以多模态 content 发送，LLM 调用自动切换 VISION_MODEL，
+        模型真正"看图"作答（而非仅 OCR 文本）"""
         if not self.history:
             self.history.append({"role": "system", "content": self.system_prompt})
 
@@ -310,7 +314,8 @@ class ReActAgent:
                 interp = _f_interp.result()
                 web_note, web_search_failed = _f_web.result()
         else:
-            interp = self._interpret_step(question)
+            # 图片消息以视觉理解为主，文本术语解读步跳过（省一次 LLM 调用）
+            interp = "" if image_data else self._interpret_step(question)
 
             # 优先级2：梗类问句联网
             if meme_hit:
@@ -348,11 +353,20 @@ class ReActAgent:
             return
         self.last_tools = set()
         # 多轮查询改写：仅多轮且含指代/过短时触发；改写失败静默回退原问题
-        rewritten = self._rewrite_if_followup(question)
-        if rewritten:
-            yield AgentStep("rewrite", f"多轮改写：{question} → {rewritten}")
-            question = rewritten
-        self.history.append({"role": "user", "content": question})
+        # （图片消息不改写：图片无法参与文本改写，且当轮已附视觉内容）
+        if not image_data:
+            rewritten = self._rewrite_if_followup(question)
+            if rewritten:
+                yield AgentStep("rewrite", f"多轮改写：{question} → {rewritten}")
+                question = rewritten
+        if image_data:
+            # 多模态 user 消息：文本 + 图片（qwen-vl 的 image_url 格式）
+            self.history.append({"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_data}},
+                {"type": "text", "text": question or "请描述这张图片的内容。"},
+            ]})
+        else:
+            self.history.append({"role": "user", "content": question})
 
         openai_tools = self.registry.to_openai_tools() or None
         recent_signatures: list[str] = []   # 重复调用检测
@@ -364,11 +378,16 @@ class ReActAgent:
             content_parts: list[str] = []
             tool_calls_acc: dict[int, dict] = {}
             usage = None
+            # 图片轮次整体用视觉模型（历史含多模态消息），VL 模型不支持思维链
+            _llm_model = config.VISION_MODEL if image_data else None
+            _thinking = config.ENABLE_THINKING and not image_data
             try:
-                with trace.span("llm-chat", kind="generation", model=config.CHAT_MODEL,
+                with trace.span("llm-chat", kind="generation",
+                                model=_llm_model or config.CHAT_MODEL,
                                 input=_brief_messages(self.history)) as ctx:
                     for chunk in chat_stream(self.history, tools=openai_tools,
-                                             enable_thinking=config.ENABLE_THINKING):
+                                             enable_thinking=_thinking,
+                                             model=_llm_model):
                         if getattr(chunk, "usage", None):
                             usage = chunk.usage
                         if not chunk.choices:

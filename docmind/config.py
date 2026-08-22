@@ -17,6 +17,8 @@ DASHSCOPE_BASE_URL = os.getenv(
 
 # 模型配置
 CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen-turbo")
+# 视觉模型：对话含图片时自动切换（须支持 image_url 多模态输入）
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 # 图片 OCR：百炼多模态模型（入库时抽取图中文字，结果磁盘缓存避免重复调用）
 OCR_MODEL = os.getenv("OCR_MODEL", "qwen-vl-ocr")

@@ -2074,6 +2074,8 @@ if __name__ == "__main__":
         question: str = Field(..., min_length=1, max_length=4000)
         session_id: str = Field(default="", max_length=64)
         assistant_id: str = Field(default="", max_length=64)
+        # 图片附件（base64，可带 data URL 前缀）：模型真看图（多模态），非仅 OCR
+        image_data: str = Field(default="", max_length=12_000_000)
 
     @demo.app.post("/api/chat/stream", include_in_schema=False)
     async def _chat_stream(body: ChatIn, request: _fastapi.Request):
@@ -2094,6 +2096,14 @@ if __name__ == "__main__":
         kb_ids = (assistant.get("kb_ids") if assistant else []) or []
         sp = (assistant.get("system_prompt") if assistant else "") or None
 
+        # 图片附件：落盘（前端 markdown 展示）+ data URL（多模态消息给模型看图）
+        image_md = ""
+        img_data_url = None
+        if body.image_data:
+            from docmind.docs_api import save_chat_image
+            _fname, img_data_url = save_chat_image(body.image_data)
+            image_md = f"![图片](/files/uploads/{_fname})\n\n"
+
         def gen():
             try:
                 SSE_ACTIVE_STREAMS.inc()
@@ -2105,14 +2115,18 @@ if __name__ == "__main__":
                 req_agent = create_agent(registry, system_prompt=sp)
                 for ev in chat_stream_mod.stream_events(
                         req_agent, question, body.session_id, user,
-                        assistant_id=assistant_id, system_prompt=sp):
+                        assistant_id=assistant_id, system_prompt=sp,
+                        image_data=img_data_url):
                     if ev["kind"] == "final":
                         final_raw = ev["answer"]
                     yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"
-                # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）
+                # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）。
+                # 图片消息：content 内嵌 markdown 图（前端气泡展示），
+                # raw 用纯问题文本（多轮上下文重建不带 base64）
                 if body.session_id and final_raw:
                     try:
-                        chatstore.append_message(body.session_id, "user", question,
+                        chatstore.append_message(body.session_id, "user",
+                                                 image_md + question, raw=question,
                                                  user=user, assistant_id=assistant_id)
                         chatstore.append_message(body.session_id, "assistant",
                                                  final_raw, raw=final_raw, user=user,

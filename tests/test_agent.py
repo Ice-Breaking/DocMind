@@ -22,7 +22,7 @@ def mk_tool_call(name, args='{"query": "测试"}'):
 
 def final_stream(text):
     """一次给出最终回答的流"""
-    def _stream(history, tools=None, enable_thinking=False):
+    def _stream(history, tools=None, enable_thinking=False, **kw):
         yield mk_chunk(content=text)
     return _stream
 
@@ -58,7 +58,7 @@ def test_tool_call_loop(registry, monkeypatch):
     """第一轮要求调工具，第二轮给终答；last_tools 记录工具名"""
     calls = {"n": 0}
 
-    def _stream(history, tools=None, enable_thinking=False):
+    def _stream(history, tools=None, enable_thinking=False, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             yield mk_chunk(tool_calls=[mk_tool_call("knowledge_search")])
@@ -76,7 +76,7 @@ def test_tool_call_loop(registry, monkeypatch):
 
 def test_max_steps_fallback(registry, monkeypatch):
     """一直要求调工具 → 达到 MAX_AGENT_STEPS 后兜底终止"""
-    def _stream(history, tools=None, enable_thinking=False):
+    def _stream(history, tools=None, enable_thinking=False, **kw):
         yield mk_chunk(tool_calls=[mk_tool_call("knowledge_search", '{"query": "x%d"}' % 0)])
 
     monkeypatch.setattr(ra, "chat_stream", _stream)
@@ -107,7 +107,7 @@ def _kb_miss_stream(final_text):
     """knowledge_search 返回无命中 + 最终回答无标注"""
     calls = {"n": 0}
 
-    def _stream(history, tools=None, enable_thinking=False):
+    def _stream(history, tools=None, enable_thinking=False, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             yield mk_chunk(tool_calls=[mk_tool_call("knowledge_search")])
@@ -149,7 +149,7 @@ def test_ood_guard_no_trigger_on_kb_hit(registry, monkeypatch):
     """KB 命中 → 不触发 OOD 标注"""
     calls = {"n": 0}
 
-    def _stream(history, tools=None, enable_thinking=False):
+    def _stream(history, tools=None, enable_thinking=False, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             yield mk_chunk(tool_calls=[mk_tool_call("knowledge_search")])

@@ -13,8 +13,8 @@ import {
   LikeOutlined,
   LikeFilled,
   DislikeFilled,
-  LoadingOutlined,
-  PictureOutlined,
+  FileImageOutlined,
+  CloseOutlined,
   PlusOutlined,
   RobotOutlined,
   MenuOutlined,
@@ -95,7 +95,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   );
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [recording, setRecording] = useState(false);
-  const [ocrLoading, setOcrLoading] = useState(false);
+  const [imageAttach, setImageAttach] = useState<{ dataUrl: string; base64: string } | null>(null);
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -318,8 +318,10 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- SSE send ---- */
   const handleSend = useCallback(
     async (question: string) => {
-      const q = question.trim();
+      const attach = imageAttach;
+      const q = question.trim() || (attach ? '请看这张图片。' : '');
       if (!q || streaming) return;
+      setImageAttach(null);
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -330,7 +332,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
 
       setMessages((prev) => [
         ...prev,
-        { key: userKey, role: 'user', content: q },
+        {
+          key: userKey,
+          role: 'user',
+          content: attach ? `![图片](${attach.dataUrl})\n\n${q}` : q,
+        },
         { key: assistantKey, role: 'assistant', content: '', loading: true },
       ]);
       setStreaming(true);
@@ -348,7 +354,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       try {
         while (retryCount <= MAX_RETRIES) {
           try {
-            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current)) {
+            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current, attach?.base64)) {
               if (ctrl.signal.aborted) break;
 
               switch (ev.event) {
@@ -494,7 +500,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         abortRef.current = null;
       }
     },
-    [streaming, msgApi, handleAuthError, loadSessions],
+    [streaming, imageAttach, msgApi, handleAuthError, loadSessions],
   );
 
   /* ---- cancel stream ---- */
@@ -1028,6 +1034,28 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
               </div>
             </div>
           )}
+          {imageAttach && (
+            <div
+              className="dm-img-chip"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '6px 10px', margin: '0 0 6px',
+                background: 'rgba(0,0,0,0.04)', borderRadius: 8,
+                width: 'fit-content',
+              }}
+            >
+              <img
+                src={imageAttach.dataUrl}
+                alt="附件"
+                style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6 }}
+              />
+              <span style={{ fontSize: 12, color: '#888' }}>图片将随消息发送</span>
+              <CloseOutlined
+                onClick={() => setImageAttach(null)}
+                style={{ color: '#999', cursor: 'pointer', fontSize: 12 }}
+              />
+            </div>
+          )}
           <Sender
             value={senderValue}
             onChange={setSenderValue}
@@ -1037,16 +1065,20 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             }}
             onCancel={handleCancel}
             loading={streaming}
-            placeholder="输入问题，Enter 发送…"
+            placeholder={imageAttach ? '可以补充文字说明，直接发送则由 AI 看图作答…' : '输入问题，Enter 发送…'}
             prefix={
               <button
                 className="dm-img-btn"
-                title="上传图片识别文字（识别结果填入输入框）"
-                disabled={ocrLoading}
+                title="附加图片（AI 直接看图作答）"
                 onClick={() => imgInputRef.current?.click()}
-                style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 4 }}
+                style={{
+                  border: 'none', background: 'none', cursor: 'pointer',
+                  display: 'inline-flex', alignItems: 'center',
+                  padding: 0, margin: 0, fontSize: 17, color: '#8c8c8c',
+                  lineHeight: 1, height: '100%',
+                }}
               >
-                {ocrLoading ? <LoadingOutlined /> : <PictureOutlined />}
+                <FileImageOutlined />
               </button>
             }
           />
@@ -1055,23 +1087,20 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             type="file"
             accept="image/png,image/jpeg,image/webp"
             style={{ display: 'none' }}
-            onChange={async (e) => {
+            onChange={(e) => {
               const f = e.target.files?.[0];
               e.target.value = '';
               if (!f) return;
-              setOcrLoading(true);
-              try {
-                const fd = new FormData();
-                fd.append('file', f);
-                const r = await fetch('/api/ocr-image', { method: 'POST', body: fd });
-                const d = await r.json();
-                if (!r.ok) throw new Error(d.detail || '识别失败');
-                if (d.text) setSenderValue((v) => (v ? `${v}\n${d.text}` : d.text));
-              } catch (err: any) {
-                msgApi.error('图片识别失败：' + (err?.message || '请重试'));
-              } finally {
-                setOcrLoading(false);
+              if (f.size > 8 * 1024 * 1024) {
+                msgApi.error('图片过大（上限 8MB），请压缩后重试');
+                return;
               }
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = String(reader.result || '');
+                setImageAttach({ dataUrl, base64: dataUrl });
+              };
+              reader.readAsDataURL(f);
             }}
           />
         </div>

@@ -190,7 +190,7 @@ def test_history_sliding_window(temp_db):
         def __init__(self):
             self.history = []
             self.last_tools = set()
-        def ask(self, q):
+        def ask(self, q, **kw):
             yield type("S", (), {"kind": "final", "text": "ok"})()
 
     agent = FakeAgent()

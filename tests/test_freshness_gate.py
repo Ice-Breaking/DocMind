@@ -12,7 +12,7 @@ class FakeAgent:
         self.last_tools = set()
         self.asked = []
 
-    def ask(self, q):
+    def ask(self, q, **kw):
         self.asked.append(q)
         yield SimpleNamespace(kind="final", text=self.answer)
 

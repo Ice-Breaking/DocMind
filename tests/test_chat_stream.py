@@ -17,7 +17,7 @@ class FakeAgent:
     def reset(self):
         self.history = []
 
-    def ask(self, q):
+    def ask(self, q, **kw):
         self.asked.append(q)
         if self.error:
             raise self.error

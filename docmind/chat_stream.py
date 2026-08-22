@@ -66,12 +66,15 @@ current_query_vec: contextvars.ContextVar[tuple] = contextvars.ContextVar(
 
 def stream_events(agent, question: str, session_id: str = "",
                   user: str = "", assistant_id: str = "",
-                  system_prompt: str | None = None) -> Iterator[dict]:
+                  system_prompt: str | None = None,
+                  image_data: str | None = None) -> Iterator[dict]:
     """核心应答流程，yield 结构化事件；任何异常收敛为 error+final，不挂空流
 
     assistant_id 非空且非 "default" 时视为自定义助手：跳过语义缓存
     （自定义 system_prompt/KB 的应答不应污染/命中默认缓存）；
-    system_prompt 覆盖多轮历史重建用的系统提示。"""
+    system_prompt 覆盖多轮历史重建用的系统提示。
+    image_data：图片 base64（data URL）——多模态消息当轮现算，
+    与时效问题一样跳过答案缓存读写。"""
     acl.set_current_user(user)   # 文档级 ACL：检索/缓存按当前用户过滤
     sp = system_prompt if system_prompt else SYSTEM_PROMPT
     # 非默认助手不走语义缓存（读与写都跳过），默认链路行为保持逐字节一致
@@ -98,10 +101,12 @@ def stream_events(agent, question: str, session_id: str = "",
             agent.history.extend({"role": r, "content": c} for r, c in pairs)
 
     # 2) 语义缓存：高频问题秒回，跳过整个 Agent 链路
-    #    时效闸门在前：时效性问题跳过缓存读写，强制走联网链路（铁律保证）
+    #    时效闸门在前：时效性问题跳过缓存读写，强制走联网链路（铁律保证）；
+    #    图片消息同样跳过（多模态当轮现算，且缓存为纯文本语义）
     q_vec = None
     freshness_critical = _is_freshness_critical(question)
-    if config.SEMANTIC_CACHE and use_cache and not freshness_critical:
+    bypass_cache = freshness_critical or image_data is not None
+    if config.SEMANTIC_CACHE and use_cache and not bypass_cache:
         try:
             q_vec = embed([question])[0]
             current_query_vec.set((question, q_vec))   # 供检索层复用（文本一致时）
@@ -124,8 +129,8 @@ def stream_events(agent, question: str, session_id: str = "",
             yield {"kind": "final", "answer": cached_answer}
             return
 
-    # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理（时效问题同样跳过）
-    if use_cache and not freshness_critical:
+    # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理（时效/图片问题同样跳过）
+    if use_cache and not bypass_cache:
         try:
             kb_ids = current_kb_ids.get() if assistant_id else []
             reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids, sp)
@@ -136,11 +141,11 @@ def stream_events(agent, question: str, session_id: str = "",
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             logger.warning(f"Agent推理缓存查询失败: {e}")
 
-    # 3) Agent 主链路：步骤与 token 逐条透传
+    # 3) Agent 主链路：步骤与 token 逐条透传（图片消息带多模态数据）
     final_answer = ""
     partial = ""
     try:
-        for step in agent.ask(question):
+        for step in agent.ask(question, image_data=image_data):
             if step.kind == "token":
                 partial += step.text
                 yield {"kind": "token", "text": step.text}
@@ -160,7 +165,7 @@ def stream_events(agent, question: str, session_id: str = "",
 
     # 4) 写语义缓存：与主链路同规则（实时类工具/错误答案/受限引用/时效问题不入缓存）
     if (config.SEMANTIC_CACHE and use_cache and q_vec is not None and final_answer
-            and not freshness_critical
+            and not bypass_cache
             and not final_answer.startswith("⚠️")
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
@@ -170,7 +175,7 @@ def stream_events(agent, question: str, session_id: str = "",
             logger.warning(f"语义缓存写入失败: {e}")
 
     # 5) 写 Agent 推理缓存：纯知识检索类问题可缓存（时效问题不入）
-    if (use_cache and final_answer and not freshness_critical
+    if (use_cache and final_answer and not bypass_cache
             and not final_answer.startswith("⚠️")
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):

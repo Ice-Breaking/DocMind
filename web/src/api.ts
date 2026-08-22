@@ -75,9 +75,11 @@ export async function* chatStream(
   sessionId: string,
   signal?: AbortSignal,
   assistantId?: string,
+  imageData?: string,
 ): AsyncGenerator<ChatEvent> {
   const payload: Record<string, unknown> = { question, session_id: sessionId };
   if (assistantId) payload.assistant_id = assistantId;
+  if (imageData) payload.image_data = imageData;
   const resp = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
