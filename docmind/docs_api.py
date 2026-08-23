@@ -76,9 +76,27 @@ def save_chat_image(data_url: str, owner: str = "") -> tuple[str, str]:
     return fname, f"data:{mime};base64,{b64}"
 
 
+# zip 类文档解压总量上限：防压缩炸弹(小文件声明巨大解压体积,
+# 解析器解压时耗尽内存/磁盘)。docx/xlsx 均为 zip 容器
+ZIP_MAX_UNCOMPRESSED = int(os.getenv("ZIP_MAX_UNCOMPRESSED",
+                                     str(500 * 1024 * 1024)))   # 500MB
+
+
 def _validate_content(filename: str, content: bytes) -> None:
-    """内容校验：二进制格式核对 magic bytes；文本格式须可 UTF-8 解码"""
+    """内容校验：magic bytes / UTF-8 / zip 炸弹体积"""
     ext = os.path.splitext(filename)[1].lower()
+    if ext in {".docx", ".xlsx"}:
+        import io as _io
+        import zipfile as _zf
+        try:
+            with _zf.ZipFile(_io.BytesIO(content)) as z:
+                total = sum(i.file_size for i in z.infolist())
+        except _zf.BadZipFile:
+            total = 0   # 非 zip 结构由 magic bytes 检查兜底
+        if total > ZIP_MAX_UNCOMPRESSED:
+            raise HTTPException(
+                status_code=400,
+                detail="文件解压后体积异常（疑似压缩炸弹），已拒绝")
     sig = _MAGIC_SIGNATURES.get(ext)
     if sig and not content.startswith(sig[0]):
         raise HTTPException(

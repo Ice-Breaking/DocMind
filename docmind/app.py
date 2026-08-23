@@ -377,6 +377,38 @@ if __name__ == "__main__":
         prevent_thread_lock=True,
     )
 
+    # ---- 安全中间件：CSRF Origin 校验 + 基础安全响应头 ----
+    # CSRF：全站 cookie 认证，浏览器发起的状态变更请求校验 Origin 与
+    # Host 同源（现代浏览器 SameSite=Lax 默认已缓解，此为显式第二道防线）；
+    # 无 Origin 头的调用（curl/服务端集成，开放 API 走 Bearer）不受影响
+    # 注意:launch 后 app 已 started,常规 @app.middleware 注册会 RuntimeError
+    # (与下方 metrics 中间件同样的降级命运)——改用重建 middleware stack 注入
+    from urllib.parse import urlparse as _urlparse
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from starlette.middleware import Middleware as _Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
+
+    async def _security_dispatch(request, call_next):
+        # CSRF:浏览器状态变更请求校验 Origin 与 Host 同源
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            origin = request.headers.get("origin", "")
+            if origin:
+                host = request.headers.get("host", "")
+                if host and _urlparse(origin).netloc != host:
+                    return _JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        return response
+
+    try:
+        demo.app.user_middleware.insert(
+            0, _Middleware(_BaseMW, dispatch=_security_dispatch))
+        demo.app.middleware_stack = demo.app.build_middleware_stack()
+    except Exception as _e:  # noqa: BLE001 - 注入失败不阻断启动,记录降级
+        print(f"[security] 中间件注入降级: {_e}")
+
     # ---- Prometheus 监控：/metrics 指标导出 + HTTP 请求埋点 ----
     # （不要求登录态：供 Prometheus 服务端抓取；只暴露计数器，不含敏感数据）
     import time as _metrics_time
@@ -391,11 +423,45 @@ if __name__ == "__main__":
 
     try:
         @demo.app.middleware("http")
+        @demo.app.middleware("http")
+        async def csrf_origin_guard(request, call_next):
+            """CSRF 防护：写请求校验 Origin 同源。
+
+            全站 cookie 认证无 CSRF token——浏览器默认 SameSite=Lax 已
+            缓解大部分跨站 POST，此处对显式携带 Origin 的跨站写请求再
+            拒一道（Origin 缺失的同源表单/服务端调用不受影响）"""
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                origin = request.headers.get("origin")
+                if origin and origin != "null":
+                    from urllib.parse import urlparse as _up
+                    o_host = _up(origin).netloc
+                    h_host = request.headers.get("host", "")
+                    if o_host and o_host != h_host:
+                        return JSONResponse(
+                            {"detail": "跨站请求被拒绝"},
+                            status_code=403)
+            return await call_next(request)
+
         async def metrics_middleware(request, call_next):
             try:
                 _client_ip.set((request.client.host if request.client else "") or "")
             except Exception:  # noqa: BLE001 - IP 记录失败不影响请求
                 pass
+            # CSRF 缓解：浏览器跨站写请求会自动携带 cookie(全站 cookie 认证)，
+            # Origin 与 Host 不一致即拒绝；服务端间调用(无 Origin 头)与
+            # 同源前端不受影响，开放 API 用 Bearer 认证同样不受影响
+            if request.method in ("POST", "PUT", "DELETE"):
+                _origin = request.headers.get("origin")
+                _host = request.headers.get("host")
+                if _origin and _host:
+                    from urllib.parse import urlparse as _urlparse
+                    try:
+                        _o_netloc = _urlparse(_origin).netloc
+                        if _o_netloc and _o_netloc != _host:
+                            from fastapi.responses import JSONResponse as _JR
+                            return _JR({"detail": "跨站请求已被拒绝"}, status_code=403)
+                    except Exception:  # noqa: BLE001 - 解析异常放行，不阻断主链路
+                        pass
             if request.url.path in ("/metrics", "/health"):
                 return await call_next(request)   # 探活/抓取自身不计入指标
             start = _metrics_time.time()
