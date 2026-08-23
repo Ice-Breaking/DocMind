@@ -388,14 +388,26 @@ if __name__ == "__main__":
     from starlette.middleware import Middleware as _Middleware
     from starlette.middleware.base import BaseHTTPMiddleware as _BaseMW
 
+    # 可信来源:Origin 与 Host 的 hostname 一致即放行(dev 前端 5173 经 vite
+    # 代理到 7860,端口不同但 hostname 相同——CSRF 防的是跨站域名,恶意站点
+    # 的 Origin hostname 必然不同,仍被拦截);另支持 TRUSTED_ORIGINS 兜底
+    _trusted = {o.strip() for o in
+                os.getenv("TRUSTED_ORIGINS", "").split(",") if o.strip()}
+
     async def _security_dispatch(request, call_next):
-        # CSRF:浏览器状态变更请求校验 Origin 与 Host 同源
+        # CSRF:浏览器状态变更请求校验 Origin 可信(hostname 级)
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin", "")
             if origin:
-                host = request.headers.get("host", "")
-                if host and _urlparse(origin).netloc != host:
-                    return _JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+                if origin in _trusted:
+                    pass   # 显式配置的可信来源
+                else:
+                    host = request.headers.get("host", "")
+                    o_hostname = _urlparse(origin).hostname or ""
+                    h_hostname = _urlparse(f"http://{host}").hostname if host else ""
+                    if not host or not o_hostname or o_hostname != h_hostname:
+                        return _JSONResponse(
+                            {"detail": "跨站请求被拒绝"}, status_code=403)
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
