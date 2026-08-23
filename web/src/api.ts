@@ -254,6 +254,7 @@ export interface AdminSession {
   title: string;
   msg_count: number;
   updated_at: number;
+  first_image?: string;   // 首条 user 消息携带的图片(审计页标题列缩略)
 }
 
 export interface AdminMessage {

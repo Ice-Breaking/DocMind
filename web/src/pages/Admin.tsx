@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Drawer,
+  Image,
   Spin,
   Table,
   Typography,
@@ -87,7 +88,22 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
       render: (ts: number) => new Date(ts * 1000).toLocaleString(),
     },
     { title: '用户', dataIndex: 'user', key: 'user', width: 120 },
-    { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
+    {
+      title: '标题',
+      dataIndex: 'title',
+      key: 'title',
+      ellipsis: true,
+      render: (v: string, r: any) => (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          {r.first_image && (
+            <Image src={r.first_image} alt="首图" width={32} height={32}
+              style={{ objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+              preview={{ mask: '预览' }} />
+          )}
+          <span>{v || '-'}</span>
+        </span>
+      ),
+    },
     { title: '消息数', dataIndex: 'msg_count', key: 'msg_count', width: 90 },
     {
       title: '操作',

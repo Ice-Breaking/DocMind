@@ -239,7 +239,12 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
         )
     else:
         if not row["title"] and role == "user":
-            c.execute("UPDATE sessions SET title = ? WHERE id = ?", (content[:30], session_id))
+            # 标题取首条 user 消息：剥离图片 markdown（列表/审计页标题列
+            # 会直接渲染标题文本，源码串出来既难看又占宽），以 [图片] 占位
+            import re as _re_title
+            clean = _re_title.sub(r'[图片]', content or '')
+            clean = _re_title.sub(r'\s+', ' ', clean)[:30].strip() or '[图片]'
+            c.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean, session_id))
         if not row["user"] and user:
             c.execute("UPDATE sessions SET user = ? WHERE id = ?", (user, session_id))
         c.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
@@ -622,14 +627,24 @@ def set_badcase_status(feedback_id: int, status: str, note: str = "") -> bool:
 
 
 def list_all_sessions(limit: int = 100) -> list[dict]:
-    """审计：全部用户的会话列表"""
+    """审计：全部用户的会话列表（first_image：首条 user 消息携带的
+    图片 URL，审计页标题列渲染缩略图供直接查看）"""
+    import re as _re_img
+    _img_re = _re_img.compile(r'!\[[^\]]*\]\((/files/uploads/[^)]+)\)')
     rows = _conn().execute(
-        """SELECT s.id, s.user, s.title, s.updated_at, COUNT(m.id) AS msg_count
+        """SELECT s.id, s.user, s.title, s.updated_at, COUNT(m.id) AS msg_count,
+               (SELECT m2.content FROM messages m2
+                 WHERE m2.session_id = s.id AND m2.role = 'user'
+                 ORDER BY m2.seq LIMIT 1) AS first_user_content
            FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
            GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?""", (limit,)).fetchall()
-    return [{"id": r["id"], "user": r["user"] or "(匿名)", "title": r["title"],
-             "msg_count": r["msg_count"], "updated_at": r["updated_at"]}
-            for r in rows]
+    out = []
+    for r in rows:
+        m = _img_re.search(r["first_user_content"] or "")
+        out.append({"id": r["id"], "user": r["user"] or "(匿名)", "title": r["title"],
+                    "msg_count": r["msg_count"], "updated_at": r["updated_at"],
+                    "first_image": m.group(1) if m else ""})
+    return out
 
 
 def get_messages_full(session_id: str) -> list[dict]:
