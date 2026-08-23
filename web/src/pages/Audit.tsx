@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -49,37 +50,32 @@ const SENSITIVE_ACTIONS = new Set([
 export default function Audit() {
   const { message: msgApi } = App.useApp();
 
-  const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [actor, setActor] = useState('');
   const [action, setAction] = useState('');
   const [days, setDays] = useState(30);
-  const [exporting, setExporting] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setEvents(await fetchAudit({ actor, action, days }));
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [actor, action, days, msgApi]);
+  // 事件流水：过滤参数进 queryKey，变化自动重拉；失败保留旧数据仅弹 toast
+  const {
+    data: events = [],
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<AuditEvent[], Error>({
+    queryKey: ['audit', { actor, action, days }],
+    queryFn: () => fetchAudit({ actor, action, days }),
+  });
 
-  useEffect(() => { load(); }, [load]);
+  /* 加载失败提示：与旧实现一致走全局 message */
+  useEffect(() => {
+    if (error) msgApi.error(error.message || '加载失败');
+  }, [error, msgApi]);
 
-  const handleExport = async () => {
-    setExporting(true);
-    try {
-      await exportAuditCsv({ actor, action, days });
-      msgApi.success('CSV 已导出');
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '导出失败');
-    } finally {
-      setExporting(false);
-    }
-  };
+  // CSV 导出：一次性动作，不涉及缓存失效
+  const exportMut = useMutation({
+    mutationFn: () => exportAuditCsv({ actor, action, days }),
+    onSuccess: () => msgApi.success('CSV 已导出'),
+    onError: (e: Error) => msgApi.error(e.message || '导出失败'),
+  });
 
   const columns: ColumnsType<AuditEvent> = [
     {
@@ -127,8 +123,8 @@ export default function Audit() {
         </div>
         <Button
           icon={<DownloadOutlined />}
-          loading={exporting}
-          onClick={handleExport}
+          loading={exportMut.isPending}
+          onClick={() => exportMut.mutate()}
         >
           导出 CSV
         </Button>
@@ -163,7 +159,7 @@ export default function Audit() {
           onChange={(e) => setActor(e.target.value)}
           onSearch={setActor}
         />
-        <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>
       </Space>
 
       <Table scroll={{ x: "max-content" }}

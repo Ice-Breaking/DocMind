@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Alert,
@@ -54,27 +55,81 @@ interface FormValues {
  */
 export default function Models() {
   const { message: msgApi } = App.useApp();
-
-  const [models, setModels] = useState<ModelConfig[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [testing, setTesting] = useState<number | null>(null);
+  const queryClient = useQueryClient();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ModelConfig | null>(null);
-  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<FormValues>();
 
-  const load = useCallback(async () => {
-    try {
-      setModels(await fetchModels());
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
+  // 模型清单：按 kind 分组渲染，失败保留旧数据仅弹 toast
+  const {
+    data: models = [],
+    isPending: loading,
+    error,
+  } = useQuery<ModelConfig[], Error>({
+    queryKey: ['models'],
+    queryFn: () => fetchModels(),
+  });
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (error) msgApi.error(error.message || '加载失败');
+  }, [error, msgApi]);
+
+  /* ---- 新增 / 编辑（同一 Modal，按 editing 区分文案） ---- */
+  const saveMut = useMutation({
+    mutationFn: async (values: FormValues) => {
+      if (editing) {
+        await updateModel(editing.id, {
+          name: values.name,
+          base_url: values.base_url,
+          api_key: values.api_key || undefined,   // 留空 = 不改动
+          model_name: values.model_name,
+        });
+      } else {
+        await createModel(values);
+      }
+    },
+    onSuccess: () => {
+      msgApi.success(editing ? '模型已更新' : '模型已添加，点击「设为生效」启用');
+      setModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '保存失败'),
+  });
+  const saving = saveMut.isPending;
+
+  /* ---- 连通性测试：variables 即被测模型，驱动行级 loading ---- */
+  const testMut = useMutation({
+    mutationFn: (m: ModelConfig) => testModel(m.id),
+    onSuccess: (r) => {
+      if (r.ok) {
+        msgApi.success(`连通正常（${r.latency_ms} ms）：${r.detail}`);
+      } else {
+        msgApi.error(`连通失败：${r.detail}`);
+      }
+    },
+    onError: (e: Error) => msgApi.error(e.message || '测试失败'),
+  });
+  const testingId = testMut.isPending ? testMut.variables?.id ?? null : null;
+
+  /* ---- 生效切换 / 删除 ---- */
+  const activateMut = useMutation({
+    mutationFn: (m: ModelConfig) => activateModel(m.id),
+    onSuccess: (_data, m) => {
+      msgApi.success(`「${m.name}」已设为生效（${KIND_CFG[m.kind]?.label}）`);
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '操作失败'),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (m: ModelConfig) => deleteModel(m.id),
+    onSuccess: () => {
+      msgApi.success('模型已删除');
+      queryClient.invalidateQueries({ queryKey: ['models'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
 
   const openCreate = () => {
     setEditing(null);
@@ -103,63 +158,7 @@ export default function Models() {
     } catch {
       return;
     }
-    setSaving(true);
-    try {
-      if (editing) {
-        await updateModel(editing.id, {
-          name: values.name,
-          base_url: values.base_url,
-          api_key: values.api_key || undefined,   // 留空 = 不改动
-          model_name: values.model_name,
-        });
-        msgApi.success('模型已更新');
-      } else {
-        await createModel(values);
-        msgApi.success('模型已添加，点击「设为生效」启用');
-      }
-      setModalOpen(false);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleTest = async (m: ModelConfig) => {
-    setTesting(m.id);
-    try {
-      const r = await testModel(m.id);
-      if (r.ok) {
-        msgApi.success(`连通正常（${r.latency_ms} ms）：${r.detail}`);
-      } else {
-        msgApi.error(`连通失败：${r.detail}`);
-      }
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '测试失败');
-    } finally {
-      setTesting(null);
-    }
-  };
-
-  const handleActivate = async (m: ModelConfig) => {
-    try {
-      await activateModel(m.id);
-      msgApi.success(`「${m.name}」已设为生效（${KIND_CFG[m.kind]?.label}）`);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '操作失败');
-    }
-  };
-
-  const handleDelete = async (m: ModelConfig) => {
-    try {
-      await deleteModel(m.id);
-      msgApi.success('模型已删除');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
+    saveMut.mutate(values);
   };
 
   const columns: ColumnsType<ModelConfig> = [
@@ -193,13 +192,13 @@ export default function Models() {
           <Button
             size="small"
             icon={<ThunderboltOutlined />}
-            loading={testing === m.id}
-            onClick={() => handleTest(m)}
+            loading={testingId === m.id}
+            onClick={() => testMut.mutate(m)}
           >
             测试
           </Button>
           {m.is_active !== 1 && (
-            <Button size="small" type="primary" ghost onClick={() => handleActivate(m)}>设为生效</Button>
+            <Button size="small" type="primary" ghost onClick={() => activateMut.mutate(m)}>设为生效</Button>
           )}
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
           <Popconfirm
@@ -207,7 +206,7 @@ export default function Models() {
             okText="删除"
             okButtonProps={{ danger: true }}
             cancelText="取消"
-            onConfirm={() => handleDelete(m)}
+            onConfirm={() => deleteMut.mutate(m)}
           >
             <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
           </Popconfirm>

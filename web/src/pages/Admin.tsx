@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -30,14 +31,8 @@ const { Text } = Typography;
 export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const { message: msgApi } = App.useApp();
 
-  const [sessions, setSessions] = useState<AdminSession[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeTitle, setActiveTitle] = useState('');
-  const [messages, setMessages] = useState<AdminMessage[]>([]);
-  const [msgLoading, setMsgLoading] = useState(false);
+  const [activeSession, setActiveSession] = useState<AdminSession | null>(null);
 
   const handleAuthError = useCallback(
     async (e: unknown) => {
@@ -52,31 +47,33 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
     [msgApi, onLogout],
   );
 
-  useEffect(() => {
-    (async () => {
-      try {
-        setSessions(await fetchAdminSessions());
-      } catch (e: unknown) {
-        if (!(await handleAuthError(e))) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // 会话列表：401 走统一登出流程，其余错误页面内显示 + 重试
+  const {
+    data: sessions = [],
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<AdminSession[], Error>({
+    queryKey: ['adminSessions'],
+    queryFn: () => fetchAdminSessions(),
+  });
 
-  const openDrawer = async (s: AdminSession) => {
-    setActiveTitle(s.title || '(空会话)');
+  useEffect(() => {
+    if (error?.message === 'UNAUTHORIZED') void handleAuthError(error);
+  }, [error, handleAuthError]);
+
+  // 消息按需加载：随 Drawer 开关与选中会话自动启停（失败静默，对齐旧行为）
+  const { data: msgsData = [], isPending: msgLoading } = useQuery<AdminMessage[]>({
+    queryKey: ['adminMessages', activeSession?.id],
+    queryFn: () => fetchAdminMessages(activeSession!.id),
+    enabled: drawerOpen && !!activeSession,
+  });
+  const messages = msgsData;
+
+  /* ---- 打开会话详情（拉取交由上方 useQuery） ---- */
+  const openDrawer = (s: AdminSession) => {
+    setActiveSession(s);
     setDrawerOpen(true);
-    setMsgLoading(true);
-    try {
-      setMessages(await fetchAdminMessages(s.id));
-    } catch (e: unknown) {
-      await handleAuthError(e);
-    } finally {
-      setMsgLoading(false);
-    }
   };
 
   const columns: ColumnsType<AdminSession> = [
@@ -124,10 +121,10 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
 
       {loading ? (
         <Spin style={{ display: 'block', margin: '80px auto' }} size="large" />
-      ) : error ? (
+      ) : error && error.message !== 'UNAUTHORIZED' ? (
         <Card>
-          <Text type="danger">加载失败：{error}</Text>
-          <Button style={{ marginLeft: 12 }} onClick={() => window.location.reload()}>重试</Button>
+          <Text type="danger">加载失败：{error.message || String(error)}</Text>
+          <Button style={{ marginLeft: 12 }} onClick={() => refetch()}>重试</Button>
         </Card>
       ) : (
         <Table scroll={{ x: "max-content" }}
@@ -140,7 +137,7 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
       )}
 
       <Drawer
-        title={`会话内容 — ${activeTitle}`}
+        title={`会话内容 — ${activeSession?.title || '(空会话)'}`}
         placement="right"
         width={600}
         open={drawerOpen}

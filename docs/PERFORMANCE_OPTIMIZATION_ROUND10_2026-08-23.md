@@ -154,12 +154,72 @@ useEffect(() => {
 | 三页手写数据获取代码 | ~110 行 | ~45 行 useQuery 声明 |
 | 已迁移页面 | 5 页 | 8 页(+Usage/Badcases/Traces) |
 
-## 七、遗留说明(迁移路线)
+## 七、第五期:管理端 CRUD 页迁移(Admin / Audit / Models / Assistants / ApiKeys / Users)
 
-- 第五期候选:Models / Audit / Admin / Assistants / ApiKeys /
-  Users 等管理端 CRUD 页(useMutation + invalidateQueries);
-- Eval / KnowledgeBases / Settings / RetrievalLab 体量大或交互特殊,
-  单独评估;Home/Login 无数据层需求;
+### `Admin.tsx`(176 → 173 行)
+
+- 会话列表 → `['adminSessions']` query;401(`UNAUTHORIZED`)经
+  error effect 走统一登出流程,其余错误页面内显示 + `refetch()`
+  重试(替代旧 `window.location.reload()` 整页刷新);
+- Drawer 消息回看 → `['adminMessages', sid]` query,
+  `enabled: drawerOpen && !!activeSession`,失败静默(对齐旧行为);
+  `activeTitle` state 由选中会话对象派生,少两个 state。
+
+### `Audit.tsx`(185 → 181 行)
+
+- 事件流水 → `['audit', { actor, action, days }]` query(过滤参数
+  进 key,变化自动重拉);失败保留旧数据仅弹 toast;
+- CSV 导出 → `exportMut`(一次性动作,不失效缓存),按钮 loading 接
+  `isPending`;刷新 → `refetch()`。
+
+### `Models.tsx`(303 → 302 行)
+
+- 模型清单 → `['models']` query,失败 toast 保留旧数据;
+- 五个动作全部 mutation 化:`saveMut`(create/update 同 Modal,按
+  editing 分支文案)、`testMut`、`activateMut`、`deleteMut`;
+  行级测试 loading 用 `testMut.variables?.id` 驱动,替掉手写
+  `testing` state;
+- 生效切换 / 删除 / 保存成功后统一 `invalidateQueries(['models'])`。
+
+### `Assistants.tsx`(345 → 353 行)
+
+- `Promise.all([fetchAssistants(), fetchKbs()])` → `['assistants']`
+  + `['kbs']` 双 query,聚合 loading/error 保持「任一失败整页报错 +
+  重试」语义;`['kbs']` 与 Traces / ApiKeys 共享缓存(retry off);
+- 新建/编辑 → `saveMut`,删除 → `deleteMut`;成功后失效
+  `['assistants']`;
+- 注意:`kbs = kbsQ.data ?? []` 需包 `useMemo` 稳定引用,否则下游
+  `kbNameMap` 的 useMemo 依赖每帧变化(lint 报
+  exhaustive-deps)。
+
+### `ApiKeys.tsx`(336 → 342 行)
+
+- 密钥清单 → `['apiKeys']` query(kb 选项共享 `['kbs']`);
+- 创建/吊销/轮换 → 三个 mutation;创建与轮换成功都会弹明文一次性
+  展示 Modal 并重置连通性测试状态,随后失效 `['apiKeys']`;
+- 明文展示 Modal 内的开放检索试调用保持原生 fetch(一次性动作,
+  不进缓存层)。
+
+### `Users.tsx`(415 → 416 行)
+
+- 用户清单 → `['users']`,头像审核队列 → `['avatarReviews']`,
+  聚合 loading;users 失败弹 toast;
+- 审核通过/驳回 → `reviewMut`(同时失效两缓存,pending_avatar
+  标记随列表更新);新建 → `createMut`(成功弹初始密码一次性
+  Modal);重置密码 → `resetPwdMut`;管理员开关 →
+  `toggleAdminMut`;删除 → `deleteMut`(modalApi 级联清理提示逐字保留)。
+
+### 效果
+
+| 指标 | 迁移前 | 迁移后 |
+|---|---|---|
+| 六页手写数据获取代码 | ~150 行 | ~60 行 useQuery/useMutation 声明 |
+| 已迁移页面 | 8 页 | 14 页(+Admin/Audit/Models/Assistants/ApiKeys/Users) |
+
+## 八、遗留说明(迁移路线)
+
+- 第六期候选:Eval / KnowledgeBases / Settings / RetrievalLab
+  体量大或交互特殊,单独评估;Home/Login 无数据层需求;
 - Chat 页的 loadSessions/loadMessages 属会话编排(与 SSE 流耦合),
   放在迁移末期单独处理。
 

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -60,16 +61,28 @@ interface AssistantFormValues {
 
 export default function Assistants({ me }: { me: Me }) {
   const { message: msgApi } = App.useApp();
-
-  const [assistants, setAssistants] = useState<Assistant[]>([]);
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Assistant | null>(null);
-  const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<AssistantFormValues>();
+
+  // 助手清单 + 知识库选项（['kbs'] 与 Traces 页共享缓存）
+  const assistantsQ = useQuery<Assistant[], Error>({
+    queryKey: ['assistants'],
+    queryFn: () => fetchAssistants(),
+  });
+  const kbsQ = useQuery<KnowledgeBase[], Error>({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+    retry: false, // 知识库接口失败不重试，静默降级为空列表
+  });
+
+  const assistants = assistantsQ.data ?? [];
+  // 稳定引用：避免每次 render 生成新数组破坏下游 useMemo/useEffect 依赖
+  const kbs = useMemo(() => kbsQ.data ?? [], [kbsQ.data]);
+  const loading = assistantsQ.isPending || kbsQ.isPending;
+  const error = assistantsQ.error || kbsQ.error;
 
   const kbNameMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -77,21 +90,10 @@ export default function Assistants({ me }: { me: Me }) {
     return m;
   }, [kbs]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [list, kbList] = await Promise.all([fetchAssistants(), fetchKbs()]);
-      setAssistants(list);
-      setKbs(kbList);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  /* 任一来源失败 → 页面级错误 + 重试（保持旧「全部就绪才渲染」语义） */
+  useEffect(() => {
+    if (error) console.warn('[Assistants] load failed:', error.message);
+  }, [error]);
 
   /* ---- Modal open helpers ---- */
 
@@ -120,15 +122,8 @@ export default function Assistants({ me }: { me: Me }) {
 
   /* ---- Submit ---- */
 
-  const handleSubmit = async () => {
-    let values: AssistantFormValues;
-    try {
-      values = await form.validateFields();
-    } catch {
-      return;
-    }
-    setSaving(true);
-    try {
+  const saveMut = useMutation({
+    mutationFn: async (values: AssistantFormValues) => {
       const modelConfig: Record<string, unknown> = editing
         ? { ...editing.model_config }
         : {};
@@ -144,7 +139,6 @@ export default function Assistants({ me }: { me: Me }) {
           kb_ids: values.kb_ids || [],
           model_config: modelConfig,
         });
-        msgApi.success('助手已更新');
       } else {
         await createAssistant({
           name: values.name,
@@ -153,27 +147,41 @@ export default function Assistants({ me }: { me: Me }) {
           kb_ids: values.kb_ids || [],
           model_config: modelConfig,
         });
-        msgApi.success('助手已创建');
       }
+    },
+    onSuccess: () => {
+      msgApi.success(editing ? '助手已更新' : '助手已创建');
       setModalOpen(false);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setSaving(false);
+      queryClient.invalidateQueries({ queryKey: ['assistants'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '保存失败'),
+  });
+  const saving = saveMut.isPending;
+
+  const handleSubmit = async () => {
+    let values: AssistantFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
     }
+    saveMut.mutate(values);
   };
 
   /* ---- Delete ---- */
 
-  const handleDelete = async (a: Assistant) => {
-    try {
-      await deleteAssistant(a.id);
+  const deleteMut = useMutation({
+    mutationFn: (a: Assistant) => deleteAssistant(a.id),
+    onSuccess: () => {
       msgApi.success('助手已删除');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
+      queryClient.invalidateQueries({ queryKey: ['assistants'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
+
+  const refetchAll = () => {
+    void assistantsQ.refetch();
+    if (kbsQ.isError) void kbsQ.refetch();
   };
 
   /* ---- Render ---- */
@@ -201,8 +209,8 @@ export default function Assistants({ me }: { me: Me }) {
         <Spin style={{ display: 'block', margin: '80px auto' }} size="large" />
       ) : error ? (
         <Card>
-          <Text type="danger">加载失败：{error}</Text>
-          <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
+          <Text type="danger">加载失败：{error.message || String(error)}</Text>
+          <Button style={{ marginLeft: 12 }} onClick={refetchAll}>重试</Button>
         </Card>
       ) : assistants.length === 0 ? (
         <Empty description="暂无助手，点击右上角新建" />
@@ -235,7 +243,7 @@ export default function Assistants({ me }: { me: Me }) {
                         okText="删除"
                         okButtonProps={{ danger: true }}
                         cancelText="取消"
-                        onConfirm={() => handleDelete(a)}
+                        onConfirm={() => deleteMut.mutate(a)}
                       >
                         <Button type="link" danger icon={<DeleteOutlined />}>
                           删除

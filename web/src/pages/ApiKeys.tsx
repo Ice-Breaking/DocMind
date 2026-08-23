@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Alert,
@@ -43,18 +44,34 @@ function formatTime(ts: number | null): string {
  */
 export default function ApiKeys() {
   const { message: msgApi } = App.useApp();
-
-  const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [form] = Form.useForm<{ name: string; scope_kb_ids: string[]; expires_days?: number }>();
 
   /** 创建/轮换成功后的一次性明文展示 */
   const [secretModal, setSecretModal] = useState<{ name: string; key: string } | null>(null);
   const [keyTest, setKeyTest] = useState<{ status: 'idle' | 'loading' | 'ok' | 'fail'; msg?: string }>({ status: 'idle' });
+
+  // 密钥清单 + 知识库选项（['kbs'] 与 Traces / Assistants 共享缓存，失败静默）
+  const keysQ = useQuery<ApiKey[], Error>({
+    queryKey: ['apiKeys'],
+    queryFn: () => fetchApiKeys(),
+  });
+  const kbsQ = useQuery<KnowledgeBase[], Error>({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+    retry: false,
+  });
+
+  const keys = keysQ.data ?? [];
+  const kbs = kbsQ.data ?? [];
+  const loading = keysQ.isPending || kbsQ.isPending;
+
+  /* 加载失败提示：与旧实现一致走全局 message */
+  useEffect(() => {
+    if (keysQ.error) msgApi.error(keysQ.error.message || '加载失败');
+  }, [keysQ.error, msgApi]);
 
   /** 创建成功(明文在手)时试调用一次开放检索,提前发现 scope/网络问题 */
   const testKey = async () => {
@@ -76,21 +93,25 @@ export default function ApiKeys() {
     }
   };
 
-  const load = useCallback(async () => {
-    try {
-      const [ks, kbList] = await Promise.all([fetchApiKeys(), fetchKbs()]);
-      setKeys(ks);
-      setKbs(kbList);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
-
-  useEffect(() => { load(); }, [load]);
-
   const kbName = (id: string) => kbs.find((k) => k.id === id)?.name || id;
+
+  /* ---- 创建：成功后弹明文一次性展示 Modal ---- */
+  const createMut = useMutation({
+    mutationFn: (values: { name: string; scope_kb_ids: string[]; expires_days?: number }) =>
+      createApiKey({
+        name: values.name,
+        scope_kb_ids: values.scope_kb_ids || [],
+        expires_days: values.expires_days,
+      }),
+    onSuccess: (k) => {
+      setCreateOpen(false);
+      form.resetFields();
+      setSecretModal({ name: k.name, key: k.key || '' });
+      setKeyTest({ status: 'idle' });
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '创建失败'),
+  });
 
   const handleCreate = async () => {
     let values: { name: string; scope_kb_ids: string[]; expires_days?: number };
@@ -99,44 +120,29 @@ export default function ApiKeys() {
     } catch {
       return;
     }
-    setCreating(true);
-    try {
-      const k = await createApiKey({
-        name: values.name,
-        scope_kb_ids: values.scope_kb_ids || [],
-        expires_days: values.expires_days,
-      });
-      setCreateOpen(false);
-      form.resetFields();
-      setSecretModal({ name: k.name, key: k.key || '' }); setKeyTest({ status: 'idle' });
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '创建失败');
-    } finally {
-      setCreating(false);
-    }
+    createMut.mutate(values);
   };
 
-  const handleRevoke = async (k: ApiKey) => {
-    try {
-      await revokeApiKey(k.id);
+  /* ---- 吊销 / 轮换 ---- */
+  const revokeMut = useMutation({
+    mutationFn: (k: ApiKey) => revokeApiKey(k.id),
+    onSuccess: () => {
       msgApi.success('密钥已吊销，立即失效');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '吊销失败');
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '吊销失败'),
+  });
 
-  const handleRotate = async (k: ApiKey) => {
-    try {
-      const nk = await rotateApiKey(k.id);
+  const rotateMut = useMutation({
+    mutationFn: (k: ApiKey) => rotateApiKey(k.id),
+    onSuccess: (nk) => {
       msgApi.success('旧密钥已吊销，新密钥已签发');
-      setSecretModal({ name: nk.name, key: nk.key || '' }); setKeyTest({ status: 'idle' });
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '轮换失败');
-    }
-  };
+      setSecretModal({ name: nk.name, key: nk.key || '' });
+      setKeyTest({ status: 'idle' });
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '轮换失败'),
+  });
 
   const copyKey = async () => {
     if (!secretModal) return;
@@ -199,7 +205,7 @@ export default function ApiKeys() {
             description="旧密钥将立即吊销，集成方需更新为新密钥。继续？"
             okText="轮换"
             cancelText="取消"
-            onConfirm={() => handleRotate(k)}
+            onConfirm={() => rotateMut.mutate(k)}
           >
             <Button size="small" icon={<SyncOutlined />}>轮换</Button>
           </Popconfirm>
@@ -210,7 +216,7 @@ export default function ApiKeys() {
               okText="吊销"
               okButtonProps={{ danger: true }}
               cancelText="取消"
-              onConfirm={() => handleRevoke(k)}
+              onConfirm={() => revokeMut.mutate(k)}
             >
               <Button size="small" danger icon={<StopOutlined />}>吊销</Button>
             </Popconfirm>
@@ -260,7 +266,7 @@ export default function ApiKeys() {
         open={createOpen}
         onOk={handleCreate}
         onCancel={() => setCreateOpen(false)}
-        confirmLoading={creating}
+        confirmLoading={createMut.isPending}
         okText="创建"
         cancelText="取消"
         destroyOnClose

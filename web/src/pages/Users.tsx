@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   App,
@@ -46,51 +47,67 @@ const { Text } = Typography;
  */
 export default function Users({ me }: { me: Me }) {
   const { message: msgApi, modal: modalApi } = App.useApp();
-
-  const [users, setUsers] = useState<AdminUser[]>([]);
-  const [reviews, setReviews] = useState<PendingAvatarReview[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   /* ---- 新建用户 Modal ---- */
   const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [form] = Form.useForm<{ username: string; password: string; is_admin: boolean }>();
 
   /* ---- 重置密码 Modal ---- */
   const [pwdTarget, setPwdTarget] = useState<AdminUser | null>(null);
   const [pwdText, setPwdText] = useState('');
-  const [pwdSaving, setPwdSaving] = useState(false);
 
   /* ---- 初始密码一次性展示 Modal ---- */
   const [credModal, setCredModal] = useState<{ username: string; password: string } | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [us, rv] = await Promise.all([fetchUsers(), fetchAvatarReviews()]);
-      setUsers(us);
-      setReviews(rv);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
+  // 用户清单 + 头像审核队列：聚合 loading，任一失败弹 toast（保留旧数据）
+  const usersQ = useQuery<AdminUser[], Error>({
+    queryKey: ['users'],
+    queryFn: () => fetchUsers(),
+  });
+  const reviewsQ = useQuery<PendingAvatarReview[], Error>({
+    queryKey: ['avatarReviews'],
+    queryFn: () => fetchAvatarReviews(),
+  });
 
-  useEffect(() => { load(); }, [load]);
+  const users = usersQ.data ?? [];
+  const reviews = reviewsQ.data ?? [];
+  const loading = usersQ.isPending || reviewsQ.isPending;
+
+  useEffect(() => {
+    if (usersQ.error) msgApi.error(usersQ.error.message || '加载失败');
+  }, [usersQ.error, msgApi]);
 
   /* ---- 头像审核 ---- */
-  const handleReview = async (username: string, action: 'approve' | 'reject') => {
-    try {
-      await reviewAvatar(username, action);
-      msgApi.success(action === 'approve' ? `已通过 ${username} 的头像` : `已驳回 ${username} 的头像`);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '操作失败');
-    }
-  };
+  const reviewMut = useMutation({
+    mutationFn: (v: { username: string; action: 'approve' | 'reject' }) =>
+      reviewAvatar(v.username, v.action),
+    onSuccess: (_d, v) => {
+      msgApi.success(v.action === 'approve' ? `已通过 ${v.username} 的头像` : `已驳回 ${v.username} 的头像`);
+      queryClient.invalidateQueries({ queryKey: ['avatarReviews'] });
+      queryClient.invalidateQueries({ queryKey: ['users'] }); // pending_avatar 标记随之更新
+    },
+    onError: (e: Error) => msgApi.error(e.message || '操作失败'),
+  });
 
-  /* ---- 新建 ---- */
+  /* ---- 新建：成功后弹初始密码一次性展示 ---- */
+  const createMut = useMutation({
+    mutationFn: (values: { username: string; password: string; is_admin: boolean }) =>
+      createUser({
+        username: values.username,
+        password: values.password,
+        is_admin: values.is_admin ?? false,
+      }),
+    onSuccess: (_d, values) => {
+      msgApi.success(`用户 ${values.username} 已创建，首次登录须修改密码`);
+      setCredModal({ username: values.username, password: values.password });
+      setCreateOpen(false);
+      form.resetFields();
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '创建失败'),
+  });
+
   const handleCreate = async () => {
     let values: { username: string; password: string; is_admin: boolean };
     try {
@@ -98,69 +115,53 @@ export default function Users({ me }: { me: Me }) {
     } catch {
       return;
     }
-    setCreating(true);
-    try {
-      await createUser({
-        username: values.username,
-        password: values.password,
-        is_admin: values.is_admin ?? false,
-      });
-      msgApi.success(`用户 ${values.username} 已创建，首次登录须修改密码`);
-      setCredModal({ username: values.username, password: values.password });
-      setCreateOpen(false);
-      form.resetFields();
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '创建失败');
-    } finally {
-      setCreating(false);
-    }
+    createMut.mutate(values);
   };
 
-  /* ---- 重置密码 ---- */
+  /* ---- 重置密码：不改变列表字段，无需失效缓存（对齐旧行为） ---- */
+  const resetPwdMut = useMutation({
+    mutationFn: (v: { username: string; password: string }) =>
+      resetUserPassword(v.username, v.password),
+    onSuccess: (_d, v) => {
+      msgApi.success(`${v.username} 密码已重置，下次登录须修改`);
+      setPwdTarget(null);
+      setPwdText('');
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '重置失败'),
+  });
+
   const handleResetPwd = async () => {
     if (!pwdTarget) return;
     if (pwdText.length < 8) {
       msgApi.warning('新密码至少 8 个字符');
       return;
     }
-    setPwdSaving(true);
-    try {
-      await resetUserPassword(pwdTarget.username, pwdText);
-      msgApi.success(`${pwdTarget.username} 密码已重置，下次登录须修改`);
-      setPwdTarget(null);
-      setPwdText('');
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '重置失败');
-    } finally {
-      setPwdSaving(false);
-    }
+    resetPwdMut.mutate({ username: pwdTarget.username, password: pwdText });
   };
 
-  /* ---- 管理员开关 ---- */
-  const handleToggleAdmin = async (u: AdminUser, grant: boolean) => {
-    try {
-      await setUserAdmin(u.username, grant);
-      msgApi.success(grant ? `${u.username} 已授予管理员` : `${u.username} 已收回管理员`);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '操作失败');
-    }
-  };
+  /* ---- 管理员开关 / 删除 ---- */
+  const toggleAdminMut = useMutation({
+    mutationFn: (v: { u: AdminUser; grant: boolean }) =>
+      setUserAdmin(v.u.username, v.grant),
+    onSuccess: (_d, v) => {
+      msgApi.success(v.grant ? `${v.u.username} 已授予管理员` : `${v.u.username} 已收回管理员`);
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '操作失败'),
+  });
 
-  /* ---- 删除 ---- */
-  const handleDelete = async (u: AdminUser) => {
-    try {
-      const r = await deleteUser(u.username);
+  const deleteMut = useMutation({
+    mutationFn: (u: AdminUser) => deleteUser(u.username),
+    onSuccess: (r, u) => {
       modalApi.success({
         title: `${u.username} 已删除`,
         content: `级联清理：会话 ${r.deleted?.sessions ?? 0} 个 / 消息 ${r.deleted?.messages ?? 0} 条`,
       });
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
 
   const columns: ColumnsType<AdminUser> = [
     {
@@ -190,7 +191,7 @@ export default function Users({ me }: { me: Me }) {
             <Switch
               size="small"
               checked={v === 1}
-              onChange={(checked) => handleToggleAdmin(u, checked)}
+              onChange={(checked) => toggleAdminMut.mutate({ u, grant: checked })}
             />
           )}
         </Space>
@@ -236,7 +237,7 @@ export default function Users({ me }: { me: Me }) {
               okText="删除"
               okButtonProps={{ danger: true }}
               cancelText="取消"
-              onConfirm={() => handleDelete(u)}
+              onConfirm={() => deleteMut.mutate(u)}
             >
               <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
             </Popconfirm>
@@ -282,7 +283,7 @@ export default function Users({ me }: { me: Me }) {
                     size="small"
                     type="primary"
                     icon={<CheckOutlined />}
-                    onClick={() => handleReview(r.username, 'approve')}
+                    onClick={() => reviewMut.mutate({ username: r.username, action: 'approve' })}
                   >
                     通过
                   </Button>,
@@ -291,7 +292,7 @@ export default function Users({ me }: { me: Me }) {
                     size="small"
                     danger
                     icon={<StopOutlined />}
-                    onClick={() => handleReview(r.username, 'reject')}
+                    onClick={() => reviewMut.mutate({ username: r.username, action: 'reject' })}
                   >
                     驳回
                   </Button>,
@@ -331,7 +332,7 @@ export default function Users({ me }: { me: Me }) {
         open={createOpen}
         onOk={handleCreate}
         onCancel={() => setCreateOpen(false)}
-        confirmLoading={creating}
+        confirmLoading={createMut.isPending}
         okText="创建"
         cancelText="取消"
         destroyOnClose
@@ -400,7 +401,7 @@ export default function Users({ me }: { me: Me }) {
         open={!!pwdTarget}
         onOk={handleResetPwd}
         onCancel={() => setPwdTarget(null)}
-        confirmLoading={pwdSaving}
+        confirmLoading={resetPwdMut.isPending}
         okText="重置"
         cancelText="取消"
       >
