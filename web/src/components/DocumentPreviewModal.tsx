@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Modal, Spin, Button, message, Alert } from 'antd';
 import { EditOutlined, SaveOutlined } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
@@ -38,14 +38,8 @@ export const DocumentPreviewModal: React.FC<DocumentPreviewModalProps> = ({
   // 判断是否可编辑
   const isEditable = data?.file_type && ['.md', '.txt', '.json', '.csv'].includes(data.file_type);
 
-  // 加载预览数据
-  useEffect(() => {
-    if (visible && filename) {
-      loadPreview();
-    }
-  }, [visible, filename, kbId]);
-
-  const loadPreview = async () => {
+  // 加载预览数据(useCallback 稳定引用,供下方 effect 安全依赖)
+  const loadPreview = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`/api/kbs/${kbId}/docs/${encodeURIComponent(filename)}/preview`);
@@ -64,7 +58,13 @@ export const DocumentPreviewModal: React.FC<DocumentPreviewModalProps> = ({
     } finally {
       setLoading(false);
     }
-  };
+  }, [kbId, filename]);
+
+  useEffect(() => {
+    if (visible && filename) {
+      loadPreview();
+    }
+  }, [visible, filename, kbId, loadPreview]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -159,9 +159,9 @@ export const DocumentPreviewModal: React.FC<DocumentPreviewModalProps> = ({
         >
           <ReactMarkdown
             components={{
-              h1: ({ node, ...props }) => <h1 style={{ borderBottom: '2px solid #e8e8e8', paddingBottom: '8px' }} {...props} />,
-              h2: ({ node, ...props }) => <h2 style={{ borderBottom: '1px solid #e8e8e8', paddingBottom: '6px' }} {...props} />,
-              code: ({ node, inline, ...props }: any) =>
+              h1: ({ node: _node, ...props }) => <h1 style={{ borderBottom: '2px solid #e8e8e8', paddingBottom: '8px' }} {...props} />,
+              h2: ({ node: _node, ...props }) => <h2 style={{ borderBottom: '1px solid #e8e8e8', paddingBottom: '6px' }} {...props} />,
+              code: ({ node: _node, inline, ...props }: any) =>
                 inline ? (
                   <code style={{ background: '#f5f5f5', padding: '2px 6px', borderRadius: '3px', fontSize: '0.9em' }} {...props} />
                 ) : (
