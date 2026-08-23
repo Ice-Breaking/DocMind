@@ -376,7 +376,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       let finalReceived = false;
       let errorReported = false;
       let retryCount = 0;
-      const MAX_RETRIES = 1;
+      const MAX_RETRIES = 2;   // 连接失败/流中断自动重连(共 3 次尝试,指数退避)
 
       try {
         while (retryCount <= MAX_RETRIES) {
@@ -499,13 +499,20 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             if (String(e?.message) === 'AbortError' || ctrl.signal.aborted) return;
 
             const isNetworkError = e instanceof TypeError;
-            const noTokensYet = streamTokenRef.current.length === 0;
-            if (isNetworkError && noTokensYet && retryCount < MAX_RETRIES) {
+            const isServerError = /HTTP 5\d\d/.test(String(e?.message));
+            const canRetry = (isNetworkError || isServerError) && retryCount < MAX_RETRIES;
+            if (canRetry) {
+              // 自动重连:连接失败或流中途断(后端未落库,整轮重来安全)。
+              // 清空已显示的 partial 内容,气泡标记重连状态,指数退避后重试
               retryCount++;
-              // 指数退避后自动重试一次
-              await new Promise((r) => setTimeout(r, 1000 * retryCount));
+              await new Promise((r) => setTimeout(r, 800 * retryCount));
+              streamTokenRef.current = '';
               streamThinkingRef.current = '';
               setThinkingSteps([]);
+              setMessages((prev) => prev.map((m) =>
+                m.key === assistantKey
+                  ? { ...m, content: `⚠️ 连接中断，正在自动重连（第 ${retryCount}/${MAX_RETRIES} 次）…`, loading: true }
+                  : m));
               continue;
             }
 

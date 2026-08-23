@@ -461,10 +461,35 @@ if __name__ == "__main__":
             try:
                 final_raw = ""
                 req_agent = create_agent(registry, system_prompt=sp)
-                for ev in chat_stream_mod.stream_events(
-                        req_agent, question, body.session_id, user,
-                        assistant_id=assistant_id, system_prompt=sp,
-                        image_data=img_data_url):
+
+                # SSE 心跳:联网搜索/工具调用期间可能 15-40s 无 token,
+                # 中间代理与客户端易按空闲超时断连——producer 线程产事件,
+                # 主生成器 15s 无数据即发 keepalive 注释行(SSE 标准忽略)
+                import queue as _queue
+                import threading as _threading
+
+                _evq: _queue.Queue = _queue.Queue()
+
+                def _produce():
+                    try:
+                        for ev in chat_stream_mod.stream_events(
+                                req_agent, question, body.session_id, user,
+                                assistant_id=assistant_id, system_prompt=sp,
+                                image_data=img_data_url):
+                            _evq.put(ev)
+                    finally:
+                        _evq.put(None)
+
+                _threading.Thread(target=_produce, daemon=True).start()
+
+                while True:
+                    try:
+                        ev = _evq.get(timeout=15)
+                    except _queue.Empty:
+                        yield ": keepalive\n\n"
+                        continue
+                    if ev is None:
+                        break
                     if ev["kind"] == "final":
                         final_raw = ev["answer"]
                     yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"

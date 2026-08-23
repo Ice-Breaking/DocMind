@@ -137,6 +137,9 @@ docker compose up -d --build
 ```
 
 - 后端仅监听 127.0.0.1:7860，nginx 单入口（SPA history fallback + SSE 安全代理 + 限流）
+- 安全基线：登录防爆破（15 分钟锁）、写请求 Origin 同源校验（CSRF）、/files 直链走登录+文档 ACL、
+  附件属主隔离、开放 API 每 Key 限流（OPEN_API_RPM，默认 60/分钟）；上 HTTPS 后建议确认
+  Gradio 会话 Cookie 带 Secure 标志（nginx 层加 `proxy_cookie_flags ~ secure;`）
 - 数据在命名卷 `docmind-data` 与 `docs/knowledge` 挂载；备份：应用内「备份与恢复」页或 `scripts/backup.sh` + cron
 - 企业集成：管理端创建 API Key 后调用：
 
