@@ -27,3 +27,8 @@ data/ocr_cache/
 # 运行时数据不入库（含会话 trace 日志）
 data/trace_log.jsonl
 data/backups/
+
+# 测试缓存与前端构建产物
+.pytest_cache/
+*.tsbuildinfo
+node_modules/
