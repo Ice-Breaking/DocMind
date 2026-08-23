@@ -14,7 +14,7 @@ import {
   Typography,
 } from 'antd';
 import {
-  CopyOutlined,
+  ApiOutlined, CopyOutlined,
   KeyOutlined,
   PlusOutlined,
   StopOutlined,
@@ -54,6 +54,27 @@ export default function ApiKeys() {
 
   /** 创建/轮换成功后的一次性明文展示 */
   const [secretModal, setSecretModal] = useState<{ name: string; key: string } | null>(null);
+  const [keyTest, setKeyTest] = useState<{ status: 'idle' | 'loading' | 'ok' | 'fail'; msg?: string }>({ status: 'idle' });
+
+  /** 创建成功(明文在手)时试调用一次开放检索,提前发现 scope/网络问题 */
+  const testKey = async () => {
+    if (!secretModal?.key) return;
+    setKeyTest({ status: 'loading' });
+    try {
+      const r = await fetch('/open/v1/retrieve', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${secretModal.key}`,
+                   'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'connectivity test', top_k: 1 }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 403) throw new Error('密钥 scope 配置受限,检索被拒绝');
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setKeyTest({ status: 'ok', msg: `连通正常,召回 ${d.count ?? 0} 条` });
+    } catch (e) {
+      setKeyTest({ status: 'fail', msg: e instanceof Error ? e.message : '测试失败' });
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -87,7 +108,7 @@ export default function ApiKeys() {
       });
       setCreateOpen(false);
       form.resetFields();
-      setSecretModal({ name: k.name, key: k.key || '' });
+      setSecretModal({ name: k.name, key: k.key || '' }); setKeyTest({ status: 'idle' });
       await load();
     } catch (e: unknown) {
       msgApi.error(e instanceof Error ? e.message : '创建失败');
@@ -110,7 +131,7 @@ export default function ApiKeys() {
     try {
       const nk = await rotateApiKey(k.id);
       msgApi.success('旧密钥已吊销，新密钥已签发');
-      setSecretModal({ name: nk.name, key: nk.key || '' });
+      setSecretModal({ name: nk.name, key: nk.key || '' }); setKeyTest({ status: 'idle' });
       await load();
     } catch (e: unknown) {
       msgApi.error(e instanceof Error ? e.message : '轮换失败');
@@ -280,6 +301,8 @@ export default function ApiKeys() {
         open={!!secretModal}
         onCancel={() => setSecretModal(null)}
         footer={[
+          <Button key="test" icon={<ApiOutlined />} loading={keyTest.status === 'loading'}
+            onClick={testKey}>测试连通</Button>,
           <Button key="copy" type="primary" icon={<CopyOutlined />} onClick={copyKey}>复制密钥</Button>,
           <Button key="close" onClick={() => setSecretModal(null)}>我已保存</Button>,
         ]}
@@ -299,6 +322,14 @@ export default function ApiKeys() {
         >
           {secretModal?.key}
         </Paragraph>
+        {keyTest.status === 'ok' && (
+          <Alert type="success" showIcon style={{ marginTop: 4 }}
+                 message={keyTest.msg} />
+        )}
+        {keyTest.status === 'fail' && (
+          <Alert type="error" showIcon style={{ marginTop: 4 }}
+                 message={keyTest.msg} />
+        )}
       </Modal>
     </div>
   );
