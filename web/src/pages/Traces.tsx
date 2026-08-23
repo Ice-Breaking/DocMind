@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   Button,
   Card,
@@ -48,51 +49,47 @@ export default function Traces() {
   const [kind, setKind] = useState('');
   const [status, setStatus] = useState('');
   const [kb, setKb] = useState('');
-  const [kbOptions, setKbOptions] = useState<{ value: string; label: string }[]>([]);
   const [q, setQ] = useState('');
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const [items, setItems] = useState<TraceItem[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // 过滤条件格式化后进 queryKey（dayjs 对象不直接入 key，保证引用稳定）
+  const start = range?.[0]?.format('YYYY-MM-DD') ?? '';
+  const end = range?.[1]?.format('YYYY-MM-DD') ?? '';
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const r = await fetchTraces({
-        page,
-        page_size: pageSize,
-        kind,
-        status,
-        kb,
-        q,
-        start: range?.[0]?.format('YYYY-MM-DD') ?? '',
-        end: range?.[1]?.format('YYYY-MM-DD') ?? '',
-      });
-      setItems(r.items);
-      setTotal(r.total);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [page, pageSize, kind, status, kb, q, range]);
+  const {
+    data,
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<{ items: TraceItem[]; total: number }, Error>({
+    queryKey: ['traces', { page, pageSize, kind, status, kb, q, start, end }],
+    queryFn: () => fetchTraces({
+      page,
+      page_size: pageSize,
+      kind,
+      status,
+      kb,
+      q,
+      start,
+      end,
+    }),
+  });
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
 
-  useEffect(() => { load(); }, [load]);
-
-  // KB 过滤选项：默认库 collection 名为 knowledge，其余为 kb_{id}
-  useEffect(() => {
-    fetchKbs()
-      .then((kbs) => setKbOptions([
-        { value: 'knowledge', label: '默认知识库' },
-        ...kbs.filter((k) => k.id !== 'default').map((k) => ({ value: `kb_${k.id}`, label: k.name })),
-      ]))
-      .catch(() => undefined);
-  }, []);
+  // KB 过滤选项：默认库 collection 名为 knowledge，其余为 kb_{id}；
+  // 失败静默降级为空选项（对齐旧 catch(() => undefined)）
+  const { data: kbs = [] } = useQuery({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+    retry: false,
+  });
+  const kbOptions = [
+    { value: 'knowledge', label: '默认知识库' },
+    ...kbs.filter((k) => k.id !== 'default').map((k) => ({ value: `kb_${k.id}`, label: k.name })),
+  ];
 
   const columns: ColumnsType<TraceItem> = [
     { title: '时间', dataIndex: 'ts', key: 'ts', width: 160 },
@@ -194,13 +191,13 @@ export default function Traces() {
           defaultValue={q}
           onSearch={(v) => { setQ(v); setPage(1); }}
         />
-        <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>
       </Space>
 
       {error && (
         <Card style={{ marginBottom: 16 }}>
-          <Text type="danger">加载失败：{error}</Text>
-          <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
+          <Text type="danger">加载失败：{error.message || String(error)}</Text>
+          <Button style={{ marginLeft: 12 }} onClick={() => refetch()}>重试</Button>
         </Card>
       )}
 

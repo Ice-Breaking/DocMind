@@ -125,10 +125,41 @@ useEffect(() => {
 | 操作后刷新 | 手写 await load()(全量 setState) | invalidateQueries 定向失效 |
 | 已迁移页面 | Dashboard/SessionHistory/Queries | +Backups/Alerts(共 5 页) |
 
-## 六、遗留说明(迁移路线)
+## 六、第四期:只读/轻 mutation 页迁移(Usage / Badcases / Traces)
 
-- 第四期候选:Usage / AdminSessions 等剩余只读列表页;
-- KnowledgeBases / ApiKeys / Users 等含多 mutation 的管理页;
+### `Usage.tsx`(345 → 342 行)
+
+- `Promise.all` 三连发 → `['usage', days]` / `['topQueries', days]` /
+  `['adminOverview']` 三条独立 query(days 进 key,切换自动重拉);
+  聚合 loading/error 保持旧「任一失败整页报错」语义;
+- `fetchTopQueries` 返回 `{items,total}` 包装对象,data 取 `.items`。
+
+### `Badcases.tsx`(245 → 241 行)
+
+- 列表 → `['badcases']` query(失败页面内报错 + 重试按钮 →
+  `refetch()`,不走 toast,对齐旧 UI);状态流转 Modal →
+  `updateMut`,成功 toast + 关弹窗 + 失效列表;确认按钮接
+  `isPending` 防重复提交(新增的小改进)。
+
+### `Traces.tsx`(231 → 228 行)
+
+- 分页 + 多过滤参数进 queryKey(dayjs 对象先格式化为字符串再入
+  key,保证引用稳定);KB 过滤选项 → `['kbs']` query(retry off,
+  失败静默降级空选项),后续 KnowledgeBases 页可共享该缓存。
+
+### 效果
+
+| 指标 | 迁移前 | 迁移后 |
+|---|---|---|
+| 三页手写数据获取代码 | ~110 行 | ~45 行 useQuery 声明 |
+| 已迁移页面 | 5 页 | 8 页(+Usage/Badcases/Traces) |
+
+## 七、遗留说明(迁移路线)
+
+- 第五期候选:Models / Audit / Admin / Assistants / ApiKeys /
+  Users 等管理端 CRUD 页(useMutation + invalidateQueries);
+- Eval / KnowledgeBases / Settings / RetrievalLab 体量大或交互特殊,
+  单独评估;Home/Login 无数据层需求;
 - Chat 页的 loadSessions/loadMessages 属会话编排(与 SSE 流耦合),
   放在迁移末期单独处理。
 

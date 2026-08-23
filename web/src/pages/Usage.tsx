@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   Card,
   Col,
@@ -107,41 +108,37 @@ function TrendBars({ daily }: { daily: UsageDetail['daily'] }) {
 
 export default function Usage() {
   const [days, setDays] = useState<number>(30);
-  const [usage, setUsage] = useState<UsageDetail | null>(null);
-  const [topQueries, setTopQueries] = useState<TopQuery[]>([]);
-  const [overview, setOverview] = useState<AdminOverview | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (d: number) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [u, tq, ov] = await Promise.all([
-        fetchAdminUsage(d),
-        fetchTopQueries(d, 10),
-        fetchAdminOverview(),
-      ]);
-      setUsage(u);
-      setTopQueries(tq.items);
-      setOverview(ov);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 用量 / TopQuery / 总览：三条独立 query（days 进 key，切换自动重拉）；
+  // 任一失败整页报错、全部就绪才渲染，对齐旧 Promise.all 语义
+  const usageQ = useQuery<UsageDetail>({
+    queryKey: ['usage', days],
+    queryFn: () => fetchAdminUsage(days),
+  });
+  const topQ = useQuery<{ items: TopQuery[]; total: number }, Error>({
+    queryKey: ['topQueries', days],
+    queryFn: () => fetchTopQueries(days, 10),
+  });
+  const ovQ = useQuery<AdminOverview>({
+    queryKey: ['adminOverview'],
+    queryFn: fetchAdminOverview,
+  });
 
-  useEffect(() => { load(days); }, [days, load]);
+  const loading = usageQ.isPending || topQ.isPending || ovQ.isPending;
+  const error = usageQ.error ?? topQ.error ?? ovQ.error;
 
   if (loading) return <Spin style={{ display: 'block', margin: '120px auto' }} size="large" />;
-  if (error || !usage) {
+  if (error || !usageQ.data) {
     return (
       <div style={{ padding: '24px 32px' }}>
-        <Text type="danger">加载失败：{error || '未知错误'}</Text>
+        <Text type="danger">加载失败：{error?.message || '未知错误'}</Text>
       </div>
     );
   }
+
+  const usage = usageQ.data;
+  const overview = ovQ.data;
+  const topQueries = topQ.data?.items ?? [];
 
   const { summary, by_model, daily } = usage;
   const costPerK = summary.total_calls > 0

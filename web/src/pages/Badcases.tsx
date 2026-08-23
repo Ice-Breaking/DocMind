@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -25,10 +26,7 @@ const { Text } = Typography;
  */
 export default function Badcases() {
   const { message: msgApi } = App.useApp();
-
-  const [badcases, setBadcases] = useState<Badcase[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [keyword, setKeyword] = useState('');
@@ -37,36 +35,30 @@ export default function Badcases() {
   const [pendingAction, setPendingAction] = useState<{ fid: number; status: string; note: string } | null>(null);
   const [noteText, setNoteText] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setBadcases(await fetchBadcases());
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 列表：失败页面内报错 + 重试（对齐旧 UI，不走 toast）
+  const {
+    data: badcases = [],
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<Badcase[]>({ queryKey: ['badcases'], queryFn: () => fetchBadcases() });
 
-  useEffect(() => { load(); }, [load]);
+  // 状态流转：成功 toast + 关弹窗 + 失效列表自动重拉
+  const updateMut = useMutation({
+    mutationFn: (p: { fid: number; status: string; note: string }) =>
+      updateBadcase(p.fid, p.status, p.note),
+    onSuccess: () => {
+      msgApi.success('状态已更新');
+      setModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: ['badcases'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '更新失败'),
+  });
 
   const openModal = (fid: number, status: string, existingNote: string) => {
     setPendingAction({ fid, status, note: existingNote });
     setNoteText(existingNote || '');
     setModalOpen(true);
-  };
-
-  const handleConfirm = async () => {
-    if (!pendingAction) return;
-    try {
-      await updateBadcase(pendingAction.fid, pendingAction.status, noteText);
-      msgApi.success('状态已更新');
-      setModalOpen(false);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '更新失败');
-    }
   };
 
   /* ---- 筛选 ---- */
@@ -209,8 +201,8 @@ export default function Badcases() {
         <Spin style={{ display: 'block', margin: '80px auto' }} size="large" />
       ) : error ? (
         <Card>
-          <Text type="danger">加载失败：{error}</Text>
-          <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
+          <Text type="danger">加载失败：{error.message || String(error)}</Text>
+          <Button style={{ marginLeft: 12 }} onClick={() => refetch()}>重试</Button>
         </Card>
       ) : (
         <Table scroll={{ x: "max-content" }}
@@ -226,7 +218,11 @@ export default function Badcases() {
       <Modal
         title="处理备注（可选）"
         open={modalOpen}
-        onOk={handleConfirm}
+        okButtonProps={{ loading: updateMut.isPending }}
+        onOk={() => {
+          if (!pendingAction) return;
+          updateMut.mutate({ fid: pendingAction.fid, status: pendingAction.status, note: noteText });
+        }}
         onCancel={() => setModalOpen(false)}
         okText="确认"
         cancelText="取消"
