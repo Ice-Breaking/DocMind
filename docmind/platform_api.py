@@ -16,6 +16,30 @@ from docmind import store
 from docmind.admin import _require_admin
 
 
+# 开放 API 每 key 限流：内存滑动窗口（单进程部署足够；
+# key 泄露时的兜底——防止无限调用刷爆 LLM 账单）
+import collections as _collections
+import time as _time
+import threading as _threading
+
+_OPEN_RPM = int(__import__("os").getenv("OPEN_API_RPM", "60"))
+_rl_lock = _threading.Lock()
+_rl_hits: dict[int, _collections.deque] = {}
+
+
+def _check_rate_limit(key_id: int) -> bool:
+    """每 key 滑动窗口限流；超限返回 False"""
+    with _rl_lock:
+        now = _time.time()
+        dq = _rl_hits.setdefault(key_id, _collections.deque())
+        while dq and now - dq[0] > 60:
+            dq.popleft()
+        if len(dq) >= _OPEN_RPM:
+            return False
+        dq.append(now)
+        return True
+
+
 def register_platform_routes(app) -> None:
 
     # ================= API Key 管理（管理端） =================
@@ -79,6 +103,9 @@ def register_platform_routes(app) -> None:
         key_row = store.validate_api_key(auth[7:].strip())
         if not key_row:
             raise HTTPException(status_code=401, detail="API Key 无效、已吊销或已过期")
+        if not _check_rate_limit(key_row["id"]):
+            raise HTTPException(status_code=429,
+                                detail=f"请求过于频繁（每 Key 上限 {_OPEN_RPM} 次/分钟）")
 
         try:
             body = await request.json()
@@ -144,6 +171,9 @@ def register_platform_routes(app) -> None:
         key_row = store.validate_api_key(auth[7:].strip())
         if not key_row:
             raise HTTPException(status_code=401, detail="API Key 无效、已吊销或已过期")
+        if not _check_rate_limit(key_row["id"]):
+            raise HTTPException(status_code=429,
+                                detail=f"请求过于频繁（每 Key 上限 {_OPEN_RPM} 次/分钟）")
 
         try:
             body = await request.json()

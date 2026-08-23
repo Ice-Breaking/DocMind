@@ -72,6 +72,9 @@ MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "24"))
 MAX_DOCS_PER_KB = int(os.getenv("MAX_DOCS_PER_KB", "500"))
 MAX_KB_TOTAL_BYTES = int(os.getenv("MAX_KB_TOTAL_BYTES", str(1024 * 1024 * 1024)))  # 1GB
 
+# 开放 API 限流：每个 API Key 每分钟最大请求数
+OPEN_API_RPM = int(os.getenv("OPEN_API_RPM", "60"))
+
 # 告警外发：Webhook URL（企微/钉钉/飞书群机器人或通用 JSON 端点），空=禁用
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 # webhook 类型：auto（按 URL 特征识别）/ wecom / dingtalk / feishu / generic

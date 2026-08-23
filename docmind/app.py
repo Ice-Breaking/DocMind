@@ -306,7 +306,11 @@ if __name__ == "__main__":
     # 重启清零——单进程部署下足够；锁定期间一律拒绝，包括正确密码）
     _LOGIN_MAX_FAILS = 5
     _LOGIN_LOCK_SECONDS = 900
+    _LOGIN_IP_MAX_FAILS = 20   # 同 IP 窗口内失败上限(防撞库;高于单账号阈值)
     _login_failures: dict[str, list[float]] = {}
+    _login_ip_failures: dict[str, list[float]] = {}
+    import contextvars as _cvars
+    _client_ip: _cvars.ContextVar[str] = _cvars.ContextVar("dm_login_ip", default="")
 
     def _is_login_locked(username: str) -> int:
         """锁定中返回剩余秒数，未锁定返回 0"""
@@ -323,6 +327,15 @@ if __name__ == "__main__":
         LDAP 首登自动开通本地账号（is_admin 默认关，需管理员另行授权）"""
         import time as _time
         from docmind import ldap_auth
+        ip = _client_ip.get("") or "unknown"
+        # IP 维度：同 IP 窗口内失败过多 → 拒绝（防换用户名撞库；锁号 DoS 由
+        # 账号维度 15 分钟自愈兜底）
+        ip_fails = [t for t in _login_ip_failures.get(ip, [])
+                    if _time.time() - t < _LOGIN_LOCK_SECONDS]
+        _login_ip_failures[ip] = ip_fails
+        if len(ip_fails) >= _LOGIN_IP_MAX_FAILS:
+            logger.warning(f"IP 登录失败过多已拒绝 ip={ip} user={username}")
+            return False
         remaining = _is_login_locked(username)
         if remaining:
             logger.warning(f"登录锁定中，拒绝尝试 user={username} 剩余{remaining}s")
@@ -338,6 +351,7 @@ if __name__ == "__main__":
             return True
         # 记录失败（本地与 LDAP 均未通过）
         _login_failures.setdefault(username, []).append(_time.time())
+        _login_ip_failures.setdefault(ip, []).append(_time.time())
         fails = len(_login_failures[username])
         logger.warning(f"登录失败 user={username} 第{fails}次"
                        + ("（已锁定15分钟）" if fails >= _LOGIN_MAX_FAILS else ""))
@@ -378,6 +392,10 @@ if __name__ == "__main__":
     try:
         @demo.app.middleware("http")
         async def metrics_middleware(request, call_next):
+            try:
+                _client_ip.set((request.client.host if request.client else "") or "")
+            except Exception:  # noqa: BLE001 - IP 记录失败不影响请求
+                pass
             if request.url.path in ("/metrics", "/health"):
                 return await call_next(request)   # 探活/抓取自身不计入指标
             start = _metrics_time.time()
@@ -439,6 +457,7 @@ if __name__ == "__main__":
         )
 
     # ---- 文档预览：vendored pdf.js + 知识库原文（引用溯源直达） ----
+    import fastapi
     from fastapi import HTTPException, Query
     from fastapi.responses import PlainTextResponse
 
@@ -456,8 +475,15 @@ if __name__ == "__main__":
 
     # methods 含 HEAD：前端先 HEAD 探测 docx 能否转 PDF（此 App 的 .get 不自动挂 HEAD）
     @demo.app.api_route("/files/{name}", methods=["GET", "HEAD"], include_in_schema=False)
-    async def _serve_file(name: str, as_: str = Query(default=None, alias="as")):
+    async def _serve_file(name: str, request: fastapi.Request,
+                          as_: str = Query(default=None, alias="as")):
+        # 安全校验：登录 + 文档级 ACL——受限文档(如内部机密.md)此前可经
+        # 此直链被未登录用户整篇下载，完全绕过检索层的 ACL 隔离(P0 实测)
+        user = _require_active_user(request)
+        allowed = acl.allowed_docs(user)
         safe = os.path.basename(name)  # 防路径穿越：只允许知识库目录内文件名
+        if safe not in allowed:
+            raise HTTPException(status_code=404)   # 与不存在同响应,不泄露存在性
         path = os.path.join(_knowledge_dir, safe)
         if not os.path.isfile(path):
             raise HTTPException(status_code=404)
@@ -582,6 +608,11 @@ if __name__ == "__main__":
     @demo.app.post("/api/change-password", include_in_schema=False)
     async def _change_password(body: ChangePasswordIn, request: _fastapi.Request):
         user = _require_user(request)
+        # 密码强度：≥8 位且同时含字母与数字（防弱口令 + 直链/撞库组合利用）
+        np = body.new_password or ""
+        if len(np) < 8 or not any(c.isalpha() for c in np) or not any(c.isdigit() for c in np):
+            raise HTTPException(status_code=400,
+                                detail="新密码需至少 8 位，且同时包含字母和数字")
         ok, msg = chatstore.change_password(user, body.old_password, body.new_password)
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
@@ -696,7 +727,7 @@ if __name__ == "__main__":
             if not one:
                 continue
             from docmind.docs_api import save_chat_image
-            _fname, _url = save_chat_image(one)
+            _fname, _url = save_chat_image(one, owner=user)
             image_md += f"![图片](/files/uploads/{_fname})\n"
             img_list.append(_url)
         if image_md:

@@ -31,9 +31,32 @@ _KEEP_VERSIONS = 3
 
 # 对话图片上传目录（消息附件，区别于知识库文档）
 _UPLOADS_DIR = os.path.join("data", "uploads")
+_META_DB = os.path.join(_UPLOADS_DIR, "meta.db")
 
 
-def save_chat_image(data_url: str) -> tuple[str, str]:
+def _meta_conn():
+    """附件属主元数据(独立 SQLite):文件名 → 上传者。
+    /files/uploads 直链按属主隔离——否则任何登录用户可查看他人的
+    对话图片(可能含隐私内容)"""
+    import sqlite3 as _sq
+    conn = _sq.connect(_META_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS attachments(
+        fname TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at REAL)""")
+    return conn
+
+
+def _record_upload(fname: str, owner: str) -> None:
+    try:
+        import time as _time
+        c = _meta_conn()
+        c.execute("INSERT OR REPLACE INTO attachments VALUES(?,?,?)",
+                  (fname, owner or "anonymous", _time.time()))
+        c.commit()
+    except Exception:  # noqa: BLE001 - 元数据失败不阻断上传主流程
+        pass
+
+
+def save_chat_image(data_url: str, owner: str = "") -> tuple[str, str]:
     """保存对话图片，返回 (文件名, 规范化的 data URL)。
     data_url 可带 data:image/...;base64, 前缀或裸 base64"""
     import base64
@@ -49,6 +72,7 @@ def save_chat_image(data_url: str) -> tuple[str, str]:
     os.makedirs(_UPLOADS_DIR, exist_ok=True)
     with open(os.path.join(_UPLOADS_DIR, fname), "wb") as f:
         f.write(base64.b64decode(b64))
+    _record_upload(fname, owner)
     return fname, f"data:{mime};base64,{b64}"
 
 
@@ -243,12 +267,28 @@ def register_docs_routes(app) -> None:
 
     @app.get("/files/uploads/{name}", include_in_schema=False)
     async def _serve_upload(name: str, request: fastapi.Request):
-        """对话图片附件（登录可见）；消息 markdown 以此 URL 内嵌展示"""
-        _require_user(request, app)
+        """对话图片附件：登录 + 属主隔离（admin 可见全部）；
+        存量无属主记录的文件回退为登录可见"""
+        user = _require_user(request, app)
         safe = os.path.basename(name)
         path = os.path.join(_UPLOADS_DIR, safe)
         if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail="附件不存在")
+        try:
+            row = _meta_conn().execute(
+                "SELECT owner FROM attachments WHERE fname = ?", (safe,)).fetchone()
+        except Exception:  # noqa: BLE001
+            row = None
+        if row is not None and row["owner"] != user:
+            try:
+                c = store._conn()
+                r = c.execute("SELECT is_admin FROM users WHERE username = ?",
+                              (user,)).fetchone()
+                is_admin = bool(r and r[0])
+            except Exception:  # noqa: BLE001
+                is_admin = False
+            if not is_admin:
+                raise HTTPException(status_code=404, detail="附件不存在")
         from fastapi.responses import FileResponse
         return FileResponse(path)
 
