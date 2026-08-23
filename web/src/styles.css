@@ -215,7 +215,9 @@ body {
 .dm-mobile-topbar {
   display: flex; align-items: center; gap: 8px;
   height: 48px; padding: 0 12px;
-  background: #001529;
+  background: rgba(252, 252, 252, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid #ececec;
   position: sticky; top: 0; z-index: 900;
 }
 
@@ -258,7 +260,6 @@ body {
 .dm-source-link:hover { background: #e0e7ff; }
 
 /* 移动顶栏品牌渐变 */
-.dm-mobile-topbar { background: linear-gradient(90deg, #4f46e5, #6366f1) !important; }
 
 /* 欢迎首屏 */
 .dm-welcome {

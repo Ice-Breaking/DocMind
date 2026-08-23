@@ -317,11 +317,12 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
         <div className="dm-mobile-topbar">
           <Button
             type="text"
-            icon={<MenuOutlined />}
+            icon={<MenuOutlined style={{ color: '#6366f1' }} />}
             onClick={() => setNavOpen(true)}
-            style={{ color: '#fff' }}
           />
-          <span style={{ color: '#fff', fontWeight: 600, flex: 1 }}>DocMind</span>
+          <span style={{ color: '#1f2328', fontWeight: 700, fontSize: 15, flex: 1, letterSpacing: 0.2 }}>
+            DocMind
+          </span>
           <Dropdown
             menu={{ items: userMenuItems, onClick: handleUserMenu }}
             placement="bottomRight"
@@ -370,7 +371,7 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
           </div>
         </Drawer>
         <Layout>
-          <Content style={{ overflow: 'auto', height: 'calc(100vh - 48px)' }}>
+          <Content style={{ overflow: 'auto', height: 'calc(100vh - 48px)', background: '#f7f7f6' }}>
             <Outlet />
           </Content>
         </Layout>
