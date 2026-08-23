@@ -57,12 +57,47 @@ useEffect(() => {
 行为验证:进入页面即拉取、失败展示原错误文案与重试按钮,
 均与改造前一致;35 个既有测试全绿。
 
-## 四、遗留说明(迁移路线)
+## 四、第二期:列表页批量迁移(SessionHistory / Queries)
 
-- 第二期起按域逐页迁移(SessionHistory/Usage 等列表页优先),
-  mutation 类操作(增删改)用 `useMutation` + `invalidateQueries`
-  替换手写 reload;
-- 测试基建补 `createTestQueryClient` 辅助,供包裹被测页面
-  (当前试点页无直接渲染测试,暂不需要);
+同轮完成两个典型列表页的等价迁移,并补测试辅助:
+
+### `SessionHistory.tsx`(294 → 269 行)
+
+- 初始 `Promise.all` 手写 effect → `['sessions']` 与
+  `['assistants']` 两条独立 query(并行度不变,且各自缓存、
+  跨页复用——Chat 页后续接入时直接命中);
+- Drawer 消息加载:`openSession` 内手写 fetch/清空/loading 态
+  (~15 行)→ `useQuery(['messages', sid], { enabled })`,开关与
+  换会话自动启停;**有意的行为改进**:再次打开同一会话先显示
+  缓存再静默刷新(staleTime 0),替代原先"清空 + Spin",数据
+  终值一致;
+- `messages` 以 useMemo 收敛稳定引用(handleLocate/bubbleItems
+  的 deps 不再每渲染变化)。
+
+### `Queries.tsx`(141 行)
+
+- 过滤参数(user/q/days)进 queryKey,参数变化自动重拉,
+  对齐旧 `load()` 语义;失败保留上次数据仅弹 toast(effect 监听
+  error,文案不变);刷新按钮 → `refetch()`。
+
+### 测试辅助(`src/test/queryTestUtils.tsx`,新增)
+
+- `createTestQueryClient()`:关 retry 避免用例等待退避;
+- `withQueryClient(ui, client?)`:包裹被测 UI,支持预置缓存。
+
+### 效果
+
+| 指标 | 迁移前 | 迁移后 |
+|---|---|---|
+| 两页手写数据获取代码 | ~75 行 | ~25 行 useQuery 声明 |
+| SessionHistory 打开 Drawer | 清空+Spin 重拉 | 缓存直显+静默刷新 |
+| 请求去重 | 无 | StrictMode/重复 key 自动去重 |
+
+## 五、遗留说明(迁移路线)
+
+- 第三期候选:Usage / Backups / Alerts 等管理端列表页;含
+  mutation 的页面(KnowledgeBases/ApiKeys/Users 等)用
+  `useMutation + invalidateQueries` 替换手写 reload;
 - Chat 页的 loadSessions/loadMessages 属会话编排(与 SSE 流耦合),
   放在迁移末期单独处理。
+

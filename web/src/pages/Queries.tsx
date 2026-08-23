@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -23,24 +24,26 @@ const { Text } = Typography;
 export default function Queries() {
   const { message: msgApi } = App.useApp();
 
-  const [rows, setRows] = useState<UserQuery[]>([]);
-  const [loading, setLoading] = useState(true);
   const [user, setUser] = useState('');
   const [q, setQ] = useState('');
   const [days, setDays] = useState(7);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setRows(await fetchAdminQueries({ user, q, days, limit: 1000 }));
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [user, q, days, msgApi]);
+  // 提问流水：过滤参数进 queryKey，参数变化自动重拉（对齐旧 load() 语义）；
+  // 失败保留上次数据，仅弹 toast（见下方 effect）
+  const {
+    data: rows = [],
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<UserQuery[], Error>({
+    queryKey: ['adminQueries', { user, q, days }],
+    queryFn: () => fetchAdminQueries({ user, q, days, limit: 1000 }),
+  });
 
-  useEffect(() => { load(); }, [load]);
+  /* 加载失败提示：与旧实现一致走全局 message */
+  useEffect(() => {
+    if (error) msgApi.error(error.message || '加载失败');
+  }, [error, msgApi]);
 
   const columns: ColumnsType<UserQuery> = [
     {
@@ -124,7 +127,7 @@ export default function Queries() {
           onChange={(e) => setQ(e.target.value)}
           onSearch={setQ}
         />
-        <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>
       </Space>
 
       <Table scroll={{ x: "max-content" }}

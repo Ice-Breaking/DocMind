@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { MessageOutlined, RobotOutlined } from '@ant-design/icons';
 import {
   Alert,
@@ -42,43 +43,46 @@ function formatTime(ts: number): string {
 
 export default function SessionHistory({ me }: { me: Me }) {
   const { message: msgApi } = App.useApp();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [assistants, setAssistants] = useState<Assistant[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+
+  /* ---- 数据：会话 / 助手常驻；消息随 Drawer 打开按需拉取 ---- */
+  const {
+    data: sessions = [],
+    isPending: loading,
+    error: loadError,
+  } = useQuery<Session[]>({ queryKey: ['sessions'], queryFn: fetchSessions });
+  const { data: assistants = [] } = useQuery<Assistant[]>({
+    queryKey: ['assistants'],
+    queryFn: fetchAssistants,
+  });
 
   /* Drawer 状态 */
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [activeSession, setActiveSession] = useState<Session | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [msgLoading, setMsgLoading] = useState(false);
-  const [msgError, setMsgError] = useState<string | null>(null);
 
   /* 引用定位 Modal */
   const [locateOpen, setLocateOpen] = useState(false);
   const [locateTitle, setLocateTitle] = useState('');
   const [locateText, setLocateText] = useState('');
 
-  /* ---- 初始加载 ---- */
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [ss, as] = await Promise.all([fetchSessions(), fetchAssistants()]);
-        if (!cancelled) {
-          setSessions(ss);
-          setAssistants(as);
-        }
-      } catch (e: unknown) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '加载失败');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // 消息按需加载：enabled 随 Drawer 开关与选中会话变化自动启停；
+  // 再次打开同一会话先显缓存再静默刷新（staleTime 0），数据始终一致
+  const {
+    data: msgsData,
+    isPending: msgLoading,
+    error: msgErr,
+  } = useQuery<Message[]>({
+    queryKey: ['messages', activeSession?.id],
+    queryFn: () => fetchMessages(activeSession!.id),
+    enabled: drawerOpen && !!activeSession,
+  });
+  const messages = useMemo(() => msgsData ?? [], [msgsData]);
+  const msgError = msgErr?.message ?? null;
+
+  /* ---- 打开会话详情（拉取交由上方 useQuery） ---- */
+  const openSession = (s: Session) => {
+    setActiveSession(s);
+    setDrawerOpen(true);
+  };
 
   /* ---- 按助手分组 ---- */
   const groups: SessionGroup[] = useMemo(() => {
@@ -111,23 +115,6 @@ export default function SessionHistory({ me }: { me: Me }) {
     });
     return list;
   }, [sessions, assistants]);
-
-  /* ---- 打开会话详情 ---- */
-  const openSession = async (s: Session) => {
-    setActiveSession(s);
-    setDrawerOpen(true);
-    setMsgLoading(true);
-    setMsgError(null);
-    setMessages([]);
-    try {
-      const msgs = await fetchMessages(s.id);
-      setMessages(msgs);
-    } catch (e: unknown) {
-      setMsgError(e instanceof Error ? e.message : '消息加载失败');
-    } finally {
-      setMsgLoading(false);
-    }
-  };
 
   /* ---- 引用定位（与对话页同款） ---- */
   const handleLocate = useCallback(
@@ -211,8 +198,8 @@ export default function SessionHistory({ me }: { me: Me }) {
         <Typography.Text type="secondary">{me.user} 的全部对话记录</Typography.Text>
       </div>
 
-      {error ? (
-        <Alert type="error" showIcon message="加载失败" description={error} />
+      {loadError ? (
+        <Alert type="error" showIcon message="加载失败" description={loadError.message || '加载失败'} />
       ) : sessions.length === 0 ? (
         <Empty
           style={{ marginTop: 80 }}
