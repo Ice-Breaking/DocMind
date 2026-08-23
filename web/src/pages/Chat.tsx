@@ -6,34 +6,19 @@ import {
   useState,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import MarkdownContent from '../components/MarkdownContent';
 import {
-  ApiOutlined,
   DeleteOutlined,
-  DislikeOutlined,
   RightOutlined,
-  LikeOutlined,
-  LikeFilled,
-  DislikeFilled,
   DownOutlined,
   PaperClipOutlined,
   SearchOutlined,
   DownloadOutlined,
   CloseOutlined,
   PlusOutlined,
-  RobotOutlined,
   MenuOutlined,
-  ReloadOutlined,
   AudioOutlined,
-  PauseOutlined,
-  SoundOutlined,
 } from '@ant-design/icons';
 import { App, Button, Image, Input, Modal, Progress, Select, Space, Typography } from 'antd';
-import UserAvatar from '../components/UserAvatar';
-import {
-  fetchVoices,
-  type VoiceOption,
-} from '../api';
 import Bubble from '@ant-design/x/es/bubble';
 import type { BubbleDataType } from '@ant-design/x/es/bubble/BubbleList';
 import Conversations from '@ant-design/x/es/conversations';
@@ -41,32 +26,29 @@ import { Menu } from 'antd';
 import { buildNavItems, flattenNavKeys } from '../nav';
 import type { Conversation } from '@ant-design/x/es/conversations/interface';
 import Sender from '@ant-design/x/es/sender';
-import ThoughtChain from '@ant-design/x/es/thought-chain';
-import type { ThoughtChainItem } from '@ant-design/x/es/thought-chain/Item';
 import {
-  chatStream,
   deleteSession,
   fetchAssistants,
   fetchFeedback,
   fetchMessages,
   fetchSessions,
-  fetchSuggestions,
   logout,
   submitFeedback,
+  fetchVoices,
   type Assistant,
   type Me,
   type Session,
+  type VoiceOption,
 } from '../api';
 import {
-  computeAssistantSeq,
-  extractWarnCapsules,
   fmtSessionTime,
   groupSessions,
   newSessionId,
-  splitImagesFromText,
 } from './chat/utils';
 import { useVoiceInput } from './chat/useVoiceInput';
 import { useSpeech } from './chat/useSpeech';
+import { useChatStream, type ChatStreamBridge } from './chat/useChatStream';
+import { useBubbleRoles } from './chat/useBubbleRoles';
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
@@ -78,22 +60,14 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- state ---- */
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSid, setActiveSid] = useState<string>('');
-  const [messages, setMessages] = useState<BubbleDataType[]>([]);
-  const [streaming, setStreaming] = useState(false);
-  const [thinkingSteps, setThinkingSteps] = useState<ThoughtChainItem[]>([]);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down'>>({});
   const [senderValue, setSenderValue] = useState('');
-  const [lastFailedQuestion, setLastFailedQuestion] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  // 失败气泡映射：assistantKey → 原问题（供内联重试）
-  const [failedMap, setFailedMap] = useState<Record<string, string>>({});
   // 语音：音色 / 录音 / 播报
   const [voiceId, setVoiceId] = useState<string>(
     () => localStorage.getItem('dm_voice') || 'Cherry',
   );
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
-  const [imageAttaches, setImageAttaches] = useState<{ dataUrl: string; base64: string }[]>([]);
   const [convSearch, setConvSearch] = useState('');
   const navigate = useNavigate();
   const location = useLocation();
@@ -103,7 +77,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const navLeafKeys = useMemo(() => flattenNavKeys(navItems), [navItems]);
   const navSelected = navLeafKeys.includes(location.pathname) ? location.pathname : '';
 
-  const [uploadPct, setUploadPct] = useState<number | null>(null);
   const MAX_IMGS = 5;   // 单条消息最多携带图片数
   const imgInputRef = useRef<HTMLInputElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
@@ -112,38 +85,42 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   );
 
   /* ---- refs ---- */
-  const abortRef = useRef<AbortController | null>(null);
-  const streamTokenRef = useRef('');
-  const streamThinkingRef = useRef('');
   const activeSidRef = useRef(activeSid);
-  const feedbackMapRef = useRef(feedbackMap);
-  const failedMapRef = useRef(failedMap);
-  const messagesRef = useRef(messages);
   const assistantIdRef = useRef(assistantId);
+  const feedbackMapRef = useRef(feedbackMap);
 
   // keep refs in sync
   useEffect(() => { activeSidRef.current = activeSid; }, [activeSid]);
   useEffect(() => { feedbackMapRef.current = feedbackMap; }, [feedbackMap]);
-  useEffect(() => { failedMapRef.current = failedMap; }, [failedMap]);
   useEffect(() => {
     fetchVoices().then(setVoiceOptions).catch(() => undefined);
   }, []);
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { assistantIdRef.current = assistantId; }, [assistantId]);
 
-  // cleanup on unmount
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, []);
+  /* ---- 流式发送域：SSE 链路与消息状态整体内聚（useChatStream） ---- */
+  // 宿主的 handleAuthError / loadSessions 定义于其后，经 latest-ref 桥回填，
+  // 规避「hook ←→ 宿主回调」的声明顺序环（行为与原先直连一致）
+  const streamBridge = useRef<ChatStreamBridge>({
+    onAuthError: async () => false,
+    reloadSessions: () => undefined,
+  });
+  const {
+    messages, setMessages, messagesRef,
+    streaming, thinkingSteps, setThinkingSteps,
+    suggestions, setSuggestions,
+    lastFailedQuestion, setLastFailedQuestion,
+    setFailedMap, failedMapRef,
+    imageAttaches, setImageAttaches,
+    uploadPct,
+    handleSend, handleRetry, handleRegenerate, handleCancel, abortActive,
+  } = useChatStream({ msgApi, activeSidRef, assistantIdRef, bridgeRef: streamBridge });
+  // 卸载时中断流已随 abortRef 内聚到 useChatStream
 
   /* ---- auth error helper ---- */
   const handleAuthError = useCallback(
     async (e: any) => {
       if (String(e?.message) === 'UNAUTHORIZED') {
-        abortRef.current?.abort();
-        abortRef.current = null;
+        abortActive();
         msgApi.warning('登录态失效，请重新登录');
         await logout();
         onLogout();
@@ -151,7 +128,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       }
       return false;
     },
-    [msgApi, onLogout],
+    [abortActive, msgApi, onLogout],
   );
 
   /* ---- load sessions ---- */
@@ -165,6 +142,10 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       return [];
     }
   }, [handleAuthError]);
+
+  // 回填流式域回调桥（每渲染更新，hook 内经 ref 读最新闭包）
+  streamBridge.current.onAuthError = handleAuthError;
+  streamBridge.current.reloadSessions = loadSessions;
 
   /* ---- load messages for a session ---- */
   const loadMessages = useCallback(
@@ -184,7 +165,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         await handleAuthError(e);
       }
     },
-    [handleAuthError],
+    [handleAuthError, setMessages],
   );
 
   /* ---- load feedback for a session ---- */
@@ -233,16 +214,14 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- switch session ---- */
   const switchSession = useCallback(
     async (sid: string) => {
-      abortRef.current?.abort();
-      abortRef.current = null;
-      setStreaming(false);
+      handleCancel();   // 中断流并复位（abort + setStreaming(false)）
       setSuggestions([]);
       setThinkingSteps([]);
       setActiveSid(sid);
       await loadMessages(sid);
       await loadFeedback(sid);
     },
-    [loadMessages, loadFeedback],
+    [handleCancel, loadMessages, loadFeedback, setSuggestions, setThinkingSteps],
   );
 
   /* ---- delete session ---- */
@@ -265,7 +244,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         await handleAuthError(e);
       }
     },
-    [activeSid, loadSessions, switchSession, handleAuthError],
+    [activeSid, loadSessions, switchSession, handleAuthError, setMessages],
   );
 
   /* ---- locate citation ---- */
@@ -308,7 +287,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         msgApi.error('定位请求失败');
       }
     },
-    [msgApi, handleAuthError],
+    [msgApi, handleAuthError, messagesRef],
   );
 
   /* ---- feedback ---- */
@@ -324,255 +303,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     [activeSid, handleAuthError],
   );
 
-  /* ---- SSE send ---- */
-  const handleSend = useCallback(
-    async (question: string, overrideImage?: string) => {
-      const attaches = imageAttaches;
-      const imgList: string[] = overrideImage
-        ? [overrideImage]
-        : attaches.map((a) => a.base64);
-      const hasImg = imgList.length > 0;
-      const q = question.trim() || (hasImg ? '请看这些图片。' : '');
-      if (!q || streaming) return;
-      if (overrideImage) setImageAttaches([]);
-      if (hasImg) setUploadPct(0);   // 带图发送:展示上行进度,完成后再清附件
-
-      abortRef.current?.abort();
-      const ctrl = new AbortController();
-      abortRef.current = ctrl;
-
-      const userKey = `u-${Date.now()}`;
-      const assistantKey = `a-${Date.now()}`;
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          key: userKey,
-          role: 'user',
-          content: hasImg
-            ? imgList.map((b) => `![图片](${b})`).join('\n') + `\n\n${q}`
-            : q,
-          ts: Date.now(),
-        } as BubbleDataType,
-        { key: assistantKey, role: 'assistant', content: '', loading: true, ts: Date.now() } as BubbleDataType,
-      ]);
-      setStreaming(true);
-      setThinkingSteps([]);
-      setSuggestions([]);
-      setLastFailedQuestion(null);
-      streamTokenRef.current = '';
-      streamThinkingRef.current = '';
-
-      let finalReceived = false;
-      let errorReported = false;
-      let retryCount = 0;
-      const MAX_RETRIES = 2;   // 连接失败/流中断自动重连(共 3 次尝试,指数退避)
-
-      try {
-        while (retryCount <= MAX_RETRIES) {
-          try {
-            for await (const ev of chatStream(q, activeSidRef.current, ctrl.signal, assistantIdRef.current,
-              hasImg ? imgList : undefined,
-              hasImg ? (pct) => {
-                setUploadPct(pct);
-                if (pct >= 100) { setImageAttaches([]); setUploadPct(null); }
-              } : undefined)) {
-              if (ctrl.signal.aborted) break;
-
-              switch (ev.event) {
-                case 'cache': {
-                  streamTokenRef.current = ev.data.answer;
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.key === assistantKey
-                        ? { ...m, content: ev.data.answer, loading: false }
-                        : m,
-                    ),
-                  );
-                  break;
-                }
-                case 'thinking': {
-                  streamThinkingRef.current += ev.data.text || '';
-                  const accText = streamThinkingRef.current;
-                  setThinkingSteps((prev) => {
-                    const updated = [...prev];
-                    const lastIdx = updated.length - 1;
-                    if (lastIdx >= 0 && updated[lastIdx].key === 'thinking-live') {
-                      updated[lastIdx] = { ...updated[lastIdx], content: accText };
-                    } else {
-                      updated.push({
-                        key: 'thinking-live',
-                        title: '思考中',
-                        content: accText,
-                        status: 'pending',
-                        icon: <RobotOutlined />,
-                      });
-                    }
-                    return updated;
-                  });
-                  break;
-                }
-                case 'token': {
-                  streamTokenRef.current += ev.data.text || '';
-                  const accToken = streamTokenRef.current;
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.key === assistantKey
-                        ? { ...m, content: accToken, loading: false }
-                        : m,
-                    ),
-                  );
-                  break;
-                }
-                case 'step': {
-                  const stepKind = ev.data.step_kind || 'step';
-                  const stepText = ev.data.text || '';
-                  setThinkingSteps((prev) => [
-                    ...prev,
-                    {
-                      key: `step-${Date.now()}`,
-                      title: stepKind,
-                      content: stepText,
-                      status: 'success',
-                      icon: <ApiOutlined />,
-                    },
-                  ]);
-                  break;
-                }
-                case 'error': {
-                  msgApi.error(ev.data.message || '流式响应出错');
-                  break;
-                }
-                case 'final': {
-                  finalReceived = true;
-                  const fullAnswer = ev.data.answer || streamTokenRef.current;
-                  // 双保险：后端 failed 标记 + ⚠️ 前缀兜底检测
-                  const isFailed = !!ev.data.failed || fullAnswer.startsWith('⚠️');
-                  setFailedMap((prev) => {
-                    const next = { ...prev };
-                    if (isFailed) next[assistantKey] = q;
-                    else delete next[assistantKey];
-                    return next;
-                  });
-                  streamTokenRef.current = fullAnswer;
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.key === assistantKey
-                        ? { ...m, content: fullAnswer, loading: false }
-                        : m,
-                    ),
-                  );
-                  setThinkingSteps((prev) =>
-                    prev.map((item) =>
-                      item.key === 'thinking-live'
-                        ? { ...item, status: 'success' as const }
-                        : item,
-                    ),
-                  );
-                  if (fullAnswer.length >= 80) {
-                    fetchSuggestions(q, fullAnswer.slice(0, 800))
-                      .then(setSuggestions)
-                      .catch(() => {});
-                  }
-                  break;
-                }
-                case 'done': {
-                  finalReceived = true;
-                  loadSessions();
-                  break;
-                }
-              }
-            }
-            break; // 流正常结束，退出重试循环
-          } catch (e: any) {
-            if (await handleAuthError(e)) return;
-            if (String(e?.message) === 'AbortError' || ctrl.signal.aborted) return;
-
-            const isNetworkError = e instanceof TypeError;
-            const isServerError = /HTTP 5\d\d/.test(String(e?.message));
-            const canRetry = (isNetworkError || isServerError) && retryCount < MAX_RETRIES;
-            if (canRetry) {
-              // 自动重连:连接失败或流中途断(后端未落库,整轮重来安全)。
-              // 清空已显示的 partial 内容,气泡标记重连状态,指数退避后重试
-              retryCount++;
-              await new Promise((r) => setTimeout(r, 800 * retryCount));
-              streamTokenRef.current = '';
-              streamThinkingRef.current = '';
-              setThinkingSteps([]);
-              setMessages((prev) => prev.map((m) =>
-                m.key === assistantKey
-                  ? { ...m, content: `⚠️ 连接中断，正在自动重连（第 ${retryCount}/${MAX_RETRIES} 次）…`, loading: true }
-                  : m));
-              continue;
-            }
-
-            // 放弃重试：记录错误并保存失败问题供手动重试
-            errorReported = true;
-            msgApi.error('请求失败：' + e?.message);
-            setLastFailedQuestion(q);
-            if (streamTokenRef.current.length === 0) {
-              // 完全失败（未收到任何内容）：移除乐观添加的用户/助手消息，
-              // 避免留下无回复的"幽灵消息"；可经下方"重试"按钮重新发送
-              setMessages((prev) =>
-                prev.filter((m) => m.key !== userKey && m.key !== assistantKey),
-              );
-            }
-            break;
-          }
-        }
-
-        if (!finalReceived && !ctrl.signal.aborted && !errorReported) {
-          msgApi.warning('连接中断，回复不完整');
-        }
-      } finally {
-        setStreaming(false);
-        abortRef.current = null;
-      }
-    },
-    [streaming, imageAttaches, msgApi, handleAuthError, loadSessions],
-  );
-
-  /* ---- 重新生成：取最后一条 assistant 前的 user 消息重发（含图） ---- */
-  const handleRegenerate = useCallback(async () => {
-    if (streaming) return;
-    const msgs = messagesRef.current;
-    let ai = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === 'assistant') { ai = i; break; }
-    }
-    if (ai < 0) return;
-    let ui = -1;
-    for (let i = ai - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') { ui = i; break; }
-    }
-    if (ui < 0) return;
-    const uContent = msgs[ui].content || '';
-    const m = uContent.match(/!\[[^\]]*\]\(([^)]+)\)/);
-    let b64: string | undefined;
-    if (m?.[1]?.startsWith('data:')) b64 = m[1];
-    else if (m?.[1]) {
-      try {
-        const r = await fetch(m[1]);
-        const blob = await r.blob();
-        b64 = await new Promise<string>((res) => {
-          const fr = new FileReader();
-          fr.onload = () => res(String(fr.result || ''));
-          fr.readAsDataURL(blob);
-        });
-      } catch { b64 = undefined; }
-    }
-    const q = uContent.replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
-    setMessages((prev) => prev.slice(0, ui));   // 移除旧问答对（前端）
-    handleSend(q || '请描述这张图片。', b64);
-  }, [streaming, handleSend]);
-
-  /* ---- cancel stream ---- */
-  const handleCancel = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStreaming(false);
-  }, []);
-
   /* ---- 语音输入：豆包式按住说话，松开转写，上滑取消（逻辑见 useVoiceInput） ---- */
   const {
     recording,
@@ -586,35 +316,9 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- TTS 播报（状态机与缓存见 useSpeech） ---- */
   const { speech, handleSpeak } = useSpeech(voiceId, msgApi);
 
-  /* ---- inline retry：失败气泡原地重发 ---- */
-  const handleRetry = useCallback(
-    (key: string) => {
-      const q = failedMapRef.current[key];
-      if (!q || streaming) return;
-      setFailedMap((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-      // 移除失败气泡及其用户提问，再由 handleSend 重新乐观插入
-      setMessages((prev) => {
-        const idx = prev.findIndex((m) => m.key === key);
-        if (idx < 0) return prev;
-        const next = [...prev];
-        next.splice(idx, 1);
-        if (idx > 0 && next[idx - 1]?.role === 'user') next.splice(idx - 1, 1);
-        return next;
-      });
-      handleSend(q);
-    },
-    [streaming, handleSend],
-  );
-
   /* ---- new chat ---- */
   const handleNewChat = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStreaming(false);
+    handleCancel();   // 中断流并复位（abort + setStreaming(false)）
     setSuggestions([]);
     setThinkingSteps([]);
     const sid = newSessionId();
@@ -622,7 +326,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     setMessages([]);
     setFeedbackMap({});
     setFailedMap({});
-  }, []);
+  }, [handleCancel, setMessages, setSuggestions, setThinkingSteps, setFailedMap]);
 
   /* ---- assistant selector options ---- */
   const assistantOptions = useMemo(() => {
@@ -689,181 +393,23 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     },
   });
 
-  /* ---- render helper: AI message content ---- */
-  const renderAssistantContent = (content: string, isCurrentlyStreaming: boolean) => {
-    // 去说明书感：OOD 标注 / 通识来源 从方括号纯文本提取为警示胶囊
-    const { text, capsules } = extractWarnCapsules(content);
-    return (
-      <div>
-        {capsules.map((c, i) => (
-          <div key={i} className={`dm-capsule ${c.cls}`}>{c.label}</div>
-        ))}
-        {isCurrentlyStreaming && thinkingSteps.length > 0 && (
-          <div className="dm-thought-chain">
-            <ThoughtChain
-              items={thinkingSteps}
-              collapsible
-              size="small"
-            />
-          </div>
-        )}
-        {isCurrentlyStreaming ? (
-          <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>
-        ) : (
-          <MarkdownContent content={text} onLocate={handleLocate} />
-        )}
-      </div>
-    );
-  };
-
-  /* ---- render helper: feedback footer ---- */
-  const renderAssistantFooter = (_content: string, info: { key?: string | number }) => {
-    const curMsgs = messagesRef.current;
-    const seq = computeAssistantSeq(curMsgs, info.key ?? '');
-    if (seq == null) return null;
-    const seqKey = String(seq);
-    const fb = feedbackMapRef.current[seqKey];
-    // 失败气泡：内联重试按钮（失败在哪，按钮在哪）
-    const failedQ = failedMapRef.current[String(info.key)];
-    if (failedQ) {
-      return (
-        <div className="dm-feedback">
-          <Button
-            size="small"
-            type="primary"
-            ghost
-            icon={<ReloadOutlined />}
-            onClick={() => handleRetry(String(info.key))}
-          >
-            重试
-          </Button>
-        </div>
-      );
-    }
-    const isLastMsg = curMsgs.findIndex((m) => m.key === info.key) === curMsgs.length - 1 && !streaming;
-    const lastIdx = curMsgs.findIndex((m) => m.key === info.key);
-    const ts = (curMsgs[lastIdx] as any)?.ts as number | undefined;
-    const tsText = ts
-      ? (() => { const d = new Date(ts);
-          return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; })()
-      : null;
-    return (
-      <div className="dm-feedback">
-        {tsText && <span style={{ fontSize: 11, color: '#9a9a9a', marginRight: 4 }}>{tsText}</span>}
-        {isLastMsg && (
-          <Button
-            type="text"
-            size="small"
-            title="重新生成（基于上一条问题重问）"
-            icon={<ReloadOutlined />}
-            onClick={handleRegenerate}
-          />
-        )}
-        <Button
-          type="text"
-          size="small"
-          title="播报"
-          icon={
-            speech?.key === String(info.key) && speech.status === 'playing' ? (
-              <PauseOutlined />
-            ) : (
-              <SoundOutlined />
-            )
-          }
-          loading={speech?.key === String(info.key) && speech.status === 'loading'}
-          onClick={() => handleSpeak(_content, String(info.key))}
-        />
-        <Button
-          type="text"
-          size="small"
-          icon={fb === 'up' ? <LikeFilled style={{ color: '#6366f1' }} /> : <LikeOutlined />}
-          onClick={() => handleFeedback(seq, 'up')}
-        />
-        <Button
-          type="text"
-          size="small"
-          icon={fb === 'down' ? <DislikeFilled style={{ color: '#6366f1' }} /> : <DislikeOutlined />}
-          onClick={() => handleFeedback(seq, 'down')}
-        />
-      </div>
-    );
-  };
-
-  /* ---- bubble roles ---- */
+  /* ---- bubble roles：渲染配置内聚（useBubbleRoles）---- */
   const currentAssistant = assistants.find((a) => a.id === assistantId);
-  const bubbleRoles = {
-    user: {
-      placement: 'end' as const,
-      avatar: {
-        icon: <UserAvatar avatar={_me.avatar} name={_me.user} size={28} />,
-        style: { background: 'transparent' },
-      },
-      variant: 'filled' as const,
-      messageRender: (content: string) => {
-        // 图片消息：提取 markdown 图片（当轮为 dataUrl、历史为 /files/uploads 短链），
-        // 以缩略图展示 + 点击预览；避免 base64 长 URL 以文本形式露出
-        const { imgs, text } = splitImagesFromText(content);
-        return (
-          <div>
-            {imgs.length > 0 && (
-              <div
-                style={{
-                  display: 'flex', gap: 6, flexWrap: 'wrap',
-                  marginBottom: text ? 6 : 0, justifyContent: 'flex-end',
-                }}
-              >
-                {imgs.map((u, i) => (
-                  <Image
-                    key={i}
-                    src={u}
-                    alt="图片"
-                    width={imgs.length > 1 ? 150 : 200}
-                    height={imgs.length > 1 ? 150 : 200}
-                    style={{ borderRadius: 10, objectFit: 'cover' }}
-                    preview={{ mask: '预览' }}
-                  />
-                ))}
-              </div>
-            )}
-            {text && <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>}
-          </div>
-        );
-      },
-      footer: (_c: string, info: { key?: string | number }) => {
-        const m = messagesRef.current.find((x) => x.key === info.key);
-        if (!(m as any)?.ts) return null;
-        const d = new Date((m as any).ts);
-        return (
-          <div style={{ fontSize: 11, color: '#9a9a9a', textAlign: 'right' }}>
-            {`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`}
-          </div>
-        );
-      },
-    },
-    assistant: {
-      placement: 'start' as const,
-      avatar: currentAssistant?.avatar
-        ? {
-            icon: (
-              <UserAvatar
-                avatar={currentAssistant.avatar}
-                name={currentAssistant.name}
-                size={28}
-              />
-            ),
-            style: { background: 'transparent' },
-          }
-        : { icon: <RobotOutlined />, style: { background: '#6366f1', color: '#fff' } },
-      variant: 'filled' as const,
-      messageRender: (content: string, _type?: any, info?: { key?: string | number }) => {
-        const curMsgs = messagesRef.current;
-        const isLast = !!info?.key && curMsgs.length > 0 && curMsgs[curMsgs.length - 1].key === info.key;
-        return renderAssistantContent(content, isLast && streaming);
-      },
-      footer: (_content: string, info: { key?: string | number }) =>
-        renderAssistantFooter(_content, info),
-    },
-  };
+  const { bubbleRoles } = useBubbleRoles({
+    me: _me,
+    currentAssistant,
+    streaming,
+    thinkingSteps,
+    speech,
+    messagesRef,
+    feedbackMapRef,
+    failedMapRef,
+    onLocate: handleLocate,
+    onRetry: handleRetry,
+    onRegenerate: handleRegenerate,
+    onFeedback: handleFeedback,
+    onSpeak: handleSpeak,
+  });
 
   /* ---- render ---- */
   return (
