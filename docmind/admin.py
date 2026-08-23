@@ -19,10 +19,9 @@ from docmind import config, semantic_cache, store
 
 
 def _current_user(request, app) -> str:
-    token = (request.cookies.get(f"access-token-{app.cookie_id}")
-             or request.cookies.get(f"access-token-unsecure-{app.cookie_id}"))
-    return (app.tokens.get(token) if token else None) or ""
-
+    """自研 token 会话(web_auth),与 app.py 登录链路一致"""
+    from docmind import web_auth
+    return web_auth.current_user(request)
 
 def _require_admin(request, app) -> str:
     user = _current_user(request, app)

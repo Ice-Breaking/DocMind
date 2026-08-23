@@ -25,18 +25,32 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".csv", ".json", ".png", ".jpg", ".jpeg", ".webp"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+# 解析器资源上限：恶意构造的文档(zip bomb/万页 PDF)会拖垮建库进程
+_MAX_EXTRACT_CHARS = int(os.getenv("MAX_EXTRACT_CHARS", str(4 * 1024 * 1024)))  # 单文档提取文本上限 4MB
+_MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "500"))                          # 单 PDF 最大解析页数
+_MAX_XLSX_ROWS = int(os.getenv("MAX_XLSX_ROWS", "200000"))                       # 单 xlsx 最大行数
 OCR_CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "ocr_cache")
 _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切分但保留标题文本
 
 
 # ---------------- 格式提取器 ----------------
+# 解析器资源上限:防恶意构造文件耗尽内存(zip bomb / 超大页)
+_MAX_PDF_PAGES = 2000
+_MAX_DOCX_UNCOMPRESSED = 200 * 1024 * 1024   # 解压后总大小上限 200MB
+
+
 def _extract_pdf_pages(path: str) -> list[tuple[int, str]]:
     """pypdf 逐页提取文本，返回 [(页号, 文本)]（页号从 1 起），供切片携带页码元数据"""
     from pypdf import PdfReader
 
     reader = PdfReader(path)
+    if len(reader.pages) > _MAX_PDF_PAGES:
+        raise ValueError(f"PDF 页数超过上限 {_MAX_PDF_PAGES}")
     pages = []
     for i, page in enumerate(reader.pages, 1):
+        if i > _MAX_PDF_PAGES:
+            logger.warning(f"PDF 超过 {_MAX_PDF_PAGES} 页，仅解析前 {_MAX_PDF_PAGES} 页: {os.path.basename(path)}")
+            break
         text = (page.extract_text() or "").strip()
         if text:
             pages.append((i, text))
@@ -50,6 +64,13 @@ def _extract_pdf(path: str) -> str:
 
 def _extract_docx(path: str) -> str:
     """python-docx 提取正文段落与表格（表格按行拼接）"""
+    import zipfile
+
+    with zipfile.ZipFile(path) as _zf:   # docx 本质是 zip:防解压炸弹
+        total = sum(i.file_size for i in _zf.infolist())
+        if total > _MAX_DOCX_UNCOMPRESSED:
+            raise ValueError(f"docx 解压后超过上限 {_MAX_DOCX_UNCOMPRESSED // (1024 * 1024)}MB")
+
     import docx
 
     d = docx.Document(path)
@@ -164,6 +185,7 @@ def load_documents(knowledge_dir: str | None = None) -> list[dict]:
         except Exception as e:  # noqa: BLE001 - 坏文件不能阻断整个建库流程
             logger.warning(f"文档解析失败，已跳过 {name}: {e}")
             continue
+        text = (text or "")[:_MAX_EXTRACT_CHARS]
         if text.strip():
             docs.append({"source": name, "text": text.strip()})
     return docs
@@ -310,6 +332,7 @@ def chunk_single_file(root: str, name: str) -> list[dict]:
     except Exception as e:  # noqa: BLE001 - 坏文件不能阻断整个建库流程
         logger.warning(f"文档解析失败，已跳过 {name}: {e}")
         return []
+    text = (text or "")[:_MAX_EXTRACT_CHARS]
     if not text.strip():
         return []
     chunks = []

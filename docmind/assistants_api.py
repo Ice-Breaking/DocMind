@@ -15,10 +15,9 @@ from docmind import semantic_cache, store
 
 # ---- 当前用户解析：复用 Gradio 登录 cookie（与 admin.py 保持一致） ----
 def _current_user(request, app) -> str:
-    token = (request.cookies.get(f"access-token-{app.cookie_id}")
-             or request.cookies.get(f"access-token-unsecure-{app.cookie_id}"))
-    return (app.tokens.get(token) if token else None) or ""
-
+    """自研 token 会话(web_auth),与 app.py 登录链路一致"""
+    from docmind import web_auth
+    return web_auth.current_user(request)
 
 def _require_user(request, app) -> str:
     """校验登录态；被要求强制改密的用户返回 403"""

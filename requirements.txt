@@ -24,7 +24,7 @@ langfuse>=4.0.0
 mcp>=1.2.0,<2.0.0
 
 # Web 界面（5.0+ 默认 messages 对话格式）
-gradio>=5.0.0
+uvicorn>=0.30.0
 
 # 环境变量
 python-dotenv>=1.0.0
