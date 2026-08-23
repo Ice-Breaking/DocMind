@@ -1,9 +1,9 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 // 开发期代理到后端 Gradio/FastAPI（7860）：登录 cookie 同源流转，无跨域问题
 const BACKEND = 'http://127.0.0.1:7860';
-
 // SSE 防挂配置：客户端中途断开（刷新/关页）时销毁上游请求，
 // 否则 vite 5 的 http-proxy 会把整个 dev server 拖挂
 const sseSafe = {
@@ -22,6 +22,13 @@ const sseSafe = {
 
 export default defineConfig({
   plugins: [react()],
+  // Vitest 单测:jsdom 环境渲染 antd 组件,setup 补齐缺失浏览器 API
+  test: {
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    css: false,
+    include: ['src/**/*.test.{ts,tsx}'],
+  },
   server: {
     port: 5173,
     // 内网穿透（cloudflared trycloudflare 等）时 Host 非 localhost，
