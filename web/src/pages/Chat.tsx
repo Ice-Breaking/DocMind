@@ -29,12 +29,9 @@ import {
   SoundOutlined,
 } from '@ant-design/icons';
 import { App, Button, Image, Input, Modal, Progress, Select, Space, Typography } from 'antd';
-import { blobToWav16k } from '../voice';
 import UserAvatar from '../components/UserAvatar';
 import {
   fetchVoices,
-  transcribeAudio,
-  synthesizeSpeech,
   type VoiceOption,
 } from '../api';
 import Bubble from '@ant-design/x/es/bubble';
@@ -60,21 +57,16 @@ import {
   type Me,
   type Session,
 } from '../api';
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-/** 生成新会话 ID */
-function newSessionId(): string {
-  return `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * 引用 Markdown 化：将 [来源: xxx.md · 第N页] 转为 markdown 链接，
- * 由 ReactMarkdown 渲染为 <a>，点击行为由自定义 a 组件处理。
- */
-
+import {
+  computeAssistantSeq,
+  extractWarnCapsules,
+  fmtSessionTime,
+  groupSessions,
+  newSessionId,
+  splitImagesFromText,
+} from './chat/utils';
+import { useVoiceInput } from './chat/useVoiceInput';
+import { useSpeech } from './chat/useSpeech';
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
@@ -101,7 +93,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     () => localStorage.getItem('dm_voice') || 'Cherry',
   );
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
-  const [recording, setRecording] = useState(false);
   const [imageAttaches, setImageAttaches] = useState<{ dataUrl: string; base64: string }[]>([]);
   const [convSearch, setConvSearch] = useState('');
   const navigate = useNavigate();
@@ -115,7 +106,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const MAX_IMGS = 5;   // 单条消息最多携带图片数
   const imgInputRef = useRef<HTMLInputElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [assistantId, setAssistantId] = useState<string>(
     () => localStorage.getItem('dm_assistant_id') || 'default',
@@ -583,162 +573,18 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     setStreaming(false);
   }, []);
 
-  /* ---- 语音输入：豆包式按住说话，松开转写，上滑取消 ---- */
-  const micRef = useRef<HTMLButtonElement | null>(null);
+  /* ---- 语音输入：豆包式按住说话，松开转写，上滑取消（逻辑见 useVoiceInput） ---- */
+  const {
+    recording,
+    cancelMode,
+    micRef,
+    beginRecord,
+    moveRecord,
+    endRecord,
+  } = useVoiceInput((text) => setSenderValue((v) => (v ? `${v} ${text}` : text)), msgApi);
 
-  // 安卓长按时浏览器会把手势劫持去滚动/弹菜单，触发 pointercancel 导致录音中断。
-  // React 的 touch 监听是 passive 的无法 preventDefault，故用原生非被动监听阻断劫持。
-  useEffect(() => {
-    const el = micRef.current;
-    if (!el) return;
-    const prevent = (e: TouchEvent) => e.preventDefault();
-    el.addEventListener('touchstart', prevent, { passive: false });
-    el.addEventListener('touchmove', prevent, { passive: false });
-    return () => {
-      el.removeEventListener('touchstart', prevent);
-      el.removeEventListener('touchmove', prevent);
-    };
-  }, []);
-
-  const recRef2 = useRef<{
-    rec: MediaRecorder | null;
-    chunks: Blob[];
-    startY: number;
-    cancel: boolean;
-    stopped: boolean;
-  } | null>(null);
-  const [cancelMode, setCancelMode] = useState(false);
-
-  const beginRecord = async (e: React.PointerEvent) => {
-    if (recRef2.current) return;
-    e.preventDefault();
-    // 指针捕获：触摸期间即使手指移出按钮，move/up 仍派发到本元素，
-    // 避免移动端 pointerleave 误触发"提前松手"导致录不到音
-    try {
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    } catch {
-      /* 不支持捕获的环境降级原行为 */
-    }
-    const st: {
-      rec: MediaRecorder | null;
-      chunks: Blob[];
-      startY: number;
-      cancel: boolean;
-      stopped: boolean;
-    } = { rec: null, chunks: [], startY: e.clientY, cancel: false, stopped: false };
-    recRef2.current = st;
-    setRecording(true);
-    setCancelMode(false);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (st.stopped) {
-        // 授权期间已松手：直接清理，不识别
-        stream.getTracks().forEach((t) => t.stop());
-        recRef2.current = null;
-        setRecording(false);
-        return;
-      }
-      const rec = new MediaRecorder(stream);
-      st.rec = rec;
-      rec.ondataavailable = (ev) => {
-        if (ev.data.size > 0) st.chunks.push(ev.data);
-      };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const wasCancel = st.cancel;
-        const chunks = st.chunks;
-        recRef2.current = null;
-        setRecording(false);
-        setCancelMode(false);
-        if (wasCancel) {
-          msgApi.info('已取消语音输入');
-          return;
-        }
-        try {
-          const wav = await blobToWav16k(new Blob(chunks, { type: rec.mimeType }));
-          const text = await transcribeAudio(wav);
-          if (text) setSenderValue((v) => (v ? `${v} ${text}` : text));
-          else msgApi.warning('没有听清，请再试一次');
-        } catch (err: any) {
-          msgApi.error(err?.message || '语音识别失败');
-        }
-      };
-      rec.start();
-    } catch {
-      recRef2.current = null;
-      setRecording(false);
-      msgApi.error('无法访问麦克风，请检查浏览器权限');
-    }
-  };
-
-  const moveRecord = (e: React.PointerEvent) => {
-    const st = recRef2.current;
-    if (!st) return;
-    const cancel = st.startY - e.clientY > 48;
-    if (cancel !== st.cancel) {
-      st.cancel = cancel;
-      setCancelMode(cancel);
-    }
-  };
-
-  const endRecord = () => {
-    const st = recRef2.current;
-    if (!st) return;
-    st.stopped = true;
-    if (st.rec && st.rec.state !== 'inactive') st.rec.stop();
-  };
-
-  /* ---- TTS 播报：点击播放 / 再点暂停 / 再点续播；客户端缓存加速重播 ---- */
-  const audioCacheRef = useRef<Map<string, string>>(new Map());
-  const [speech, setSpeech] = useState<{
-    key: string;
-    status: 'loading' | 'playing' | 'paused';
-  } | null>(null);
-  const speechRef = useRef(speech);
-  useEffect(() => {
-    speechRef.current = speech;
-  }, [speech]);
-
-  const handleSpeak = useCallback(
-    async (content: string, key: string) => {
-      const cur = speechRef.current;
-      if (cur && cur.key === key) {
-        const a = audioRef.current;
-        if (cur.status === 'playing') {
-          a?.pause(); // onpause 事件更新状态为 paused
-          return;
-        }
-        if (cur.status === 'paused') {
-          a?.play().catch(() => setSpeech(null));
-          return;
-        }
-        return; // loading 中忽略
-      }
-      audioRef.current?.pause();
-      setSpeech({ key, status: 'loading' });
-      try {
-        const cacheKey = `${voiceId}|${key}`;
-        let url = audioCacheRef.current.get(cacheKey);
-        if (!url) {
-          const blob = await synthesizeSpeech(content, voiceId);
-          url = URL.createObjectURL(blob);
-          audioCacheRef.current.set(cacheKey, url); // 会话内重播零等待
-        }
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.onplay = () => setSpeech({ key, status: 'playing' });
-        audio.onpause = () =>
-          setSpeech((s) => (s && s.key === key ? { key, status: 'paused' } : s));
-        audio.onended = () => setSpeech((s) => (s && s.key === key ? null : s));
-        audio.onerror = () => setSpeech((s) => (s && s.key === key ? null : s));
-        await audio.play();
-      } catch (e: any) {
-        msgApi.error(e?.message || '播报失败');
-        setSpeech(null);
-      }
-    },
-    [voiceId, msgApi],
-  );
+  /* ---- TTS 播报（状态机与缓存见 useSpeech） ---- */
+  const { speech, handleSpeak } = useSpeech(voiceId, msgApi);
 
   /* ---- inline retry：失败气泡原地重发 ---- */
   const handleRetry = useCallback(
@@ -791,34 +637,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     return opts;
   }, [assistants, assistantId]);
 
-  /* ---- 会话列表:时间格式化 + 分组（参考 IM 惯例 Today/Yesterday/7天内/更早） ---- */
-  const fmtSessionTime = (ts: number) => {
-    const d = new Date(ts * 1000);
-    const now = new Date();
-    const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
-    if (sameDay(d, now)) return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    const yest = new Date(now); yest.setDate(now.getDate() - 1);
-    if (sameDay(d, yest)) return '昨天';
-    if (now.getTime() - d.getTime() < 7 * 86400_000) return `${d.getMonth() + 1}月${d.getDate()}日`;
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  };
-  const sessionGroups = (() => {
-    const now = new Date();
-    const startOfDay = (dt: Date) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
-    const today0 = startOfDay(now);
-    const groups: { label: string; items: typeof sessions }[] = [
-      { label: '今天', items: [] }, { label: '昨天', items: [] },
-      { label: '7 天内', items: [] }, { label: '更早', items: [] },
-    ];
-    for (const sess of sessions) {
-      const t = (sess.updated_at || 0) * 1000;
-      if (t >= today0) groups[0].items.push(sess);
-      else if (t >= today0 - 86400_000) groups[1].items.push(sess);
-      else if (t >= today0 - 7 * 86400_000) groups[2].items.push(sess);
-      else groups[3].items.push(sess);
-    }
-    return groups.filter((g) => g.items.length > 0);
-  })();
+  /* ---- 会话列表:时间格式化 + 分组（参考 IM 惯例 Today/Yesterday/7天内/更早，实现见 chat/utils） ---- */
+  const sessionGroups = useMemo(
+    () => groupSessions(sessions),
+    [sessions],
+  );
 
   /* ---- conversation items（按搜索词过滤） ---- */
 
@@ -869,16 +692,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- render helper: AI message content ---- */
   const renderAssistantContent = (content: string, isCurrentlyStreaming: boolean) => {
     // 去说明书感：OOD 标注 / 通识来源 从方括号纯文本提取为警示胶囊
-    let text = content || '';
-    const capsules: { cls: string; label: string }[] = [];
-    text = text.replace(/【(知识库无相关内容[^】]*)】/g, (_m, g: string) => {
-      capsules.push({ cls: 'dm-capsule-warn', label: `⚠️ ${g}` });
-      return '';
-    });
-    text = text.replace(/\[来源: 通识知识[^\]]*\]/g, () => {
-      capsules.push({ cls: 'dm-capsule-warn', label: '📖 通识回答 · 未经知识库验证' });
-      return '';
-    });
+    const { text, capsules } = extractWarnCapsules(content);
     return (
       <div>
         {capsules.map((c, i) => (
@@ -905,16 +719,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   /* ---- render helper: feedback footer ---- */
   const renderAssistantFooter = (_content: string, info: { key?: string | number }) => {
     const curMsgs = messagesRef.current;
-    const idx = curMsgs.findIndex((m) => m.key === info.key);
-    if (idx < 0) return null;
-    let assistantIdx = 0;
-    for (let i = 0; i <= idx; i++) {
-      if (curMsgs[i].role === 'assistant') {
-        if (i === idx) break;
-        assistantIdx++;
-      }
-    }
-    const seq = 2 * assistantIdx + 1;
+    const seq = computeAssistantSeq(curMsgs, info.key ?? '');
+    if (seq == null) return null;
     const seqKey = String(seq);
     const fb = feedbackMapRef.current[seqKey];
     // 失败气泡：内联重试按钮（失败在哪，按钮在哪）
@@ -934,8 +740,9 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         </div>
       );
     }
-    const isLastMsg = idx === curMsgs.length - 1 && !streaming;
-    const ts = (curMsgs[idx] as any)?.ts as number | undefined;
+    const isLastMsg = curMsgs.findIndex((m) => m.key === info.key) === curMsgs.length - 1 && !streaming;
+    const lastIdx = curMsgs.findIndex((m) => m.key === info.key);
+    const ts = (curMsgs[lastIdx] as any)?.ts as number | undefined;
     const tsText = ts
       ? (() => { const d = new Date(ts);
           return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; })()
@@ -995,13 +802,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       messageRender: (content: string) => {
         // 图片消息：提取 markdown 图片（当轮为 dataUrl、历史为 /files/uploads 短链），
         // 以缩略图展示 + 点击预览；避免 base64 长 URL 以文本形式露出
-        const imgs: string[] = [];
-        const text = content
-          .replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, url: string) => {
-            imgs.push(url);
-            return '';
-          })
-          .trim();
+        const { imgs, text } = splitImagesFromText(content);
         return (
           <div>
             {imgs.length > 0 && (
