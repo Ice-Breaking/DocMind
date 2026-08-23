@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   ApiOutlined,
   CommentOutlined,
@@ -32,29 +32,16 @@ function formatTime(ts: number): string {
 
 export default function Dashboard({ me }: { me: Me }) {
   const navigate = useNavigate();
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await fetchDashboard();
-        if (!cancelled) setStats(data);
-      } catch (e: unknown) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '加载失败');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // 工作台统计数据：TanStack Query 托管加载/错误态与请求去重
+  // （StrictMode 双挂载不再双请求；行为对齐旧手写 effect：进入即拉取、失败即错误态）
+  const { data: stats, isPending, error } = useQuery<DashboardStats, Error>({
+    queryKey: ['dashboard'],
+    queryFn: fetchDashboard,
+  });
 
   /* ---- loading / error ---- */
-  if (loading) {
+  if (isPending) {
     return <Spin style={{ display: 'block', margin: '120px auto' }} size="large" />;
   }
   if (error || !stats) {
@@ -62,7 +49,7 @@ export default function Dashboard({ me }: { me: Me }) {
       <Result
         status="warning"
         title="仪表盘加载失败"
-        subTitle={error || '未知错误'}
+        subTitle={error?.message || '未知错误'}
         extra={<Button type="primary" onClick={() => window.location.reload()}>重试</Button>}
       />
     );
