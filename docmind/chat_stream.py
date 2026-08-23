@@ -142,6 +142,18 @@ def stream_events(agent, question: str, session_id: str = "",
                 else:
                     agent.history.append({"role": r, "content": t})
 
+    # 1.5) 预启动术语解读（后台线程）：该步是独立 LLM 调用，与下方
+    #      embedding/缓存查询互不依赖——并行执行把一次串行 LLM 往返
+    #      （约 300-800ms 首响应延迟）藏进等待窗口；agent.ask 内直接收取。
+    #      图片消息跳过（视觉理解为主）；命中缓存提前返回时 cancel 未启动
+    #      的任务，尽量减少缓存命中路径的无谓消耗（已启动的结果弃用，无害）
+    #      兼容性：getattr 探测，最小实现的 agent 替身（测试/嵌入方）无需实现
+    interpret_future = None
+    _start_interpret = getattr(agent, "start_interpret", None)
+    if _start_interpret is not None:
+        interpret_future = _start_interpret(question,
+                                            skip=image_data is not None)
+
     # 2) 语义缓存：高频问题秒回，跳过整个 Agent 链路
     #    时效闸门在前：时效性问题跳过缓存读写，强制走联网链路（铁律保证）；
     #    图片消息同样跳过（多模态当轮现算，且缓存为纯文本语义）
@@ -166,6 +178,8 @@ def stream_events(agent, question: str, session_id: str = "",
         if hit and not acl.answer_allowed(hit[1], user):
             hit = None   # 缓存答案引用了当前用户无权的受限文档 → 防跨用户泄露
         if hit:
+            if interpret_future is not None:
+                interpret_future.cancel()   # 缓存命中无需解读结果，未启动即取消
             cq, cached_answer, _ = hit
             yield {"kind": "cache", "cached_question": cq, "answer": cached_answer}
             yield {"kind": "final", "answer": cached_answer}
@@ -177,6 +191,8 @@ def stream_events(agent, question: str, session_id: str = "",
             kb_ids = current_kb_ids.get() if assistant_id else []
             reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids, sp)
             if reasoning_hit and acl.answer_allowed(reasoning_hit, user):
+                if interpret_future is not None:
+                    interpret_future.cancel()   # 同语义缓存命中：取消未启动任务
                 yield {"kind": "reasoning", "answer": reasoning_hit}
                 yield {"kind": "final", "answer": reasoning_hit}
                 return
@@ -187,7 +203,8 @@ def stream_events(agent, question: str, session_id: str = "",
     final_answer = ""
     partial = ""
     try:
-        for step in agent.ask(question, image_data=image_data):
+        for step in agent.ask(question, image_data=image_data,
+                              interpret_future=interpret_future):
             if step.kind == "token":
                 partial += step.text
                 yield {"kind": "token", "text": step.text}
@@ -197,7 +214,7 @@ def stream_events(agent, question: str, session_id: str = "",
                 final_answer = step.text
             else:
                 yield {"kind": "step", "step_kind": step.kind, "text": step.text}
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("Agent 应答链路异常")   # 细节只进日志，不透给用户
         final_answer = ("⚠️ 抱歉，处理您的问题时出现了内部故障，请稍后重试；"
                         "若持续失败请联系管理员。")

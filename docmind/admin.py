@@ -5,7 +5,6 @@
 """
 import json
 import os
-import time
 from collections import defaultdict
 
 import fastapi

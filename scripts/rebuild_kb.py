@@ -8,7 +8,6 @@ sys.path.insert(0, '.')
 
 from docmind.rag.vector_store import VectorStore, COLLECTION_NAME
 from docmind import config
-import os
 
 def main():
     kb_id = 'default'
@@ -26,14 +25,14 @@ def main():
     print("正在扫描文档并重建索引...")
     result = vector_store.rebuild_incremental(kb_dir)
 
-    print(f"\n✅ 重建完成！")
+    print("\n✅ 重建完成！")
     print(f"  - 新增文件: {result.get('added', 0)}")
     print(f"  - 修改文件: {result.get('modified', 0)}")
     print(f"  - 删除文件: {result.get('removed', 0)}")
     print(f"  - 未变文件: {result.get('unchanged', 0)}")
     print(f"  - 总切片数: {result.get('chunks', 0)}")
 
-    print(f"\n现在可以在浏览器中预览文件了！")
+    print("\n现在可以在浏览器中预览文件了！")
 
 if __name__ == '__main__':
     main()

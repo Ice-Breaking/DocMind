@@ -9,6 +9,7 @@
 2. 重复调用检测：连续相同的工具+参数直接打断
 3. 工具异常不抛出，转为观察结果让 LLM 自我纠正
 """
+import concurrent.futures
 import logging
 import os
 import re
@@ -22,6 +23,13 @@ from docmind.agent.tools import ToolRegistry
 from docmind.llm import _brief_messages, chat, chat_stream
 
 logger = logging.getLogger(__name__)
+
+# 术语解读步后台线程池：调用方（chat_stream）可在 embedding/缓存查询之前
+# 预启动解读，ask() 收取结果——把一次串行 LLM 往返藏进并行等待窗口；
+# 进程级共享（解读无状态），max_workers 限制并发防上游 LLM 过载
+_INTERPRET_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="term-interp")
+
 
 def _load_glossary() -> str:
     """加载领域术语表（docs/glossary.md），注入系统提示词；文件不存在则跳过"""
@@ -247,13 +255,25 @@ class ReActAgent:
     def __post_init__(self):
         self.system_prompt = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
 
+    def start_interpret(self, question: str, skip: bool = False):
+        """预启动术语解读步（后台线程），返回 Future 供 ask(interpret_future=…)
+        收取。skip=True（图片消息以视觉理解为主）返回 None，ask 内保持跳过
+        语义。解读步自身吞异常返回空串，Future 不会携带异常炸出。"""
+        if skip or not question:
+            return None
+        return _INTERPRET_POOL.submit(self._interpret_step, question)
+
     def ask(self, question: str, note: str | None = None,
-            image_data: 'str | list[str] | None' = None):
+            image_data: 'str | list[str] | None' = None,
+            interpret_future: 'concurrent.futures.Future | None' = None):
         """处理一次提问，yield AgentStep，最后一步 kind='final' 为最终回答。
         note：服务端术语表命中的释义注解，作为系统消息注入（确定性，不依赖模型自觉）。
         image_data：图片 base64（可带 data:image/..;base64, 前缀）——当轮
         user 消息以多模态 content 发送，LLM 调用自动切换 VISION_MODEL，
-        模型真正"看图"作答（而非仅 OCR 文本）"""
+        模型真正"看图"作答（而非仅 OCR 文本）
+        interpret_future：start_interpret 预启动的解读 Future（可选）——
+        传入则直接收取结果，不再同步重跑（省一次串行 LLM 往返）；不传
+        （CLI/评测等调用方）保持原同步行为不变"""
         if not self.history:
             self.history.append({"role": "system", "content": self.system_prompt})
 
@@ -268,7 +288,7 @@ class ReActAgent:
             intent_note = f"【意图理解】{intent['reason']}；置信度：{intent['confidence']:.0%}"
 
         # 层0：增强的时效性检测（保留原有功能）
-        from docmind.timeliness_detector import detect_timeliness, extract_search_query
+        from docmind.timeliness_detector import detect_timeliness
 
         timeliness_analysis = detect_timeliness(question)
         force_web_search_timeliness = timeliness_analysis['priority'] == 'high'
@@ -308,14 +328,24 @@ class ReActAgent:
         if force_web_search:
             import concurrent.futures as _cf
             with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
-                _f_interp = _ex.submit(self._interpret_step, question)
+                # 复用调用方预启动的解读 Future（避免同问题跑两次术语解读）
+                _f_interp = interpret_future or _ex.submit(
+                    self._interpret_step, question)
                 _f_web = _ex.submit(self._force_web_step,
                                     question, timeliness_analysis)
                 interp = _f_interp.result()
                 web_note, web_search_failed = _f_web.result()
         else:
             # 图片消息以视觉理解为主，文本术语解读步跳过（省一次 LLM 调用）
-            interp = "" if image_data else self._interpret_step(question)
+            if image_data:
+                interp = ""
+            elif interpret_future is not None:
+                try:
+                    interp = interpret_future.result()
+                except Exception:  # noqa: BLE001 - 与 _interpret_step 同容错语义
+                    interp = ""
+            else:
+                interp = self._interpret_step(question)
 
             # 优先级2：梗类问句联网
             if meme_hit:
@@ -428,7 +458,7 @@ class ReActAgent:
                     ctx["output"] = (answer or f"[调用工具: {tool_names}]")[:300]
                     if usage:
                         ctx["usage"] = {"input": usage.prompt_tokens, "output": usage.completion_tokens}
-            except Exception as e:  # noqa: BLE001 - 模型调用失败不能弄崩生成器
+            except Exception:  # noqa: BLE001 - 模型调用失败不能弄崩生成器
                 logger.exception("模型调用失败（已自动重试过）")
                 # ⚠️ 前缀是兜底答案约定：chat_stream 据此跳过缓存写入并标记
                 # failed（前端展示重试按钮）——错误文案绝不入缓存
@@ -545,6 +575,7 @@ class ReActAgent:
             is_search_result_relevant,
             format_no_data_response,
         )
+        from docmind.timeliness_detector import extract_search_query
 
         optimized_query = extract_search_query(question, timeliness_analysis)
         search_success = False

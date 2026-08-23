@@ -103,7 +103,7 @@ def test_version_comparison():
     if "3.11" in answer and ("更新" in answer or "大" in answer or ">" in answer):
         print_pass("正确识别 3.11 > 3.9")
     else:
-        print_fail(f"未正确识别版本大小")
+        print_fail("未正确识别版本大小")
         print(f"回答: {result['answer'][:200]}")
         return False
 
@@ -325,7 +325,7 @@ def main():
 
     # 检查服务是否可用
     try:
-        resp = requests.get(f"{BASE_URL}/", timeout=5)
+        requests.get(f"{BASE_URL}/", timeout=5)
         print_pass("服务连接正常")
     except Exception as e:
         print_fail(f"无法连接到服务: {e}")

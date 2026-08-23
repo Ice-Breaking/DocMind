@@ -15,6 +15,15 @@ def _isolate_reasoning_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_reasoning_cache, "_local", threading.local())
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tokenize_cache(tmp_path, monkeypatch):
+    """分词缓存隔离：BM25 构建会写 data/index/tokenize_cache.db，
+    测试统一指向临时库，不污染真实缓存目录"""
+    from docmind.rag import tokenize_cache
+    monkeypatch.setattr(tokenize_cache, "DB_PATH", str(tmp_path / "tokenize.db"))
+    monkeypatch.setattr(tokenize_cache, "_local", threading.local())
+
+
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     """store/acl/semantic_cache 全部指向临时 DB，互不污染真实数据"""

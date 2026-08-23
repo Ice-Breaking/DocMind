@@ -26,7 +26,6 @@ from docmind.rag import cache as cache_mod
 from docmind.rag.embed_cache import embed_cached
 from docmind.rag.cache import (
     compute_file_manifest,
-    compute_fingerprint,
     compute_global_fingerprint,
     load_global_fingerprint,
     load_manifest,
@@ -187,7 +186,6 @@ class VectorStore:
         use_cache=True 且 Chroma 已有与当前指纹一致的索引时直接复用，
         避免重复调用 embedding API（慢且费 token）。
         """
-        fingerprint = compute_fingerprint(knowledge_dir)
         if use_cache and self._chroma_ready:
             # 缓存命中前置校验：Chroma 实际内容必须覆盖目录全部支持文件。
             # 只信 _chroma_ready 会在索引部分丢失（写入中断/外部损坏）时

@@ -4,7 +4,6 @@
 指标：Recall@4（Top-4 内命中正确文档的比例）、平均排名 MRR
 """
 import argparse
-import sys
 
 from docmind.rag.eval_set import EVAL_SET, HARD_SET
 from docmind.rag.vector_store import VectorStore

@@ -13,8 +13,7 @@
 """
 import os
 import re
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 
 
 # 文档类型分类关键词
@@ -138,8 +137,6 @@ def check_document_freshness(source_file: str, content_preview: str = '') -> dic
         result['expire_risk'] = 'none'
         result['warning_message'] = ''
         return result
-
-    threshold_days = _EXPIRY_THRESHOLDS.get(doc_type, 365)
 
     if age_years >= 3:
         # 超过3年：高风险

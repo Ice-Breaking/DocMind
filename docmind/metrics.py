@@ -1,5 +1,5 @@
 """Prometheus metrics for DocMind."""
-from prometheus_client import Counter, Histogram, Gauge, Info
+from prometheus_client import Counter, Histogram, Gauge
 
 # HTTP metrics
 HTTP_REQUESTS = Counter(

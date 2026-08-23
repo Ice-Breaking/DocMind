@@ -14,6 +14,7 @@ import requests
 from rank_bm25 import BM25Okapi
 
 from docmind import config, trace
+from docmind.rag.tokenize_cache import tokenize_cached
 from docmind.rag.vector_store import SearchHit, VectorStore
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 RRF_K = 60          # RRF 平滑常数，经验值 60
 CANDIDATE_K = 10    # 初筛候选数量（送入 Rerank 的上限）
 RERANK_URL = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+
+# Rerank HTTP 连接池：Session 复用 TCP/TLS 连接，每次精排省去重新握手
+# 的 ~100-300ms；urllib3 连接池线程安全，多请求并发可共享
+_SESSION = requests.Session()
 
 
 def tokenize(text: str) -> list[str]:
@@ -54,10 +59,16 @@ class HybridRetriever:
         self._built_version = -1
 
     def build(self) -> None:
-        """在向量库已 build 的基础上，同步构建 BM25 索引（空语料时 BM25 置空）"""
+        """在向量库已 build 的基础上，同步构建 BM25 索引（空语料时 BM25 置空）。
+
+        分词走切片级缓存（tokenize_cache）：增量重建后 version 变化触发
+        全量重建时，文本未变的切片直接命中缓存跳过 jieba，只有真正新增/
+        变化的切片才参与分词——与 embed_cache 同思路的 CPU 级去重。"""
         chunks = self.store.chunks
         self._text2idx = {c["text"]: i for i, c in enumerate(chunks)}
-        self.bm25 = BM25Okapi([tokenize(c["text"]) for c in chunks]) if chunks else None
+        token_lists = tokenize_cached([c["text"] for c in chunks],
+                                      tokenizer=tokenize) if chunks else []
+        self.bm25 = BM25Okapi(token_lists) if chunks else None
         self._built_version = self.store.version
 
     # ---------------- 内部：双路召回 ----------------
@@ -80,7 +91,7 @@ class HybridRetriever:
             },
             "parameters": {"top_n": top_n, "return_documents": False},
         }
-        resp = requests.post(
+        resp = _SESSION.post(
             RERANK_URL,
             json=payload,
             headers={"Authorization": f"Bearer {config.DASHSCOPE_API_KEY}"},

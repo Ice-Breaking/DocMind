@@ -19,7 +19,7 @@ import time
 import fastapi
 from fastapi.responses import JSONResponse
 
-from docmind import config, store
+from docmind import store
 
 logger = logging.getLogger(__name__)
 

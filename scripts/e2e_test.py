@@ -10,7 +10,6 @@
 输出:每用例的耗时、SSE 事件序列、工具轨迹、引用来源与断言结果。
 """
 import json
-import re
 import time
 
 import requests

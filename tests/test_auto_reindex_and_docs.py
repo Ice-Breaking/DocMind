@@ -1,5 +1,4 @@
 """自动重建/内容校验/版本备份/配额/URL 提取/滑动窗口/embed 缓存单测"""
-import os
 import threading
 
 import pytest
@@ -122,13 +121,12 @@ def test_chunks_by_source():
 # ---------------- 索引自愈:manifest 有但 Chroma 缺 ----------------
 def test_rebuild_self_heals_orphan_files(tmp_path, monkeypatch):
     """manifest 记录"已索引"但索引实际缺失的文件,增量重建自动补录"""
-    import threading as _th
     from unittest.mock import patch
     from docmind.rag import vector_store as vs
     from docmind.rag.vector_store import VectorStore
-    from docmind.rag import cache as rcache
 
-    kb = tmp_path / "kb"; kb.mkdir()
+    kb = tmp_path / "kb"
+    kb.mkdir()
     (kb / "a.md").write_text("文档A内容,用于切片。", encoding="utf-8")
     (kb / "b.md").write_text("文档B内容,用于切片。", encoding="utf-8")
 
@@ -160,7 +158,8 @@ def test_build_cache_hit_requires_full_coverage(tmp_path):
     from docmind.rag import vector_store as vs
     from docmind.rag.vector_store import VectorStore
 
-    kb = tmp_path / "kb"; kb.mkdir()
+    kb = tmp_path / "kb"
+    kb.mkdir()
     (kb / "a.md").write_text("文档A内容。", encoding="utf-8")
     (kb / "b.md").write_text("文档B内容。", encoding="utf-8")
     idx = tmp_path / "idx"

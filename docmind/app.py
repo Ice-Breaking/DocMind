@@ -21,11 +21,9 @@ setup_logging()
 
 import logging
 
-from docmind import acl, config, semantic_cache
+from docmind import acl, config
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
-from docmind.agent.react_agent import SYSTEM_PROMPT
 from docmind.core import build_shared, create_agent
-from docmind.llm import embed
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +40,10 @@ if __name__ == "__main__":
     chatstore.ensure_seed_admin()
 
     # ---- 纯 FastAPI 宿主（原 Gradio launch 已移除） ----
-    import time
     import uvicorn
     import fastapi
-    from fastapi import FastAPI, HTTPException, Query
-    from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+    from fastapi import FastAPI
+    from fastapi.responses import FileResponse
     from docmind import web_auth
 
     app = FastAPI(title="DocMind")
@@ -135,17 +132,7 @@ if __name__ == "__main__":
         from fastapi.responses import Response as _MR
         return _MR(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.get("/metrics", include_in_schema=False)
-    async def _metrics():
-        return _MetricsResponse(content=generate_latest(),
-                                media_type=CONTENT_TYPE_LATEST)
-
     # (旧 CSRF/指标中间件已并入 security_and_metrics 正常注册)
-
-    @app.get("/mermaid.min.js", include_in_schema=False)
-    async def _serve_mermaid():
-        return FileResponse(os.path.join(_mermaid_dir, "mermaid.min.js"),
-                            media_type="application/javascript")
 
     # ---- 健康检查：Docker HEALTHCHECK / 监控探活（不要求登录态，只暴露内部状态） ----
     @app.get("/health", include_in_schema=False)
@@ -188,8 +175,8 @@ if __name__ == "__main__":
     from fastapi import HTTPException, Query
     from fastapi.responses import PlainTextResponse
 
-    _mermaid_dir = os.path.dirname(os.path.abspath(__file__))
-    _vendor_dir = os.path.join(_mermaid_dir, "vendor")
+    _app_dir = os.path.dirname(os.path.abspath(__file__))
+    _vendor_dir = os.path.join(_app_dir, "vendor")
     _knowledge_dir = config.KNOWLEDGE_DIR
 
     @app.get("/vendor/{name}", include_in_schema=False)
@@ -565,9 +552,9 @@ if __name__ == "__main__":
             role = r.get("role")
             content = r.get("content") or ""
             if role == "user":
-                lines += [f"## 🧑 用户", content, ""]
+                lines += ["## 🧑 用户", content, ""]
             elif role == "assistant":
-                lines += [f"## 🤖 DocMind", content, ""]
+                lines += ["## 🤖 DocMind", content, ""]
         from fastapi.responses import Response
         safe_title = "".join(c for c in str(title or session_id)
                              if c.isalnum() or c in "-_")[:30] or "session"

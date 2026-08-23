@@ -50,7 +50,6 @@ def _active_cfg(kind: str) -> tuple[str, str, str]:
 
 
 _clients: dict[tuple, OpenAI] = {}
-_client: OpenAI | None = None
 
 
 def get_client() -> OpenAI:
