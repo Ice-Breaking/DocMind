@@ -18,8 +18,11 @@ data/index/
 .aicoding-chat-workspace
 data/preview_cache/
 data/ocr_cache/
-data/chat.db
-data/cache.db
+
+# SQLite 数据库及 WAL/SHM 附属文件（运行时数据，不入库）
+*.db
+*.db-shm
+*.db-wal
 
 # 运行时数据不入库（含会话 trace 日志）
 data/trace_log.jsonl
