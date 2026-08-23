@@ -9,6 +9,7 @@ import {
   Typography,
 } from 'antd';
 import { EyeOutlined } from '@ant-design/icons';
+import MarkdownContent from '../components/MarkdownContent';
 import type { ColumnsType } from 'antd/es/table';
 import {
   fetchAdminMessages,
@@ -146,7 +147,9 @@ export default function Admin({ me, onLogout }: { me: Me; onLogout: () => void }
                 <div style={{ fontWeight: 600, marginBottom: 4, fontSize: 12, color: '#666' }}>
                   {m.role === 'user' ? '用户' : '助手'}
                 </div>
-                <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{m.content}</div>
+                <div style={{ fontSize: 13 }}>
+                  <MarkdownContent content={m.content || ''} onLocate={() => {}} />
+                </div>
               </Card>
             ))}
           </div>

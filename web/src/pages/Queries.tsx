@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   App,
   Button,
+  Image,
   Input,
   Select,
   Space,
@@ -68,9 +69,23 @@ export default function Queries() {
       title: '提问内容',
       dataIndex: 'question',
       key: 'question',
-      render: (v: string) => (
-        <Text style={{ whiteSpace: 'pre-wrap' }}>{v}</Text>
-      ),
+      render: (v: string) => {
+        const imgs: string[] = [];
+        const text = (v || '').replace(/!\[[^\]]*\]\(([^)]+)\)/g, (_m, url) => {
+          imgs.push(url);
+          return '';
+        }).trim();
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {imgs.map((u, i) => (
+              <Image key={i} src={u} alt="附件" width={40} height={40}
+                style={{ objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+                preview={{ mask: '预览' }} />
+            ))}
+            <Text style={{ whiteSpace: 'pre-wrap' }}>{text}</Text>
+          </div>
+        );
+      },
     },
   ];
 
@@ -78,7 +93,7 @@ export default function Queries() {
     <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>提问记录</h1>
-        <Text type="secondary">全部用户的检索提问流水，用于行为审计与高频问题挖掘</Text>
+        <Text type="secondary">问题维度：全部用户的提问流水（按问题逐条），用于高频问题挖掘与行为审计；要看某问题的完整问答上下文，请到「管理端 · 会话审计」按会话查看</Text>
       </div>
 
       <Space style={{ marginBottom: 16 }} wrap>
