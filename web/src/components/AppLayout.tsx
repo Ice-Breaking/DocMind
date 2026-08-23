@@ -297,6 +297,19 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
     </Modal>
   );
 
+  if (immersive) {
+    /* 对话页：全宽沉浸。全局导航内嵌在 Chat 侧栏（buildNavItems 共享），
+       ☰ 按钮在侧栏头部切换菜单显隐——会话列表与菜单同处一层抽屉 */
+    return (
+      <Layout style={{ minHeight: '100vh' }}>
+        <Content style={{ overflow: 'hidden', height: '100vh' }}>
+          <Outlet />
+        </Content>
+        {pwdModal}
+      </Layout>
+    );
+  }
+
   /* ================= 移动端布局 ================= */
   if (isMobile) {
     return (
@@ -367,18 +380,6 @@ export default function AppLayout({ me, onLogout }: { me: Me; onLogout: () => vo
   }
 
   /* ================= PC 布局 ================= */
-  if (immersive) {
-    /* 对话页：全宽沉浸。全局导航内嵌在 Chat 侧栏（buildNavItems 共享），
-       ☰ 按钮在侧栏头部切换菜单显隐——会话列表与菜单同处一层抽屉 */
-    return (
-      <Layout style={{ minHeight: '100vh' }}>
-        <Content style={{ overflow: 'hidden', height: '100vh' }}>
-          <Outlet />
-        </Content>
-        {pwdModal}
-      </Layout>
-    );
-  }
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
