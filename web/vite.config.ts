@@ -41,7 +41,8 @@ export default defineConfig({
     },
   },
   build: {
-    // 代码分割优化：减少首屏加载体积
+    // 代码分割优化:页面级 React.lazy(App.tsx)+ vendor 分包;
+    // dicebear 头像库经 avatarGen.ts dynamic import 单独分包、首屏不加载
     rollupOptions: {
       output: {
         manualChunks: {
@@ -49,12 +50,12 @@ export default defineConfig({
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
           // UI 库单独打包
           'vendor-antd': ['antd', '@ant-design/icons', '@ant-design/x'],
-          // markdown 渲染单独打包（按需加载）
-          'markdown': ['react-markdown', 'remark-gfm'],
+          // 注:react-markdown 不在此声明——仅懒加载页面使用,
+          // 强制手动分块会被提升进首屏 HTML,反而增大初始加载体积
         },
       },
     },
-    // 提高 chunk 大小警告阈值（优化后仍可能超标，但可接受）
+    // 提高 chunk 大小警告阈值(优化后仍可能超标,但可接受)
     chunkSizeWarningLimit: 1000,
   },
 });

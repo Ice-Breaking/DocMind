@@ -1,28 +1,39 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { Spin, Modal, Input, Button, Space, message } from 'antd';
 import { fetchMe, changePassword, type Me } from './api';
 import Login from './pages/Login';
-import Chat from './pages/Chat';
-import Admin from './pages/Admin';
-import Dashboard from './pages/Dashboard';
-import Assistants from './pages/Assistants';
-import KnowledgeBases from './pages/KnowledgeBases';
-import SessionHistory from './pages/SessionHistory';
-import Settings from './pages/Settings';
-import Usage from './pages/Usage';
-import Badcases from './pages/Badcases';
-import Traces from './pages/Traces';
-import RetrievalLab from './pages/RetrievalLab';
-import Eval from './pages/Eval';
-import ApiKeys from './pages/ApiKeys';
-import Models from './pages/Models';
-import Audit from './pages/Audit';
-import Alerts from './pages/Alerts';
-import Backups from './pages/Backups';
-import Users from './pages/Users';
-import Queries from './pages/Queries';
 import AppLayout from './components/AppLayout';
+
+// 路由级代码分割：除登录页（首屏直达）外全部懒加载——页面组件按路由
+// 自动分包、访问时才拉取，配合 vite manualChunks 的 vendor 分离，
+// 首屏 bundle 只含框架 + 登录页，显著减小初始加载体积
+const Chat = lazy(() => import('./pages/Chat'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Admin = lazy(() => import('./pages/Admin'));
+const Assistants = lazy(() => import('./pages/Assistants'));
+const KnowledgeBases = lazy(() => import('./pages/KnowledgeBases'));
+const SessionHistory = lazy(() => import('./pages/SessionHistory'));
+const Settings = lazy(() => import('./pages/Settings'));
+const Usage = lazy(() => import('./pages/Usage'));
+const Badcases = lazy(() => import('./pages/Badcases'));
+const Traces = lazy(() => import('./pages/Traces'));
+const RetrievalLab = lazy(() => import('./pages/RetrievalLab'));
+const Eval = lazy(() => import('./pages/Eval'));
+const ApiKeys = lazy(() => import('./pages/ApiKeys'));
+const Models = lazy(() => import('./pages/Models'));
+const Audit = lazy(() => import('./pages/Audit'));
+const Alerts = lazy(() => import('./pages/Alerts'));
+const Backups = lazy(() => import('./pages/Backups'));
+const Users = lazy(() => import('./pages/Users'));
+const Queries = lazy(() => import('./pages/Queries'));
+
+// 懒加载路由首次拉取分包时的过渡 UI（复用全局居中样式）
+const PageFallback = (
+  <div className="dm-full-center">
+    <Spin size="large" />
+  </div>
+);
 
 /**
  * 路由守卫：应用加载即探 /api/me（Gradio 登录 cookie 同源流转）。
@@ -89,6 +100,8 @@ export default function App() {
 
   return (
     <>
+      {/* 路由级 Suspense：懒加载页面分包首次拉取时的过渡 UI */}
+      <Suspense fallback={PageFallback}>
       <Routes>
         <Route
           path="/login"
@@ -174,6 +187,7 @@ export default function App() {
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
+      </Suspense>
       <Modal
         title="首次登录请修改密码"
         open={showPwdModal}
