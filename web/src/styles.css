@@ -379,11 +379,11 @@ html, body { overflow-x: hidden; }
 .dm-mermaid { overflow-x: auto; padding: 8px; background: #fff; }
 .dm-mermaid svg { max-width: 100%; height: auto; }
 
-/* 移动端：会话列表并入顶部抽屉导航，只保留一个折叠入口 */
+/* 移动端：会话侧栏为 transform 抽屉（dm-chat-sidebar 定位规则见上方媒体查询）。
+   历史遗留的 display:none !important 已删除——它压制了抽屉导致会话列表在
+   移动端永远不可见（曾误判为组件正常，实为隐藏 DOM） */
 .dm-newchat-mobile { display: none; }
 @media (max-width: 767px) {
-  .dm-chat-sidebar { display: none !important; }
-  .dm-chat-mobile-toggle { display: none !important; }
   .dm-newchat-mobile {
     display: inline-flex; align-items: center; gap: 6px;
     border: 1px solid #e0e7ff; background: #fff; color: #4f46e5;
@@ -624,4 +624,11 @@ html[data-fontscale='lg'] { --dm-fs-d: 1.5px; }
 .dm-mobile-newchat { display: none; }
 @media (max-width: 767px) {
   .dm-mobile-newchat { display: inline-flex; margin-top: 6px; }
+}
+
+/* 抽屉内菜单展开时不吞掉会话列表:菜单区限高滚动,两区共存 */
+.dm-chat-sidebar-header .dm-side-nav {
+  max-height: 40vh;
+  overflow-y: auto;
+  border-radius: 8px;
 }

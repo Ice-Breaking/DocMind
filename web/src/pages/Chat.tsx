@@ -106,9 +106,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   const [convSearch, setConvSearch] = useState('');
   const navigate = useNavigate();
   const location = useLocation();
-  const [navOpen, setNavOpen] = useState(
-    () => typeof window !== 'undefined' && window.innerWidth < 768,   // 移动端抽屉默认展开菜单(与 PC 预期一致)
-  );
+  const [navOpen, setNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);   // PC:☰ 收起整个侧栏
   const navItems = useMemo(() => buildNavItems(!!_me.is_admin), [_me.is_admin]);
   const navLeafKeys = useMemo(() => flattenNavKeys(navItems), [navItems]);
