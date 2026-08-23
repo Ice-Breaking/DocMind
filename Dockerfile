@@ -18,10 +18,13 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
-# 应用代码 + MCP Server + 知识库
+# 应用代码 + MCP Server + 运行时必需的 docs 子集
+# （只拷 KNOWLEDGE_DIR 知识库语料与 glossary.md 术语表；
+#   UI 截图等纯文档资产不入镜像，省约 2MB）
 COPY docmind ./docmind
 COPY mcp_servers ./mcp_servers
-COPY docs ./docs
+COPY docs/knowledge ./docs/knowledge
+COPY docs/glossary.md ./docs/glossary.md
 
 # 容器内监听所有网卡（否则宿主机映射访问不到）
 ENV GRADIO_SERVER_NAME=0.0.0.0 \

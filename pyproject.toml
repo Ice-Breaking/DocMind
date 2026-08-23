@@ -1,0 +1,16 @@
+[tool.ruff]
+# DocMind 静态检查配置：保守规则集（pyflakes 全量 + pycodestyle 子集），
+# 只抓真实缺陷（未定义名/未用导入/重复定义等），不做风格强改
+line-length = 100
+target-version = "py311"
+extend-exclude = ["web", "data", "docs", "web/dist"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# app.py：先设 certifi 证书/初始化日志、再 import 其余模块是有意为之
+"docmind/app.py" = ["E402"]
+# store 门面：连接层在前、业务域再导出在后的固定布局
+"docmind/store/__init__.py" = ["E402"]
+

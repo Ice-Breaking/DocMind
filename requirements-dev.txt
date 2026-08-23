@@ -1,0 +1,9 @@
+# 开发/CI 依赖：生产镜像只装 requirements.txt（不带入测试与 lint 工具）
+-r requirements.txt
+
+# 测试（离线单测，不需 API Key；CI 同款）
+pytest==9.1.1
+pytest-timeout==2.5.0
+
+# 静态检查（pyproject.toml 配置；CI lint 同款）
+ruff==0.16.4

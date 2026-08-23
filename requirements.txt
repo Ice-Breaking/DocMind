@@ -1,43 +1,41 @@
+# 依赖已锁精确版本（与通过测试的 venv 一致），保证 CI/Docker 可复现构建；
+# 升级时改动版本号并回归 pytest。开发/测试依赖见 requirements-dev.txt。
+
 # LLM 调用（OpenAI 兼容模式对接百炼）
-openai>=1.40.0
+openai==3.0.0
 
 # RAG 向量检索：Chroma 本地持久化向量库（HNSW 余弦索引），numpy 仅作内存镜像/回退
-chromadb>=0.5.0
-numpy>=1.26.0
+chromadb==1.5.9
+numpy==2.4.6
 
 # 混合检索：BM25 关键词路 + 中文分词；Rerank 调用用 requests（自带证书）
-rank-bm25>=0.2.2
-jieba>=0.42.1
-requests>=2.31.0
+rank-bm25==0.2.2
+jieba==0.42.1
+requests==2.34.2
 
 # 二进制文档提取：PDF / Word / Excel（纯 Python，无系统依赖）
-pypdf>=4.0.0
-python-docx>=1.1.0
-openpyxl>=3.1.0
+pypdf==6.16.0
+python-docx==1.2.0
+openpyxl==3.1.5
 
 # 调用链追踪（未配置凭证时自动降级本地 JSONL，不影响运行）
-langfuse>=4.0.0
-
-# 联网搜索工具：Tavily / SearXNG 均走 requests，无额外依赖
+langfuse==4.14.4
 
 # MCP 官方 Python SDK（钉住 1.x：2.0 移除了 FastMCP，接口不兼容）
-mcp>=1.2.0,<2.0.0
+mcp==1.29.0
 
 # Web 界面（5.0+ 默认 messages 对话格式）
-uvicorn>=0.30.0
+uvicorn==0.52.1
 
 # 环境变量
-python-dotenv>=1.0.0
-
-# 测试（离线单测，不需 API Key；CI 同款）
-pytest>=8.0
-pytest-timeout>=2.3
+python-dotenv==1.2.2
 
 # Prometheus 监控指标（/metrics 端点 + 埋点）
-prometheus-client>=0.20
+prometheus-client==0.26.0
 
 # 企业 LDAP 登录（可选：未安装时 LDAP 登录自动禁用，不影响本地账号）
-ldap3>=2.9
+ldap3==2.9.1
 
 # 语音能力：Paraformer ASR + CosyVoice TTS（百炼 SDK）
-dashscope>=1.20
+dashscope==1.26.7
+
