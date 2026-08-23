@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
   App,
@@ -27,36 +28,30 @@ function formatSize(bytes: number): string {
  */
 export default function Backups() {
   const { message: msgApi } = App.useApp();
+  const queryClient = useQueryClient();
 
-  const [backups, setBackups] = useState<BackupItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
+  // 备份列表：失败保留上次数据仅弹 toast（对齐旧 load() 语义）
+  const {
+    data: backups = [],
+    isPending: loading,
+    error,
+    refetch,
+  } = useQuery<BackupItem[], Error>({ queryKey: ['backups'], queryFn: fetchBackups });
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setBackups(await fetchBackups());
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
+  /* 加载失败提示：与旧实现一致走全局 message */
+  useEffect(() => {
+    if (error) msgApi.error(error.message || '加载失败');
+  }, [error, msgApi]);
 
-  useEffect(() => { load(); }, [load]);
-
-  const handleCreate = async () => {
-    setCreating(true);
-    try {
-      const r = await createBackup();
+  // 立即备份：成功后失效列表自动重拉（等价旧「toast + await load()」）
+  const createMut = useMutation({
+    mutationFn: createBackup,
+    onSuccess: (r) => {
       msgApi.success(`备份完成：${r.name}（${r.files} 个文件 / ${formatSize(r.size)}）`);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '备份失败');
-    } finally {
-      setCreating(false);
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['backups'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '备份失败'),
+  });
 
   const columns: ColumnsType<BackupItem> = [
     {
@@ -102,12 +97,12 @@ export default function Backups() {
           <Text type="secondary">数据库热备（VACUUM INTO）+ 知识库文档打包，建议每日或重大变更前执行</Text>
         </div>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>刷新</Button>
           <Button
             type="primary"
             icon={<CloudUploadOutlined />}
-            loading={creating}
-            onClick={handleCreate}
+            loading={createMut.isPending}
+            onClick={() => createMut.mutate()}
           >
             立即备份
           </Button>

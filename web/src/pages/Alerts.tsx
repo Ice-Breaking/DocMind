@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -50,61 +51,55 @@ const STATUS_CFG: Record<string, { color: string; label: string }> = {
  */
 export default function Alerts() {
   const { message: msgApi } = App.useApp();
+  const queryClient = useQueryClient();
 
-  const [alerts, setAlerts] = useState<AlertItem[]>([]);
-  const [sla, setSla] = useState<SlaData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [evaluating, setEvaluating] = useState(false);
+  // 告警列表与 SLA 统计：两条独立 query（并行拉取、各自缓存）；
+  // 失败保留上次数据仅弹 toast（对齐旧 load() 语义）
+  const {
+    data: alerts = [],
+    isPending: loading,
+    error,
+  } = useQuery<AlertItem[], Error>({ queryKey: ['alerts'], queryFn: () => fetchAlerts() });
+  const { data: sla = null } = useQuery<SlaData, Error>({
+    queryKey: ['sla', 7],
+    queryFn: () => fetchSla(7),
+  });
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [as, s] = await Promise.all([fetchAlerts(), fetchSla(7)]);
-      setAlerts(as);
-      setSla(s);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
+  useEffect(() => {
+    if (error) msgApi.error(error.message || '加载失败');
+  }, [error, msgApi]);
 
-  useEffect(() => { load(); }, [load]);
-
-  const handleEvaluate = async () => {
-    setEvaluating(true);
-    try {
-      const r = await evaluateAlerts();
+  /* 操作类 mutation：成功 toast + 失效相关 query 自动重拉 */
+  const evaluateMut = useMutation({
+    mutationFn: evaluateAlerts,
+    onSuccess: (r) => {
       msgApi.success(r.created.length > 0
         ? `评估完成，新增 ${r.created.length} 条告警`
         : '评估完成，无新增告警');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '评估失败');
-    } finally {
-      setEvaluating(false);
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      queryClient.invalidateQueries({ queryKey: ['sla'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '评估失败'),
+  });
 
-  const handleAck = async (a: AlertItem) => {
-    try {
-      await ackAlert(a.id);
+  const ackMut = useMutation({
+    mutationFn: (a: AlertItem) => ackAlert(a.id),
+    onSuccess: () => {
       msgApi.success('已确认');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '操作失败');
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '操作失败'),
+  });
 
-  const handleResolve = async (a: AlertItem) => {
-    try {
-      await resolveAlert(a.id);
+  const resolveMut = useMutation({
+    mutationFn: (a: AlertItem) => resolveAlert(a.id),
+    onSuccess: () => {
       msgApi.success('已标记解决');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '操作失败');
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      queryClient.invalidateQueries({ queryKey: ['sla'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '操作失败'),
+  });
 
   const columns: ColumnsType<AlertItem> = [
     {
@@ -150,14 +145,14 @@ export default function Alerts() {
       render: (_: any, a: AlertItem) => (
         <Space>
           {a.status === 'open' && (
-            <Button size="small" icon={<EyeOutlined />} onClick={() => handleAck(a)}>确认</Button>
+            <Button size="small" icon={<EyeOutlined />} onClick={() => ackMut.mutate(a)}>确认</Button>
           )}
           {a.status !== 'resolved' && (
             <Popconfirm
               title="确认该告警已处理完毕？"
               okText="解决"
               cancelText="取消"
-              onConfirm={() => handleResolve(a)}
+              onConfirm={() => resolveMut.mutate(a)}
             >
               <Button size="small" type="primary" ghost icon={<CheckCircleOutlined />}>解决</Button>
             </Popconfirm>
@@ -189,8 +184,8 @@ export default function Alerts() {
         <Button
           type="primary"
           icon={<ThunderboltOutlined />}
-          loading={evaluating}
-          onClick={handleEvaluate}
+          loading={evaluateMut.isPending}
+          onClick={() => evaluateMut.mutate()}
         >
           立即评估
         </Button>

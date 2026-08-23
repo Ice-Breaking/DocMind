@@ -93,11 +93,42 @@ useEffect(() => {
 | SessionHistory 打开 Drawer | 清空+Spin 重拉 | 缓存直显+静默刷新 |
 | 请求去重 | 无 | StrictMode/重复 key 自动去重 |
 
-## 五、遗留说明(迁移路线)
+## 五、第三期:mutation 页迁移(Backups / Alerts)
 
-- 第三期候选:Usage / Backups / Alerts 等管理端列表页;含
-  mutation 的页面(KnowledgeBases/ApiKeys/Users 等)用
-  `useMutation + invalidateQueries` 替换手写 reload;
+引入 `useMutation` + `invalidateQueries` 范式:
+
+### `Backups.tsx`(145 → 140 行)
+
+- 列表 → `['backups']` query;「立即备份」→ `createMut`
+  (onSuccess toast + `invalidateQueries(['backups'])` 自动重拉,
+  等价旧「toast + await load()」);按钮 loading 态接
+  `createMut.isPending`,手写 creating 布尔删除。
+
+### `Alerts.tsx`(280 → 275 行)
+
+- `load()` 的 Promise.all → `['alerts']` + `['sla', 7]` 两条独立
+  query(并行不变、各自缓存);三个操作 handler(evaluate/ack/
+  resolve)收敛为三个 useMutation:成功 toast 文案逐字保留,
+  成功后失效对应 query(evaluate/resolve 连带 SLA 统计);
+- 注意点:`fetchAlerts(status?, limit?)` 这类带可选参的 API
+  不能直接当 queryFn(context 会占位首参),需箭头函数包裹。
+
+### 测试辅助(`src/test/queryTestUtils.tsx`,第二期已建)
+
+- `createTestQueryClient()` / `withQueryClient()` 备用。
+
+### 效果
+
+| 指标 | 迁移前 | 迁移后 |
+|---|---|---|
+| 两页数据/操作代码 | ~120 行 | ~55 行声明 |
+| 操作后刷新 | 手写 await load()(全量 setState) | invalidateQueries 定向失效 |
+| 已迁移页面 | Dashboard/SessionHistory/Queries | +Backups/Alerts(共 5 页) |
+
+## 六、遗留说明(迁移路线)
+
+- 第四期候选:Usage / AdminSessions 等剩余只读列表页;
+- KnowledgeBases / ApiKeys / Users 等含多 mutation 的管理页;
 - Chat 页的 loadSessions/loadMessages 属会话编排(与 SSE 流耦合),
   放在迁移末期单独处理。
 
