@@ -7,6 +7,7 @@
 - 登录防爆破：用户名 15 分钟 5 次锁定 + IP 15 分钟 20 次锁定
   （IP 经 contextvar 由中间件注入，见 app.py）
 """
+import contextvars
 import secrets
 import threading
 import time
@@ -26,16 +27,18 @@ _LOGIN_MAX_FAILS = 5
 _IP_MAX_FAILS = 20
 _LOCK_SECONDS = 900
 _failures: dict[str, list[float]] = {}
-_client_ip = ""   # 由中间件每请求刷新（contextvar 简化为模块级，单进程足够）
+# 请求级客户端 IP：ContextVar 而非模块级全局——FastAPI 并发处理请求时
+# 全局变量会被后到请求覆盖，A 的失败可能记到 B 的 IP 头上（IP 锁定错乱）
+_client_ip: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "docmind_client_ip", default="")
 
 
 def set_client_ip(ip: str) -> None:
-    global _client_ip
-    _client_ip = (ip or "").split(",")[0].strip() or "unknown"
+    _client_ip.set((ip or "").split(",")[0].strip() or "unknown")
 
 
 def client_ip() -> str:
-    return _client_ip or "unknown"
+    return _client_ip.get() or "unknown"
 
 
 def _recent(key: str, window: float, max_n: int) -> int:
@@ -66,7 +69,13 @@ def record_failure(username: str) -> None:
 
 
 def clear_failures(username: str) -> None:
+    """登录成功：清除该用户与该来源 IP 两个维度的失败记录。
+
+    只清用户维度的话，同 IP 累计失败达阈值后（如共享出口 NAT 的办公网、
+    攻击者恰与正常用户同网段），正常用户改对密码重登仍被 IP 锁拦满
+    15 分钟——成功登录即视为该来源可信，两维度一并解除。"""
     _failures.pop(f"user:{username}", None)
+    _failures.pop(f"ip:{client_ip()}", None)
 
 
 # ---- token 生命周期 ----

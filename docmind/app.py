@@ -97,7 +97,7 @@ if __name__ == "__main__":
     # stack 且 metrics 一直降级的问题一并消除)
     import time as _metrics_time
     from urllib.parse import urlparse as _urlparse
-    from docmind.metrics import HTTP_LATENCY, HTTP_REQUESTS
+    from docmind.metrics import HTTP_LATENCY, HTTP_REQUESTS, normalize_http_path
     _trusted = {o.strip() for o in os.getenv("TRUSTED_ORIGINS", "").split(",") if o.strip()}
 
     @app.middleware("http")
@@ -113,17 +113,23 @@ if __name__ == "__main__":
                 h_h = _urlparse(f"http://{host}").hostname if host else ""
                 if not o_h or not h_h or o_h != h_h:
                     return JSONResponse({"detail": "跨站请求被拒绝"}, status_code=403)
+        # 计时起点：perf_counter 单调时钟测耗时；此前误用 time()-monotonic()
+        # （两个不同基准相减），docmind_http_request_duration_seconds 全是废数据
+        _t0 = _metrics_time.perf_counter()
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         if request.url.path not in ("/metrics", "/health"):
             try:
-                HTTP_REQUESTS.labels(method=request.method, path=request.url.path,
+                # path 归一化：动态段(会话 id/上传文件名等)折叠为 {id}，
+                # 否则每个新会话都派生新时间序列(标签基数爆炸)
+                _norm = normalize_http_path(request.url.path)
+                HTTP_REQUESTS.labels(method=request.method, path=_norm,
                                      status=response.status_code).inc()
                 HTTP_LATENCY.labels(method=request.method,
-                                    path=request.url.path).observe(
-                    _metrics_time.time() - _metrics_time.monotonic() + 0)
+                                    path=_norm).observe(
+                    _metrics_time.perf_counter() - _t0)
             except Exception:  # noqa: BLE001
                 pass
         return response

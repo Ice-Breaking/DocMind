@@ -1,5 +1,24 @@
 """Prometheus metrics for DocMind."""
+import re as _re
+
 from prometheus_client import Counter, Histogram, Gauge
+
+# 动态资源段归一化：防止 Prometheus path 标签基数随业务 id 无限增长
+# （每个新会话/文件名都会派生新时间序列 → 内存持续增长、监控查询劣化）
+_PATH_SEG_ID = _re.compile(r"^(?:sess-.+|[0-9a-fA-F-]{16,}|\d{13,})$")
+_PATH_SEG_FILE = _re.compile(r"^\d{10,}[\w.-]*\.\w{2,5}$")   # 时间戳_哈希.ext 类上传文件名
+
+
+def normalize_http_path(path: str) -> str:
+    """URL path 标签归一化：动态段折叠为 {id}。
+
+    /api/sessions/sess-mt6m52x5-qa1fje/messages → /api/sessions/{id}/messages
+    /api/feedback/sess-xxx                      → /api/feedback/{id}
+    /files/uploads/1787538290201_9e3ce6.jpg     → /files/uploads/{id}
+    静态段(default/docs/login 等有限集合)保持原样。"""
+    return "/".join(
+        "{id}" if (_PATH_SEG_ID.match(seg) or _PATH_SEG_FILE.match(seg)) else seg
+        for seg in (path or "/").split("/"))
 
 # HTTP metrics
 HTTP_REQUESTS = Counter(
