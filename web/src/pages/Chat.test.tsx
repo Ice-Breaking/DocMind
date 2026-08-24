@@ -1,4 +1,5 @@
 import { App as AntdApp } from 'antd';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -29,11 +30,17 @@ import { chatStream, fetchSessions } from '../api';
 const me: Me = { user: 'tester', is_admin: false, must_change_pwd: false };
 
 function renderChat() {
+  // Chat 页数据层已迁 react-query（第七期）：测试需独立 QueryClient
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
     <AntdApp>
-      <MemoryRouter initialEntries={['/chat']}>
-        <Chat me={me} onLogout={() => {}} />
-      </MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/chat']}>
+          <Chat me={me} onLogout={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>
     </AntdApp>,
   );
 }
@@ -55,9 +62,11 @@ describe('Chat 页面', () => {
       },
     ]);
     renderChat();
-    // 标题同时出现在侧栏会话项与顶栏（证明首个会话被自动选中）
-    const nodes = await screen.findAllByText('知识库问答');
-    expect(nodes.length).toBeGreaterThanOrEqual(2);
+    // 标题同时出现在侧栏会话项与顶栏（证明首个会话被自动选中）。
+    // 注意：react-query 下侧栏与「选中态」分两次提交渲染，需等待第二处出现
+    await waitFor(() => {
+      expect(screen.getAllByText('知识库问答').length).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it('发送消息：乐观插入用户气泡并流式接收回答', async () => {

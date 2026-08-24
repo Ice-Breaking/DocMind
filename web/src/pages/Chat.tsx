@@ -18,6 +18,7 @@ import {
   MenuOutlined,
   AudioOutlined,
 } from '@ant-design/icons';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { App, Button, Image, Input, Modal, Progress, Select, Space, Typography } from 'antd';
 import Bubble from '@ant-design/x/es/bubble';
 import type { BubbleDataType } from '@ant-design/x/es/bubble/BubbleList';
@@ -35,10 +36,8 @@ import {
   logout,
   submitFeedback,
   fetchVoices,
-  type Assistant,
   type Me,
   type Session,
-  type VoiceOption,
 } from '../api';
 import {
   fmtSessionTime,
@@ -50,6 +49,9 @@ import { useSpeech } from './chat/useSpeech';
 import { useChatStream, type ChatStreamBridge } from './chat/useChatStream';
 import { useBubbleRoles } from './chat/useBubbleRoles';
 
+/** 稳定空数组：查询未就绪时保持派生列表身份稳定（供 useMemo/useCallback deps） */
+const EMPTY_SESSIONS: Session[] = [];
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -57,17 +59,22 @@ import { useBubbleRoles } from './chat/useBubbleRoles';
 export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => void }) {
   const { message: msgApi } = App.useApp();
 
-  /* ---- state ---- */
-  const [sessions, setSessions] = useState<Session[]>([]);
+  /* ---- 服务端只读数据：react-query 托管（第七期）----
+   * SSE 流式消息仍由 useChatStream 本地持有，不进查询缓存。 */
+  const qc = useQueryClient();
+  const sessionsQ = useQuery({ queryKey: ['sessions'], queryFn: fetchSessions });
+  const assistantsQ = useQuery({ queryKey: ['assistants'], queryFn: fetchAssistants });
+  const voicesQ = useQuery({ queryKey: ['voices'], queryFn: fetchVoices });
+  const sessions = useMemo(() => sessionsQ.data ?? EMPTY_SESSIONS, [sessionsQ.data]);
+  const assistants = useMemo(() => assistantsQ.data ?? [], [assistantsQ.data]);
+  const voiceOptions = useMemo(() => voicesQ.data ?? [], [voicesQ.data]);
   const [activeSid, setActiveSid] = useState<string>('');
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down'>>({});
   const [senderValue, setSenderValue] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // 语音：音色 / 录音 / 播报
   const [voiceId, setVoiceId] = useState<string>(
     () => localStorage.getItem('dm_voice') || 'Cherry',
   );
-  const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [convSearch, setConvSearch] = useState('');
   const navigate = useNavigate();
   const location = useLocation();
@@ -79,9 +86,24 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
 
   const MAX_IMGS = 5;   // 单条消息最多携带图片数
   const imgInputRef = useRef<HTMLInputElement | null>(null);
-  const [assistants, setAssistants] = useState<Assistant[]>([]);
   const [assistantId, setAssistantId] = useState<string>(
     () => localStorage.getItem('dm_assistant_id') || 'default',
+  );
+
+  // 反馈映射：按会话键缓存；仅服务端已存在的会话才请求（新建本地 sid 不发请求，
+  // 对齐旧 loadFeedback 仅在选中既有会话时调用的行为）
+  const feedbackEnabled = useMemo(
+    () => activeSid !== '' && sessions.some((s) => s.id === activeSid),
+    [sessions, activeSid],
+  );
+  const feedbackQ = useQuery({
+    queryKey: ['feedback', activeSid],
+    queryFn: () => fetchFeedback(activeSid),
+    enabled: feedbackEnabled,
+  });
+  const feedbackMap = useMemo<Record<string, 'up' | 'down'>>(
+    () => (feedbackQ.data as Record<string, 'up' | 'down'>) ?? {},
+    [feedbackQ.data],
   );
 
   /* ---- refs ---- */
@@ -92,14 +114,11 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
   // keep refs in sync
   useEffect(() => { activeSidRef.current = activeSid; }, [activeSid]);
   useEffect(() => { feedbackMapRef.current = feedbackMap; }, [feedbackMap]);
-  useEffect(() => {
-    fetchVoices().then(setVoiceOptions).catch(() => undefined);
-  }, []);
   useEffect(() => { assistantIdRef.current = assistantId; }, [assistantId]);
 
   /* ---- 流式发送域：SSE 链路与消息状态整体内聚（useChatStream） ---- */
-  // 宿主的 handleAuthError / loadSessions 定义于其后，经 latest-ref 桥回填，
-  // 规避「hook ←→ 宿主回调」的声明顺序环（行为与原先直连一致）
+  // 宿主的 handleAuthError / 会话刷新（refetchSessions）定义于其后，经 latest-ref
+  // 桥回填，规避「hook ←→ 宿主回调」的声明顺序环（行为与原先直连一致）
   const streamBridge = useRef<ChatStreamBridge>({
     onAuthError: async () => false,
     reloadSessions: () => undefined,
@@ -131,21 +150,19 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     [abortActive, msgApi, onLogout],
   );
 
-  /* ---- load sessions ---- */
-  const loadSessions = useCallback(async () => {
-    try {
-      const list = await fetchSessions();
-      setSessions(list);
-      return list;
-    } catch (e: any) {
-      await handleAuthError(e);
-      return [];
-    }
-  }, [handleAuthError]);
-
   // 回填流式域回调桥（每渲染更新，hook 内经 ref 读最新闭包）
+  const refetchSessions = sessionsQ.refetch;
   streamBridge.current.onAuthError = handleAuthError;
-  streamBridge.current.reloadSessions = loadSessions;
+  streamBridge.current.reloadSessions = () => {
+    void refetchSessions();   // 流结束后刷新侧栏（标题/时间/last_msg）
+  };
+
+  // 查询首轮 401 统一登出；其余错误静默（侧栏空态，行为对齐旧 loadSessions 的 catch 分支）
+  useEffect(() => {
+    if (sessionsQ.isError || assistantsQ.isError) {
+      void handleAuthError(sessionsQ.error ?? assistantsQ.error);
+    }
+  }, [sessionsQ.isError, sessionsQ.error, assistantsQ.isError, assistantsQ.error, handleAuthError]);
 
   /* ---- load messages for a session ---- */
   const loadMessages = useCallback(
@@ -168,48 +185,19 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     [handleAuthError, setMessages],
   );
 
-  /* ---- load feedback for a session ---- */
-  const loadFeedback = useCallback(
-    async (sid: string) => {
-      try {
-        const fb = await fetchFeedback(sid);
-        if (activeSidRef.current !== sid) return;
-        setFeedbackMap(fb as Record<string, 'up' | 'down'>);
-      } catch {
-        if (activeSidRef.current !== sid) return;
-        // non-critical
-      }
-    },
-    [],
-  );
-
-  /* ---- load assistants ---- */
+  /* ---- init: 会话查询就绪后自动选中首个（仅执行一次）；空列表进入新对话 ---- */
+  const didPickRef = useRef(false);
   useEffect(() => {
-    (async () => {
-      try {
-        const list = await fetchAssistants();
-        setAssistants(list);
-      } catch (e: any) {
-        await handleAuthError(e);
-      }
-    })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* ---- init: load sessions & pick first ---- */
-  useEffect(() => {
-    (async () => {
-      const list = await loadSessions();
-      if (list.length > 0) {
-        const first = list[0].id;
-        setActiveSid(first);
-        await loadMessages(first);
-        await loadFeedback(first);
-      } else {
-        const sid = newSessionId();
-        setActiveSid(sid);
-      }
-    })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    if (didPickRef.current || !sessionsQ.isSuccess) return;
+    didPickRef.current = true;
+    const list = sessionsQ.data ?? [];
+    if (list.length > 0) {
+      setActiveSid(list[0].id);
+      void loadMessages(list[0].id);
+    } else {
+      setActiveSid(newSessionId());
+    }
+  }, [sessionsQ.isSuccess, sessionsQ.data, loadMessages]);
 
   /* ---- switch session ---- */
   const switchSession = useCallback(
@@ -219,9 +207,8 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
       setThinkingSteps([]);
       setActiveSid(sid);
       await loadMessages(sid);
-      await loadFeedback(sid);
     },
-    [handleCancel, loadMessages, loadFeedback, setSuggestions, setThinkingSteps],
+    [handleCancel, loadMessages, setSuggestions, setThinkingSteps],
   );
 
   /* ---- delete session ---- */
@@ -229,22 +216,21 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     async (sid: string) => {
       try {
         await deleteSession(sid);
-        const list = await loadSessions();
-        if (activeSid === sid) {
+        const res = await refetchSessions();
+        const list = res.data ?? [];
+        if (activeSidRef.current === sid) {
           if (list.length > 0) {
             await switchSession(list[0].id);
           } else {
-            const newSid = newSessionId();
-            setActiveSid(newSid);
+            setActiveSid(newSessionId());
             setMessages([]);
-            setFeedbackMap({});
           }
         }
       } catch (e: any) {
         await handleAuthError(e);
       }
     },
-    [activeSid, loadSessions, switchSession, handleAuthError, setMessages],
+    [refetchSessions, switchSession, handleAuthError, setMessages],
   );
 
   /* ---- locate citation ---- */
@@ -290,17 +276,24 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     [msgApi, handleAuthError, messagesRef],
   );
 
-  /* ---- feedback ---- */
-  const handleFeedback = useCallback(
-    async (seq: number, rating: 'up' | 'down') => {
-      try {
-        await submitFeedback(activeSid, seq, rating);
-        setFeedbackMap((prev) => ({ ...prev, [String(seq)]: rating }));
-      } catch (e: any) {
-        await handleAuthError(e);
-      }
+  /* ---- feedback：mutation 提交，成功即写查询缓存（切回该会话仍保留） ---- */
+  const feedbackMut = useMutation({
+    mutationFn: async (v: { seq: number; rating: 'up' | 'down' }) => {
+      await submitFeedback(activeSid, v.seq, v.rating);
+      return v;
     },
-    [activeSid, handleAuthError],
+    onSuccess: (v) => {
+      qc.setQueryData<Record<string, 'up' | 'down'>>(
+        ['feedback', activeSid],
+        (prev) => ({ ...(prev ?? {}), [String(v.seq)]: v.rating }),
+      );
+    },
+    onError: (e: any) => handleAuthError(e),
+  });
+  const { mutate: mutateFeedback } = feedbackMut;   // v5 mutate 引用稳定
+  const handleFeedback = useCallback(
+    (seq: number, rating: 'up' | 'down') => mutateFeedback({ seq, rating }),
+    [mutateFeedback],
   );
 
   /* ---- 语音输入：豆包式按住说话，松开转写，上滑取消（逻辑见 useVoiceInput） ---- */
@@ -324,7 +317,6 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
     const sid = newSessionId();
     setActiveSid(sid);
     setMessages([]);
-    setFeedbackMap({});
     setFailedMap({});
   }, [handleCancel, setMessages, setSuggestions, setThinkingSteps, setFailedMap]);
 

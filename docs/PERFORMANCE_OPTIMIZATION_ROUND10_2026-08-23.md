@@ -277,9 +277,42 @@ useEffect(() => {
 | 手写轮询(setInterval) | 2 处(RunsTab / 入库任务) | 0 处(refetchInterval 函数式) |
 | 已迁移页面 | 14 页 | 18 页(+Eval/KnowledgeBases/Settings/RetrievalLab) |
 
-## 九、遗留说明(迁移路线)
+## 九、第七期(收官):Chat 页迁移
 
-- 仅剩 Chat 页:`loadSessions`/`loadMessages` 属会话编排(与 SSE 流
-  耦合),放在迁移末期单独处理;
-- Home/Login 无数据层需求,不需迁移。
+SSE 流式链路保持不动(`useChatStream` 内的 messages/thinking/suggestions
+等仍是本地 state——流式高频写不进查询缓存),只把**会话周边的只读数据**
+迁到 react-query:
+
+- `['sessions']`:侧栏会话列表。流结束后的 `bridge.reloadSessions`
+  → `sessionsQ.refetch()`;删除会话走 `refetchSessions()` 取回新列表
+  再决定「切首个/进新对话」,与旧 `loadSessions` 返回列表的语义一致;
+- 首个会话自动选中改为「查询就绪后执行一次」的 effect(`didPickRef`
+  防重入),空列表进入本地新对话,行为对齐旧 init;
+- `['assistants']` / `['voices']`:助手选项与音色列表,静默失败;
+- `['feedback', activeSid]`:反馈映射按会话键缓存,
+  `enabled: sessions.some(s => s.id === activeSid)` 保证新建本地 sid 不发
+  请求(对齐旧 loadFeedback 仅选中既有会话时调用);提交改 mutation,
+  onSuccess 用 `setQueryData` 即时写缓存——**切回旧会话点赞状态仍在**,
+  这是相对旧版(仅内存 state)的行为增强;
+- 查询首轮 401 统一经 `handleAuthError` 登出;其余错误静默(对齐旧
+  catch 分支);`feedbackMapRef` 同步 effect 保留(useBubbleRoles 经 ref 读);
+- Chat.test.tsx 补 QueryClientProvider 包裹;「已有会话」断言改 waitFor:
+  react-query 下侧栏与选中态分两次提交渲染,findAllByText 会在第一处
+  出现时提前返回(与旧代码单批更新不同,属测试时机修正而非行为回归)。
+
+### 效果(Round10 全程收官)
+
+| 指标 | Round10 前 | 收官后 |
+|---|---|---|
+| 手写数据获取页面 | 19 页 | 0 页(Chat 只留 SSE 流域) |
+| 已迁移页面 | 14 页 | 19 页(+Chat) |
+| Chat.tsx 手写加载函数 | 4 个(loadSessions/Messages/Feedback + assistants effect) | 1 个(loadMessages,SSE 域保留) |
+
+## 十、遗留说明
+
+- Chat 的 `loadMessages` 与 SSE 流式域耦合,刻意保留本地 state:消息
+  气泡被流式高频原地更新,进查询缓存需「缓存↔流」双向同步,收益低
+  风险高;后续若做离线会话回放可再评估;
+- Home/Login 无数据层需求,不需迁移;
+- 各页共享 key(`['kbs']` 等)的 `staleTime` 策略可按业务节奏统一微调。
 
