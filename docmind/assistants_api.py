@@ -20,14 +20,9 @@ def _current_user(request, app) -> str:
     return web_auth.current_user(request)
 
 def _require_user(request, app) -> str:
-    """校验登录态；被要求强制改密的用户返回 403"""
-    user = _current_user(request, app)
-    if not user:
-        raise HTTPException(status_code=401, detail="未登录")
-    if store.get_must_change_pwd(user):
-        raise HTTPException(status_code=403,
-                            detail={"code": "MUST_CHANGE_PWD", "message": "请先修改密码"})
-    return user
+    """校验登录态；被要求强制改密的用户返回 403（统一委托 web_auth.require_user）"""
+    from docmind import web_auth
+    return web_auth.require_user(request)
 
 
 async def _json_body(request) -> dict:

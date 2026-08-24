@@ -7,6 +7,7 @@
 - 子模块经 `store._conn()` 晚绑定取连接，测试 monkeypatch 本模块的
   DB_PATH/_local 即可整体替换存储位置（与拆分前语义一致）。
 """
+import logging
 import os
 import sqlite3
 import threading
@@ -182,6 +183,15 @@ def _conn() -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
+        # (session_id, seq) 唯一索引：并发 append 时 MAX(seq)+1 可能撞号，
+        # 由唯一约束兜底（append_message 捕获后重算重试）。旧库存量重复
+        # 数据会导致建索引失败——容忍跳过，不做破坏性迁移
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS "
+                         "idx_messages_session_seq ON messages(session_id, seq)")
+        except sqlite3.DatabaseError:
+            logging.getLogger(__name__).warning(
+                "messages(session_id, seq) 存量数据有重复，唯一索引未建立")
         # 动态列补充（向前兼容旧数据库）
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)")]
         if "raw" not in cols:

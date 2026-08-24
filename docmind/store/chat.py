@@ -31,10 +31,25 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
         "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
         (session_id,),
     ).fetchone()[0]
-    c.execute(
-        "INSERT INTO messages(session_id, seq, role, content, raw, created_at) VALUES(?,?,?,?,?,?)",
-        (session_id, seq, role, content, raw if raw is not None else content, now),
-    )
+    try:
+        c.execute(
+            "INSERT INTO messages(session_id, seq, role, content, raw, created_at) VALUES(?,?,?,?,?,?)",
+            (session_id, seq, role, content, raw if raw is not None else content, now),
+        )
+    except Exception as e:  # noqa: BLE001 - 精确匹配唯一索引冲突见下
+        import sqlite3 as _sq
+        if not isinstance(e, _sq.IntegrityError):
+            raise
+        # 并发窗口另一请求已插入同 seq（idx_messages_session_seq 唯一约束
+        # 兜底触发）：重算序号再插一次；再撞则让异常上抛（极端争用）
+        seq = c.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        c.execute(
+            "INSERT INTO messages(session_id, seq, role, content, raw, created_at) VALUES(?,?,?,?,?,?)",
+            (session_id, seq, role, content, raw if raw is not None else content, now),
+        )
     row = c.execute("SELECT title, user FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if row is None:
         c.execute(

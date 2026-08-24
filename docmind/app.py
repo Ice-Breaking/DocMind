@@ -107,7 +107,9 @@ if __name__ == "__main__":
         # 端口是本机代理场景放行;恶意域名仍拦截;无 Origin 的服务端调用不受影响)
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             origin = request.headers.get("origin", "")
-            if origin and origin not in _trusted and origin != "null":
+            # Origin:"null" 不再放行（sandboxed iframe/file:// 场景才出现）：
+            # 正常浏览器同源请求不会发 null，放行等于给沙箱逃逸留口子
+            if origin and origin not in _trusted:
                 host = request.headers.get("host", "")
                 o_h = _urlparse(origin).hostname or ""
                 h_h = _urlparse(f"http://{host}").hostname if host else ""
@@ -120,6 +122,13 @@ if __name__ == "__main__":
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        # 静态资源文件名带内容 hash → 永久强缓存（发版即失效靠 html 引用更新）；
+        # 入口 html 本身不缓存，保证发布后浏览器立刻拿到新版本引用
+        if request.url.path.startswith(("/assets/", "/vendor/")):
+            response.headers.setdefault(
+                "Cache-Control", "public, max-age=31536000, immutable")
+        elif request.url.path in ("/", "/index.html"):
+            response.headers.setdefault("Cache-Control", "no-cache")
         if request.url.path not in ("/metrics", "/health"):
             try:
                 # path 归一化：动态段(会话 id/上传文件名等)折叠为 {id}，

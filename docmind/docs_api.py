@@ -3,7 +3,9 @@
 权限：复用 Gradio 登录 cookie（与 assistants_api.py 一致），未登录 401。
 存储：通过 store.get_kb(kb_id) 取 doc_dir；不存在则自动创建。
 """
+import logging
 import os
+import threading
 from datetime import datetime, timezone
 
 import fastapi
@@ -34,18 +36,34 @@ _UPLOADS_DIR = os.path.join("data", "uploads")
 _META_DB = os.path.join(_UPLOADS_DIR, "meta.db")
 
 
+_meta_local = threading.local()
+
+
 def _meta_conn():
     """附件属主元数据(独立 SQLite):文件名 → 上传者。
     /files/uploads 直链按属主隔离——否则任何登录用户可查看他人的
-    对话图片(可能含隐私内容)"""
+    对话图片(可能含隐私内容)。
+    连接按线程缓存（原先每次取图都新建连接+建表，高频场景纯浪费）；
+    缓存键记录 _META_DB——测试 monkeypatch 切换路径后自动重连"""
     import sqlite3 as _sq
-    conn = _sq.connect(_META_DB)
+    conn = getattr(_meta_local, "conn", None)
+    if conn is not None and getattr(_meta_local, "db_path", "") == _META_DB:
+        return conn
+    os.makedirs(_UPLOADS_DIR, exist_ok=True)
+    conn = _sq.connect(_META_DB, timeout=3)
     # _serve_upload 以 row["owner"] 按列名取值：默认 tuple 下标会 TypeError
     # → 所有带属主记录的附件 500（2026-08-24 修复的对话图片裂图根因）
     conn.row_factory = _sq.Row
+    conn.execute("PRAGMA busy_timeout=3000")
     conn.execute("""CREATE TABLE IF NOT EXISTS attachments(
         fname TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at REAL)""")
+    conn.commit()
+    _meta_local.conn = conn
+    _meta_local.db_path = _META_DB
     return conn
+
+
+_logger = logging.getLogger(__name__)
 
 
 def _record_upload(fname: str, owner: str) -> None:
@@ -56,25 +74,56 @@ def _record_upload(fname: str, owner: str) -> None:
                   (fname, owner or "anonymous", _time.time()))
         c.commit()
     except Exception:  # noqa: BLE001 - 元数据失败不阻断上传主流程
-        pass
+        _logger.warning("附件属主记录写入失败 fname=%s", fname, exc_info=True)
+
+
+# 对话图片上限：与前端压缩后的截图量级匹配；base64 解码后超限直接拒绝
+_CHAT_IMAGE_MAX_BYTES = 10 * 1024 * 1024   # 10MB
+
+
+def _sniff_image_mime(raw: bytes) -> str:
+    """从内容嗅探图片真实类型（空串=不属于已支持的图片格式）"""
+    if raw.startswith(b"\x89PNG"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
 
 
 def save_chat_image(data_url: str, owner: str = "") -> tuple[str, str]:
     """保存对话图片，返回 (文件名, 规范化的 data URL)。
-    data_url 可带 data:image/...;base64, 前缀或裸 base64"""
+    data_url 可带 data:image/...;base64, 前缀或裸 base64。
+    安全校验：大小上限 + 内容嗅探——声明类型与实际内容不符即拒绝
+    （伪装成图片的可执行/脚本文件不落盘、不回显给其他用户）"""
     import base64
     import re as _re
     import time as _time
     import uuid
 
     m = _re.match(r"data:(image/[\w.+-]+);base64,(.*)", data_url, _re.DOTALL)
-    mime, b64 = (m.group(1), m.group(2)) if m else ("image/png", data_url)
-    ext = {"image/png": ".png", "image/jpeg": ".jpg",
-           "image/webp": ".webp"}.get(mime, ".png")
+    declared, b64 = (m.group(1), m.group(2)) if m else ("", data_url)
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:  # noqa: BLE001 - binascii.Error 等
+        raise HTTPException(status_code=400, detail="图片 base64 解码失败")
+    if len(raw) > _CHAT_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"图片超过 {_CHAT_IMAGE_MAX_BYTES // (1024 * 1024)}MB 上限")
+    mime = _sniff_image_mime(raw)
+    if not mime:
+        raise HTTPException(status_code=400,
+                            detail="仅支持 PNG/JPEG/WebP 图片，或文件已损坏")
+    # 浏览器历史原因 image/jpg 与标准 image/jpeg 等价处理
+    if declared and declared not in (mime, "image/jpg"):
+        raise HTTPException(status_code=400,
+                            detail=f"图片内容为 {mime}，与声明类型 {declared} 不符（疑似伪装文件），已拒绝")
+    ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
     fname = f"{int(_time.time() * 1000)}_{uuid.uuid4().hex[:6]}{ext}"
     os.makedirs(_UPLOADS_DIR, exist_ok=True)
     with open(os.path.join(_UPLOADS_DIR, fname), "wb") as f:
-        f.write(base64.b64decode(b64))
+        f.write(raw)
     _record_upload(fname, owner)
     return fname, f"data:{mime};base64,{b64}"
 
@@ -157,14 +206,40 @@ def _current_user(request, app) -> str:
     return web_auth.current_user(request)
 
 def _require_user(request, app) -> str:
-    """校验登录态；被要求强制改密的用户返回 403"""
-    user = _current_user(request, app)
-    if not user:
-        raise HTTPException(status_code=401, detail="未登录")
-    if store.get_must_change_pwd(user):
-        raise HTTPException(status_code=403,
-                            detail={"code": "MUST_CHANGE_PWD", "message": "请先修改密码"})
-    return user
+    """校验登录态；被要求强制改密的用户返回 403（统一委托 web_auth.require_user）"""
+    from docmind import web_auth
+    return web_auth.require_user(request)
+
+
+def _assert_public_host(url: str) -> None:
+    """SSRF 防护：URL 主机解析出的全部 IP 必须是公网地址。
+    拒绝环回/私网/链路本地/保留/组播段——否则登录用户可借服务器抓取
+    http://127.0.0.1:<admin-port>、http://169.254.169.254（云元数据）、
+    http://192.168.* 等内网服务。注：DNS 重绑定(TOCTOU)需 pin-IP 级
+    防护，内部工具按解析时校验即可"""
+    import ipaddress as _ip
+    import socket as _socket
+    from urllib.parse import urlparse as _up
+
+    host = (_up(url).hostname or "").strip().lower()
+    if not host:
+        raise HTTPException(status_code=400, detail="url 缺少主机名")
+    if host == "localhost" or host.endswith((".local", ".internal")):
+        raise HTTPException(status_code=400, detail="不允许抓取内网地址")
+    try:
+        infos = _socket.getaddrinfo(host, None)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"域名解析失败: {e}")
+    for info in infos:
+        try:
+            ip = _ip.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise HTTPException(
+                status_code=400,
+                detail="不允许抓取指向内网/保留地址的 url")
 
 
 def _resolve_doc_dir(kb_id: str) -> str:
@@ -220,6 +295,7 @@ def register_docs_routes(app) -> None:
         url = str(body.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=400, detail="url 必须以 http(s):// 开头")
+        _assert_public_host(url)
 
         import requests as _requests
 
