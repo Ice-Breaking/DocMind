@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useMutation } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -47,62 +48,47 @@ export default function Settings({
 
   /* ---- 我的头像 ---- */
   const [draftAvatar, setDraftAvatar] = useState(me.avatar || '');
-  const [avatarSaving, setAvatarSaving] = useState(false);
-
-  /* ---- 上传自定义头像（待审核） ---- */
-  const [uploading, setUploading] = useState(false);
-
-  const handleUploadAvatar = async (file: File) => {
-    setUploading(true);
-    try {
-      const blob = await compressImageToAvatar(file);
-      await uploadAvatar(blob);
-      await onRefreshMe?.();
-      msgApi.success('已上传，等待管理员审核；审核通过前继续展示当前头像');
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '上传失败');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleSaveAvatar = async () => {
-    setAvatarSaving(true);
-    try {
-      await changeAvatar(draftAvatar);
-      await onRefreshMe?.();
-      msgApi.success('头像已保存');
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setAvatarSaving(false);
-    }
-  };
 
   /* ---- 注销账号 ---- */
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
-  const [deleting, setDeleting] = useState(false);
+
+  /* ---- 上传自定义头像（待审核）---- */
+  const uploadMut = useMutation({
+    mutationFn: (file: File) => compressImageToAvatar(file).then((blob) => uploadAvatar(blob)),
+    onSuccess: async () => {
+      await onRefreshMe?.();
+      msgApi.success('已上传，等待管理员审核；审核通过前继续展示当前头像');
+    },
+    onError: (e: Error) => msgApi.error(e.message || '上传失败'),
+  });
+
+  /* ---- 保存预设头像 ---- */
+  const saveAvatarMut = useMutation({
+    mutationFn: () => changeAvatar(draftAvatar),
+    onSuccess: async () => {
+      await onRefreshMe?.();
+      msgApi.success('头像已保存');
+    },
+    onError: (e: Error) => msgApi.error(e.message || '保存失败'),
+  });
 
   const openDeleteConfirm = () => {
     setConfirmText('');
     setConfirmOpen(true);
   };
 
-  const handleDeleteAccount = async () => {
-    setDeleting(true);
-    try {
-      await deleteAccount();
+  /* ---- 注销账号：成功后登出并跳登录页 ---- */
+  const deleteAccMut = useMutation({
+    mutationFn: () => deleteAccount(),
+    onSuccess: () => {
       msgApi.success('账号已注销');
       setConfirmOpen(false);
       onLogout();
       navigate('/login', { replace: true });
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '注销失败');
-    } finally {
-      setDeleting(false);
-    }
-  };
+    },
+    onError: (e: Error) => msgApi.error(e.message || '注销失败'),
+  });
 
   return (
     <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 760, margin: '0 auto' }}>
@@ -170,8 +156,8 @@ export default function Settings({
         <Button
           type="primary"
           style={{ marginTop: 16 }}
-          loading={avatarSaving}
-          onClick={handleSaveAvatar}
+          loading={saveAvatarMut.isPending}
+          onClick={() => saveAvatarMut.mutate()}
         >
           保存头像
         </Button>
@@ -181,11 +167,11 @@ export default function Settings({
             accept="image/png,image/jpeg,image/webp"
             showUploadList={false}
             beforeUpload={(f) => {
-              handleUploadAvatar(f);
+              uploadMut.mutate(f);
               return false;
             }}
           >
-            <Button icon={<UploadOutlined />} loading={uploading}>
+            <Button icon={<UploadOutlined />} loading={uploadMut.isPending}>
               上传自定义头像
             </Button>
           </Upload>
@@ -235,11 +221,11 @@ export default function Settings({
       <Modal
         title="确认注销账号"
         open={confirmOpen}
-        onOk={handleDeleteAccount}
+        onOk={() => deleteAccMut.mutate()}
         onCancel={() => setConfirmOpen(false)}
         okText="永久注销"
         okButtonProps={{ danger: true, disabled: confirmText !== me.user }}
-        confirmLoading={deleting}
+        confirmLoading={deleteAccMut.isPending}
         cancelText="取消"
         maskClosable={false}
       >

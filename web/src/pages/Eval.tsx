@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -68,27 +69,25 @@ const STATUS_CFG: Record<string, { color: string; label: string }> = {
 
 function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
   const { message: msgApi } = App.useApp();
-  const [datasets, setDatasets] = useState<EvalDataset[]>([]);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<EvalDataset | null>(null);
-  const [saving, setSaving] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
   const [runTarget, setRunTarget] = useState<EvalDataset | null>(null);
   const [runMode, setRunMode] = useState('rerank');
   const [form] = Form.useForm<{ name: string; kb_id: string; items_json: string }>();
 
-  const load = useCallback(async () => {
-    try {
-      setDatasets(await fetchEvalDatasets());
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [msgApi]);
+  const dsQ = useQuery<EvalDataset[], Error>({
+    queryKey: ['evalDatasets'],
+    queryFn: () => fetchEvalDatasets(),
+  });
+  const datasets = dsQ.data ?? [];
+  const loading = dsQ.isPending;
 
-  useEffect(() => { load(); }, [load]);
+  // 首轮加载失败提示（对齐旧 load() 的 toast 行为）
+  useEffect(() => {
+    if (dsQ.isError) msgApi.error(dsQ.error?.message || '加载失败');
+  }, [dsQ.isError, dsQ.error, msgApi]);
 
   const openCreate = () => {
     setEditing(null);
@@ -108,6 +107,58 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
     setModalOpen(true);
   };
 
+  /* ---- 新建 / 编辑（同一 Modal，按 editing 分支）---- */
+  const saveMut = useMutation({
+    mutationFn: async (values: { name: string; kb_id: string; items_json: string }) => {
+      let items: unknown;
+      try {
+        items = JSON.parse(values.items_json);
+        if (!Array.isArray(items)) throw new Error('items 必须是数组');
+        for (const it of items as any[]) {
+          if (!it || typeof it.question !== 'string' || typeof it.expected !== 'string') {
+            throw new Error('每条样本需包含 question 与 expected 字符串字段');
+          }
+        }
+      } catch (e: unknown) {
+        throw new Error(`样本 JSON 非法：${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (editing) {
+        await updateEvalDataset(editing.id, {
+          name: values.name,
+          kb_id: values.kb_id,
+          items: items as any,
+        });
+      } else {
+        await createEvalDataset({ name: values.name, kb_id: values.kb_id, items: items as any });
+      }
+    },
+    onSuccess: () => {
+      msgApi.success(editing ? '评测集已更新' : '评测集已创建');
+      setModalOpen(false);
+      qc.invalidateQueries({ queryKey: ['evalDatasets'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '保存失败'),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (ds: EvalDataset) => deleteEvalDataset(ds.id),
+    onSuccess: () => {
+      msgApi.success('评测集已删除');
+      qc.invalidateQueries({ queryKey: ['evalDatasets'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
+
+  /* ---- 启动评测：异步任务，进度在「运行记录」页轮询展示 ---- */
+  const runMut = useMutation({
+    mutationFn: (dsId: number) => runEval(dsId, { mode: runMode, top_k: 4 }),
+    onSuccess: () => {
+      msgApi.success('评测已启动，请到「运行记录」查看进度');
+      setRunOpen(false);
+    },
+    onError: (e: Error) => msgApi.error(e.message || '启动失败'),
+  });
+
   const handleSave = async () => {
     let values: { name: string; kb_id: string; items_json: string };
     try {
@@ -115,60 +166,12 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
     } catch {
       return;
     }
-    let items: unknown;
-    try {
-      items = JSON.parse(values.items_json);
-      if (!Array.isArray(items)) throw new Error('items 必须是数组');
-      for (const it of items as any[]) {
-        if (!it || typeof it.question !== 'string' || typeof it.expected !== 'string') {
-          throw new Error('每条样本需包含 question 与 expected 字符串字段');
-        }
-      }
-    } catch (e: unknown) {
-      msgApi.error(`样本 JSON 非法：${e instanceof Error ? e.message : String(e)}`);
-      return;
-    }
-    setSaving(true);
-    try {
-      if (editing) {
-        await updateEvalDataset(editing.id, {
-          name: values.name,
-          kb_id: values.kb_id,
-          items: items as any,
-        });
-        msgApi.success('评测集已更新');
-      } else {
-        await createEvalDataset({ name: values.name, kb_id: values.kb_id, items: items as any });
-        msgApi.success('评测集已创建');
-      }
-      setModalOpen(false);
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setSaving(false);
-    }
+    saveMut.mutate(values);
   };
 
-  const handleDelete = async (ds: EvalDataset) => {
-    try {
-      await deleteEvalDataset(ds.id);
-      msgApi.success('评测集已删除');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
-  };
-
-  const handleRun = async () => {
+  const handleRun = () => {
     if (!runTarget) return;
-    try {
-      await runEval(runTarget.id, { mode: runMode, top_k: 4 });
-      msgApi.success('评测已启动，请到「运行记录」查看进度');
-      setRunOpen(false);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '启动失败');
-    }
+    runMut.mutate(runTarget.id);
   };
 
   const kbName = (id: string) => kbs.find((k) => k.id === id)?.name || id;
@@ -216,7 +219,7 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
             okText="删除"
             okButtonProps={{ danger: true }}
             cancelText="取消"
-            onConfirm={() => handleDelete(r)}
+            onConfirm={() => deleteMut.mutate(r)}
           >
             <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
           </Popconfirm>
@@ -244,7 +247,7 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
         open={modalOpen}
         onOk={handleSave}
         onCancel={() => setModalOpen(false)}
-        confirmLoading={saving}
+        confirmLoading={saveMut.isPending}
         width={680}
         okText="保存"
         cancelText="取消"
@@ -306,39 +309,36 @@ function DatasetsTab({ kbs }: { kbs: KnowledgeBase[] }) {
 
 function RunsTab() {
   const { message: msgApi } = App.useApp();
-  const [datasets, setDatasets] = useState<EvalDataset[]>([]);
-  const [runs, setRuns] = useState<EvalRun[]>([]);
-  const [loading, setLoading] = useState(true);
-  const timerRef = useRef<number | null>(null);
 
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const [ds, rs] = await Promise.all([fetchEvalDatasets(), fetchEvalRuns()]);
-      setDatasets(ds);
-      setRuns(rs);
-    } catch (e: unknown) {
-      if (!silent) msgApi.error(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, [msgApi]);
+  // 评测集列表仅用于 id→名称映射（与评测集 Tab / Traces 等共享缓存）
+  const dsQ = useQuery<EvalDataset[], Error>({
+    queryKey: ['evalDatasets'],
+    queryFn: () => fetchEvalDatasets(),
+  });
+  // 运行记录：存在 pending/running 任务时每 4 秒自动刷新（对齐旧 setInterval 轮询）
+  const runsQ = useQuery<EvalRun[], Error>({
+    queryKey: ['evalRuns'],
+    queryFn: () => fetchEvalRuns(),
+    refetchInterval: (query) => {
+      const rows = query.state.data;
+      return rows?.some((r) => r.status === 'pending' || r.status === 'running')
+        ? 4000
+        : false;
+    },
+  });
 
+  // 首轮加载失败提示；轮询期间的静默失败不打扰（对齐旧 load(silent) 行为）
   useEffect(() => {
-    load();
-    // 有 pending/running 任务时每 4 秒静默刷新
-    timerRef.current = window.setInterval(() => {
-      setRuns((cur) => {
-        if (cur.some((r) => r.status === 'pending' || r.status === 'running')) {
-          load(true);
-        }
-        return cur;
-      });
-    }, 4000);
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
-    };
-  }, [load]);
+    if (runsQ.isError && !runsQ.data) msgApi.error(runsQ.error?.message || '加载失败');
+  }, [runsQ.isError, runsQ.data, runsQ.error, msgApi]);
+
+  const datasets = dsQ.data ?? [];
+  const runs = runsQ.data ?? [];
+  const loading = runsQ.isPending || dsQ.isPending;
+  const refresh = () => {
+    runsQ.refetch();
+    dsQ.refetch();
+  };
 
   const dsName = (id: number) => datasets.find((d) => d.id === id)?.name || `#${id}`;
 
@@ -412,7 +412,7 @@ function RunsTab() {
   return (
     <>
       <div style={{ marginBottom: 16 }}>
-        <Button icon={<ReloadOutlined />} onClick={() => load()}>刷新</Button>
+        <Button icon={<ReloadOutlined />} onClick={refresh}>刷新</Button>
         <Text type="secondary" style={{ marginLeft: 12, fontSize: 12 }}>
           运行中的任务每 4 秒自动刷新；展开行查看未命中明细
         </Text>
@@ -434,15 +434,18 @@ function RunsTab() {
 }
 
 function RunDetails({ runId, status }: { runId: number; status: string }) {
-  const [run, setRun] = useState<EvalRun | null>(null);
-
-  useEffect(() => {
-    if (status !== 'done' && status !== 'error') return;
-    fetchEvalRun(runId).then(setRun).catch(() => undefined);
-  }, [runId, status]);
+  const enabled = status === 'done' || status === 'error';
+  const runQ = useQuery<EvalRun, Error>({
+    queryKey: ['evalRun', runId],
+    queryFn: () => fetchEvalRun(runId),
+    enabled,
+    // 展开行明细属一次性辅助数据，失败静默（对齐旧 .catch(() => undefined)）
+    retry: false,
+  });
 
   if (status === 'error') return <Text type="danger">运行失败，请查看后端日志</Text>;
-  if (!run) return <Spin size="small" />;
+  if (!runQ.data) return <Spin size="small" />;
+  const run = runQ.data;
 
   const misses = (run.details || []).filter((d) => !d.hit_rank);
   if (!misses.length) {
@@ -475,15 +478,12 @@ function RunDetails({ runId, status }: { runId: number; status: string }) {
 /* ------------------------------------------------------------------ */
 
 function QualityTab() {
-  const [data, setData] = useState<QualityData | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchQuality(30)
-      .then(setData)
-      .catch(() => undefined)
-      .finally(() => setLoading(false));
-  }, []);
+  const qualityQ = useQuery<QualityData, Error>({
+    queryKey: ['quality', 30],
+    queryFn: () => fetchQuality(30),
+  });
+  const loading = qualityQ.isPending;
+  const data = qualityQ.data ?? null;
 
   if (loading) return <Spin style={{ display: 'block', margin: '60px auto' }} size="large" />;
   if (!data) return <Text type="danger">质量数据加载失败</Text>;
@@ -598,11 +598,12 @@ function QualityTab() {
 /* ------------------------------------------------------------------ */
 
 export default function Eval() {
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-
-  useEffect(() => {
-    fetchKbs().then(setKbs).catch(() => undefined);
-  }, []);
+  // KB 选项（与 Traces / Assistants / ApiKeys / RetrievalLab 共享缓存）
+  const kbsQ = useQuery<KnowledgeBase[], Error>({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+  });
+  const kbs = kbsQ.data ?? [];
 
   return (
     <div className="dm-page" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>

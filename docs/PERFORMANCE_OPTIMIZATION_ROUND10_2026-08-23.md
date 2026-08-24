@@ -216,10 +216,70 @@ useEffect(() => {
 | 六页手写数据获取代码 | ~150 行 | ~60 行 useQuery/useMutation 声明 |
 | 已迁移页面 | 8 页 | 14 页(+Admin/Audit/Models/Assistants/ApiKeys/Users) |
 
-## 八、遗留说明(迁移路线)
+## 八、第六期:特殊交互页迁移(Eval / KnowledgeBases / Settings / RetrievalLab)
 
-- 第六期候选:Eval / KnowledgeBases / Settings / RetrievalLab
-  体量大或交互特殊,单独评估;Home/Login 无数据层需求;
-- Chat 页的 loadSessions/loadMessages 属会话编排(与 SSE 流耦合),
-  放在迁移末期单独处理。
+### `Settings.tsx`(261 → 247 行)
+
+- 纯 mutation 页(无 query):上传自定义头像 → `uploadMut`
+  (compressImageToAvatar 前置压缩并入 mutationFn)、保存预设头像 →
+  `saveAvatarMut`,两者成功后均 `await onRefreshMe?.()` 再提示;
+- 注销账号 → `deleteAccMut`,成功后关 Modal → 登出 → 跳登录页;
+- 三个手写 loading state(`uploading`/`avatarSaving`/`deleting`)全部由
+  `isPending` 派生,净减 14 行。
+
+### `RetrievalLab.tsx`(208 → 214 行)
+
+- KB 选项复用共享 `['kbs']`,链路阶段耗时 → `['stageStats']`;
+  两处均为辅助数据,`retry: false` 失败静默(对齐旧
+  `.catch(() => undefined)`);
+- 调试检索 → `debugMut`:点击触发的一次性动作,`result`/`loading`
+  两个 state 由 `debugMut.data` / `isPending` 派生,空问题校验留在
+  mutate 前;行数略增因补了注释。
+
+### `Eval.tsx`(623 → 624 行)
+
+- 三 Tab 独立迁移:评测集 → `['evalDatasets']`(失败 error effect 弹
+  toast);保存 → `saveMut`(JSON 校验在 mutationFn 内抛出,走
+  `onError` 展示「样本 JSON 非法」,Modal 保持打开)、删除 →
+  `deleteMut`、启动评测 → `runMut`;成功统一失效 `['evalDatasets']`;
+- 运行记录 → `['evalRuns']` + 共享 `['evalDatasets']`(仅作 id→名称
+  映射),聚合 loading;**旧 setInterval 手动轮询 → refetchInterval
+  函数式**:存在 pending/running 任务时每 4 秒刷新,否则自动停止;
+  首轮失败弹 toast、轮询期间失败静默(对齐旧 `load(silent)` 语义);
+- 未命中明细展开行 → `['evalRun', runId]`,`enabled` 由 status 驱动,
+  失败静默;质量监控 → `['quality', 30]`(失败红字提示不变);
+- 根组件 KB 选项接入共享 `['kbs']`。
+
+### `KnowledgeBases.tsx`(659 → 640 行,本期最复杂)
+
+- KB 清单为本页主数据:沿用共享 key `['kbs']`,但保留「错误卡片 +
+  重试按钮」UI(retry off 全局默认下首载失败即展示);
+- Drawer 文档列表 → `['kbDocs', kbId]`、入库任务 →
+  `['ingestTasks', kbId]`,`enabled: !!activeKb`;docs 失败 toast、
+  tasks 失败静默(对齐旧行为);
+- **入库任务 3s 轮询 → refetchInterval 函数式**(有 running/pending
+  时轮询);「全部结束后刷新文档统计」用 `hadRunningRef` effect 在
+  running→idle 翻转时失效 `['kbs']` 与 `['kbDocs']`,替掉整个
+  `pollRef`/`startPolling`/卸载清理三段手写逻辑;
+- 五个动作 mutation 化:`uploadMut`(Upload customRequest 经
+  mutate 的 per-call 回调通知 antd onSuccess/onError)、
+  `deleteDocMut`、`reindexMut`(成功后切到任务 Tab 并失效任务缓存,
+  行级 loading 用 `variables?.id` 驱动)、`createMut`、`deleteKbMut`;
+  上传/删除文档成功后同时失效 kbs/kbDocs/ingestTasks 三缓存;
+- 文档内容搜索保持原生 fetch + 本地 loading state(一次性动作不进
+  缓存层,与 ApiKeys 明文探针同模式)。
+
+### 效果
+
+| 指标 | 迁移前 | 迁移后 |
+|---|---|---|
+| 四页手写数据获取代码 | ~130 行 | ~50 行 useQuery/useMutation 声明 |
+| 手写轮询(setInterval) | 2 处(RunsTab / 入库任务) | 0 处(refetchInterval 函数式) |
+| 已迁移页面 | 14 页 | 18 页(+Eval/KnowledgeBases/Settings/RetrievalLab) |
+
+## 九、遗留说明(迁移路线)
+
+- 仅剩 Chat 页:`loadSessions`/`loadMessages` 属会话编排(与 SSE 流
+  耦合),放在迁移末期单独处理;
+- Home/Login 无数据层需求,不需迁移。
 

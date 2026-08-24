@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   App,
   Card,
@@ -35,39 +36,44 @@ const { Text, Paragraph } = Typography;
 export default function RetrievalLab() {
   const { message: msgApi } = App.useApp();
 
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [question, setQuestion] = useState('');
   const [kbId, setKbId] = useState('default');
   const [topK, setTopK] = useState(4);
   const [rerank, setRerank] = useState(true);
 
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<RetrievalDebugResult | null>(null);
+  // KB 选项（与 Traces / Assistants / ApiKeys 共享缓存）+ 链路阶段统计
+  // 两处均为辅助数据：失败静默降级，不打扰主流程（对齐旧 .catch(() => undefined)）
+  const kbsQ = useQuery<KnowledgeBase[], Error>({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+    retry: false,
+  });
+  const statsQ = useQuery<{ stages: StageStat[] }, Error>({
+    queryKey: ['stageStats'],
+    queryFn: () => fetchStageStats(),
+    retry: false,
+  });
 
-  const [stageStats, setStageStats] = useState<StageStat[]>([]);
+  const kbs = kbsQ.data ?? [];
+  const stageStats = statsQ.data?.stages ?? [];
 
-  useEffect(() => {
-    fetchKbs().then(setKbs).catch(() => undefined);
-    fetchStageStats()
-      .then((r) => setStageStats(r.stages))
-      .catch(() => undefined);
-  }, []);
+  // 调试检索：点击触发的一次性动作，data 即最近一次结果
+  const debugMut = useMutation({
+    mutationFn: (q: string) =>
+      debugRetrieval({ question: q, kb_id: kbId, top_k: topK, rerank }),
+    onError: (e: Error) => msgApi.error(e.message || '检索调试失败'),
+  });
+  const loading = debugMut.isPending;
+  const result: RetrievalDebugResult | null = debugMut.data ?? null;
 
-  const handleDebug = useCallback(async () => {
+  const handleDebug = () => {
     const q = question.trim();
     if (!q) {
       msgApi.warning('请输入要调试的问题');
       return;
     }
-    setLoading(true);
-    try {
-      setResult(await debugRetrieval({ question: q, kb_id: kbId, top_k: topK, rerank }));
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '检索调试失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [question, kbId, topK, rerank, msgApi]);
+    debugMut.mutate(q);
+  };
 
   const stageColumns: ColumnsType<StageStat> = [
     { title: '阶段', dataIndex: 'stage', key: 'stage', render: (v: string) => <Text code>{v}</Text> },

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App,
   Button,
@@ -79,163 +80,164 @@ const TASK_MODE_LABEL: Record<string, string> = {
 
 export default function KnowledgeBases() {
   const { message: msgApi } = App.useApp();
-
-  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   /* ---- 新建知识库 Modal ---- */
   const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [form] = Form.useForm<{ name: string; description: string }>();
 
   /* ---- 知识库详情 Drawer（文档 + 入库任务双 Tab） ---- */
   const [activeKb, setActiveKb] = useState<KnowledgeBase | null>(null);
   const [drawerTab, setDrawerTab] = useState('docs');
-  const [docs, setDocs] = useState<KbDoc[]>([]);
-  const [docsLoading, setDocsLoading] = useState(false);
+  // 内容搜索为一次性动作（raw fetch 不走缓存），loading 用本地 state
   const [contentSearching, setContentSearching] = useState(false);
   const [contentResults, setContentResults] = useState<{ kw: string; results: ContentHit[] } | null>(null);
-  const [tasks, setTasks] = useState<IngestTask[]>([]);
-  const [tasksLoading, setTasksLoading] = useState(false);
-  const [reindexing, setReindexing] = useState<string | null>(null);
-  const pollRef = useRef<number | null>(null);
 
   /* ---- 文档预览 Modal ---- */
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewFilename, setPreviewFilename] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setKbs(await fetchKbs());
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+  /* ---- 知识库列表：本页主数据，失败展示错误并支持重试 ---- */
+  const kbsQ = useQuery<KnowledgeBase[], Error>({
+    queryKey: ['kbs'],
+    queryFn: () => fetchKbs(),
+  });
+  const kbs = kbsQ.data ?? [];
+  const loading = kbsQ.isPending;
+  const error = kbsQ.isError ? (kbsQ.error?.message || '加载失败') : null;
+
+  /* ---- Drawer 内文档列表 / 入库任务 ---- */
+  const kbId = activeKb?.id ?? '';
+  const docsQ = useQuery<KbDoc[], Error>({
+    queryKey: ['kbDocs', kbId],
+    queryFn: () => fetchKbDocs(kbId),
+    enabled: !!activeKb,
+  });
+  // 任务列表：有进行中任务时每 3 秒轮询，全部结束后自动停止
+  const tasksQ = useQuery<IngestTask[], Error>({
+    queryKey: ['ingestTasks', kbId],
+    queryFn: () => fetchIngestTasks(kbId),
+    enabled: !!activeKb,
+    retry: false,
+    refetchInterval: (q) =>
+      q.state.data?.some((t) => t.status === 'running' || t.status === 'pending') ? 3000 : false,
+  });
+
+  const docs = docsQ.data ?? [];
+  const tasks = tasksQ.data ?? [];
+
+  // 文档列表加载失败提示（对齐旧 loadDocs 的 toast；任务列表失败保持静默）
+  useEffect(() => {
+    if (docsQ.isError) msgApi.error(docsQ.error?.message || '文档列表加载失败');
+  }, [docsQ.isError, docsQ.error, msgApi]);
+
+  // 轮询从「有任务在跑」转为「全部结束」时，刷新文档统计与文档列表（对齐旧轮询收尾逻辑）
+  const hadRunningRef = useRef(false);
+  useEffect(() => {
+    const list = tasksQ.data;
+    if (!list?.length) return;
+    const running = list.some((t) => t.status === 'running' || t.status === 'pending');
+    if (running) {
+      hadRunningRef.current = true;
+    } else if (hadRunningRef.current) {
+      hadRunningRef.current = false;
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+      qc.invalidateQueries({ queryKey: ['kbDocs', kbId] });
     }
-  }, []);
+  }, [tasksQ.data, qc, kbId]);
 
-  useEffect(() => { load(); }, [load]);
-
-  /* ---- 文档 / 任务列表 ---- */
-
-  const loadDocs = useCallback(async (kbId: string) => {
-    setDocsLoading(true);
-    try {
-      setDocs(await fetchKbDocs(kbId));
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '文档列表加载失败');
-    } finally {
-      setDocsLoading(false);
-    }
-  }, [msgApi]);
-
-  const loadTasks = useCallback(async (kbId: string) => {
-    setTasksLoading(true);
-    try {
-      setTasks(await fetchIngestTasks(kbId));
-    } catch {
-      // 任务列表加载失败不打扰用户
-    } finally {
-      setTasksLoading(false);
-    }
-  }, []);
-
-  const openKb = async (kb: KnowledgeBase, tab = 'docs') => {
+  /** 打开抽屉即触发两条 query 拉取 */
+  const openKb = (kb: KnowledgeBase, tab = 'docs') => {
+    setContentResults(null);
     setActiveKb(kb);
     setDrawerTab(tab);
-    await Promise.all([loadDocs(kb.id), loadTasks(kb.id)]);
   };
 
   const closeDrawer = () => {
     setActiveKb(null);
-    if (pollRef.current) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
   };
 
-  /** 有进行中任务时每 3 秒轮询，全部结束后自动停止 */
-  const startPolling = useCallback((kbId: string) => {
-    if (pollRef.current) return;
-    pollRef.current = window.setInterval(async () => {
-      try {
-        const list = await fetchIngestTasks(kbId);
-        setTasks(list);
-        if (!list.some((t) => t.status === 'running')) {
-          if (pollRef.current) {
-            window.clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-          load();   // 重建完成后刷新文档统计
-        }
-      } catch {
-        // 轮询失败静默，下一轮再试
-      }
-    }, 3000);
-  }, [load]);
+  /* ---- 上传文档（Upload 手动请求） ---- */
 
-  useEffect(() => () => {
-    if (pollRef.current) window.clearInterval(pollRef.current);
-  }, []);
-
-  /* ---- 上传（Upload 手动请求） ---- */
+  const uploadMut = useMutation({
+    mutationFn: ({ kbId: id, file }: { kbId: string; file: File }) => uploadKbDoc(id, file),
+    onSuccess: (_d, v) => {
+      msgApi.success(`已上传 ${v.file.name}，重建索引后生效`);
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+      qc.invalidateQueries({ queryKey: ['kbDocs', v.kbId] });
+      qc.invalidateQueries({ queryKey: ['ingestTasks', v.kbId] });
+    },
+    onError: (e: Error, v) => {
+      msgApi.error(`${v.file.name} 上传失败：${e.message || '上传失败'}`);
+    },
+  });
 
   const uploadProps: UploadProps = {
     name: 'file',
     multiple: true,
     showUploadList: false,
     accept: '.pdf,.md,.txt,.docx,.csv,.json',
-    customRequest: async ({ file, onSuccess, onError }) => {
+    customRequest: ({ file, onSuccess, onError }) => {
       if (!activeKb) return;
-      try {
-        await uploadKbDoc(activeKb.id, file as File);
-        msgApi.success(`已上传 ${(file as File).name}，重建索引后生效`);
-        onSuccess?.({}, new XMLHttpRequest());
-        await Promise.all([loadDocs(activeKb.id), loadTasks(activeKb.id), load()]);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : '上传失败';
-        msgApi.error(`${(file as File).name} 上传失败：${msg}`);
-        onError?.(new Error(msg));
-      }
+      uploadMut.mutate(
+        { kbId: activeKb.id, file: file as File },
+        {
+          onSuccess: () => onSuccess?.({}, new XMLHttpRequest()),
+          onError: (err) => onError?.(err),
+        },
+      );
     },
   };
 
   /* ---- 删除文档 ---- */
 
-  const handleDeleteDoc = async (name: string) => {
-    if (!activeKb) return;
-    try {
-      await deleteKbDoc(activeKb.id, name);
+  const deleteDocMut = useMutation({
+    mutationFn: (name: string) => deleteKbDoc(kbId, name),
+    onSuccess: (_d, name) => {
       msgApi.success(`已删除 ${name}，重建索引后从检索移除`);
-      await Promise.all([loadDocs(activeKb.id), loadTasks(activeKb.id), load()]);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
-  };
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+      qc.invalidateQueries({ queryKey: ['kbDocs', kbId] });
+      qc.invalidateQueries({ queryKey: ['ingestTasks', kbId] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
 
   /* ---- 重建索引（异步任务） ---- */
 
-  const handleReindex = async (kb: KnowledgeBase) => {
-    setReindexing(kb.id);
-    try {
-      const r = await reindexKb(kb.id);
+  const reindexMut = useMutation({
+    mutationFn: (kb: KnowledgeBase) => reindexKb(kb.id),
+    onSuccess: (r, kb) => {
       msgApi.success(`索引重建已启动（任务 #${r.task_id ?? '-'}），可在入库任务中查看进度`);
-      // 打开该库抽屉的任务 Tab 并轮询进度
+      // 打开该库抽屉的任务 Tab 并轮询进度（invalidate 后 refetchInterval 自动接管）
       setActiveKb(kb);
       setDrawerTab('tasks');
-      await loadTasks(kb.id);
-      startPolling(kb.id);
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '重建索引失败');
-    } finally {
-      setReindexing(null);
-    }
-  };
+      qc.invalidateQueries({ queryKey: ['ingestTasks', kb.id] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '重建索引失败'),
+  });
 
   /* ---- 创建 / 删除知识库 ---- */
+
+  const createMut = useMutation({
+    mutationFn: (values: { name: string; description: string }) =>
+      createKb({ name: values.name, description: values.description || '' }),
+    onSuccess: () => {
+      msgApi.success('知识库已创建');
+      setCreateOpen(false);
+      form.resetFields();
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '创建失败'),
+  });
+
+  const deleteKbMut = useMutation({
+    mutationFn: (kb: KnowledgeBase) => deleteKb(kb.id),
+    onSuccess: () => {
+      msgApi.success('知识库已删除');
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+    },
+    onError: (e: Error) => msgApi.error(e.message || '删除失败'),
+  });
 
   const handleCreate = async () => {
     let values: { name: string; description: string };
@@ -244,28 +246,7 @@ export default function KnowledgeBases() {
     } catch {
       return;
     }
-    setCreating(true);
-    try {
-      await createKb({ name: values.name, description: values.description || '' });
-      msgApi.success('知识库已创建');
-      setCreateOpen(false);
-      form.resetFields();
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '创建失败');
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const handleDeleteKb = async (kb: KnowledgeBase) => {
-    try {
-      await deleteKb(kb.id);
-      msgApi.success('知识库已删除');
-      await load();
-    } catch (e: unknown) {
-      msgApi.error(e instanceof Error ? e.message : '删除失败');
-    }
+    createMut.mutate(values);
   };
 
   /* ---- 表格列 ---- */
@@ -323,9 +304,9 @@ export default function KnowledgeBases() {
           </Button>
           <Button
             size="small"
-            icon={<SyncOutlined spin={reindexing === kb.id} />}
-            loading={reindexing === kb.id}
-            onClick={() => handleReindex(kb)}
+            icon={<SyncOutlined spin={reindexMut.isPending && reindexMut.variables?.id === kb.id} />}
+            loading={reindexMut.isPending && reindexMut.variables?.id === kb.id}
+            onClick={() => reindexMut.mutate(kb)}
           >
             重建索引
           </Button>
@@ -338,7 +319,7 @@ export default function KnowledgeBases() {
               okText="删除"
               okButtonProps={{ danger: true }}
               cancelText="取消"
-              onConfirm={() => handleDeleteKb(kb)}
+              onConfirm={() => deleteKbMut.mutate(kb)}
             >
               <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
             </Popconfirm>
@@ -423,7 +404,7 @@ export default function KnowledgeBases() {
       ) : error ? (
         <Card>
           <Text type="danger">加载失败：{error}</Text>
-          <Button style={{ marginLeft: 12 }} onClick={load}>重试</Button>
+          <Button style={{ marginLeft: 12 }} onClick={() => kbsQ.refetch()}>重试</Button>
         </Card>
       ) : (
         <Table scroll={{ x: "max-content" }}
@@ -441,7 +422,7 @@ export default function KnowledgeBases() {
         open={createOpen}
         onOk={handleCreate}
         onCancel={() => setCreateOpen(false)}
-        confirmLoading={creating}
+        confirmLoading={createMut.isPending}
         okText="创建"
         cancelText="取消"
         destroyOnClose
@@ -497,7 +478,7 @@ export default function KnowledgeBases() {
                       <Button
                         size="small"
                         icon={<ReloadOutlined />}
-                        onClick={() => loadDocs(activeKb.id)}
+                        onClick={() => docsQ.refetch()}
                       >
                         刷新
                       </Button>
@@ -551,7 +532,7 @@ export default function KnowledgeBases() {
                       </div>
                     )}
 
-                    {docsLoading ? (
+                    {docsQ.isFetching ? (
                       <Spin style={{ display: 'block', margin: '40px auto' }} />
                     ) : docs.length === 0 ? (
                       <Empty description="暂无文档" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -569,7 +550,7 @@ export default function KnowledgeBases() {
                                 okText="删除"
                                 okButtonProps={{ danger: true }}
                                 cancelText="取消"
-                                onConfirm={() => handleDeleteDoc(d.name)}
+                                onConfirm={() => deleteDocMut.mutate(d.name)}
                               >
                                 <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
                               </Popconfirm>,
@@ -607,12 +588,12 @@ export default function KnowledgeBases() {
                       <Button
                         size="small"
                         icon={<ReloadOutlined />}
-                        onClick={() => loadTasks(activeKb.id)}
+                        onClick={() => tasksQ.refetch()}
                       >
                         刷新
                       </Button>
                     </div>
-                    {tasksLoading && tasks.length === 0 ? (
+                    {tasksQ.isFetching && tasks.length === 0 ? (
                       <Spin style={{ display: 'block', margin: '40px auto' }} />
                     ) : tasks.length === 0 ? (
                       <Empty description="暂无任务记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -630,8 +611,8 @@ export default function KnowledgeBases() {
                         <Button
                           type="primary"
                           icon={<SyncOutlined />}
-                          loading={reindexing === activeKb.id}
-                          onClick={() => handleReindex(activeKb)}
+                          loading={reindexMut.isPending && reindexMut.variables?.id === activeKb.id}
+                          onClick={() => reindexMut.mutate(activeKb)}
                         >
                           重试：重新重建索引
                         </Button>
