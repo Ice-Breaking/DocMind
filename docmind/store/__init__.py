@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS audit_events(
     action TEXT NOT NULL,
     target TEXT DEFAULT '',
     detail TEXT DEFAULT '',
+    ip TEXT DEFAULT '',
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
@@ -210,7 +211,13 @@ def _conn() -> sqlite3.Connection:
             conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''")
         if "pending_avatar" not in u_cols:
             conn.execute("ALTER TABLE users ADD COLUMN pending_avatar TEXT DEFAULT ''")
+        if "pending_avatar_at" not in u_cols:
             conn.execute("ALTER TABLE users ADD COLUMN pending_avatar_at REAL DEFAULT 0")
+        # 审计表补来源 IP 列（二轮回归 P2）：安全事件需按 IP 溯源；
+        # 存量库走 ALTER 向前兼容，新建库由上方 schema 直接携带
+        a_cols = [r["name"] for r in conn.execute("PRAGMA table_info(audit_events)")]
+        if "ip" not in a_cols:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN ip TEXT DEFAULT ''")
         conn.commit()
         _local.conn = conn
     return conn

@@ -70,6 +70,29 @@ def test_ip_lockout_triggers_at_threshold():
     assert web_auth.is_locked("fresh-user") > 0   # 新用户名也被 IP 维度拦
 
 
+def test_revoke_other_sessions_keeps_current():
+    """改密后必须吊销本人其余会话、保留发起改密的当前会话（盲区 J：
+    旧会话凭滑动续期存活至 12h TTL，改密形同虚设）"""
+    web_auth._tokens.clear()
+    t_keep = web_auth.issue("carol")
+    t_old = web_auth.issue("carol")
+    t_other = web_auth.issue("dave")            # 其他用户不得被牵连
+    assert web_auth.revoke_other_sessions("carol", keep_token=t_keep) == 1
+    assert web_auth.validate(t_keep) == "carol"   # 当前会话存活
+    assert web_auth.validate(t_old) == ""         # 其余会话已吊销
+    assert web_auth.validate(t_other) == "dave"   # 他人会话零牵连
+
+
+def test_revoke_other_sessions_without_keep_revokes_all():
+    """不传 keep_token 时吊销该用户全部会话（如管理员强制下线场景）"""
+    web_auth._tokens.clear()
+    ta = web_auth.issue("erin")
+    tb = web_auth.issue("erin")
+    assert web_auth.revoke_other_sessions("erin") == 2
+    assert web_auth.validate(ta) == ""
+    assert web_auth.validate(tb) == ""
+
+
 def test_must_change_pwd_blocks_business_but_not_password_change(monkeypatch):
     """P0 死锁回归（2026-08-24 二轮实弹发现）：require_user 对强制改密用户
     一律 403——若 /api/change-password 也走它，首登用户连改密接口本身都被拦，

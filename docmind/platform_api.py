@@ -41,6 +41,8 @@ def _check_rate_limit(key_id: int) -> bool:
 
 
 def register_platform_routes(app) -> None:
+    # 审计来源 IP：XFF 解析后的真实客户端地址（uvicorn proxy_headers 已信任反代）
+    from docmind import web_auth
 
     # ================= API Key 管理（管理端） =================
     @app.get("/api/admin/api-keys", include_in_schema=False)
@@ -64,16 +66,17 @@ def register_platform_routes(app) -> None:
             expires_at = time.time() + int(days) * 86400
         key = store.create_api_key(name, scope, user, expires_at)
         store.record_audit(user, "apikey.create", f"key#{key['id']}",
-                           f"{name}; scope={scope or 'all'}")
+                           f"{name}; scope={scope or 'all'}",
+                           ip=web_auth.client_ip())
         return JSONResponse(key, status_code=201)
 
     @app.delete("/api/admin/api-keys/{key_id}", include_in_schema=False)
     async def _revoke_key(key_id: int, request: fastapi.Request):
-        _require_admin(request, app)
+        user = _require_admin(request, app)
         if not store.revoke_api_key(key_id):
             raise HTTPException(status_code=404, detail="密钥不存在或已吊销")
-        user = _require_admin(request, app)
-        store.record_audit(user, "apikey.revoke", f"key#{key_id}")
+        store.record_audit(user, "apikey.revoke", f"key#{key_id}",
+                           ip=web_auth.client_ip())
         return {"ok": True}
 
     @app.post("/api/admin/api-keys/{key_id}/rotate", include_in_schema=False)
@@ -88,7 +91,7 @@ def register_platform_routes(app) -> None:
         new = store.create_api_key(
             old["name"], old["scope_kb_ids"], user, old.get("expires_at"))
         store.record_audit(user, "apikey.rotate", f"key#{key_id}",
-                           f"new key#{new['id']}")
+                           f"new key#{new['id']}", ip=web_auth.client_ip())
         return JSONResponse(new, status_code=201)
 
     # ================= 开放检索端点（Bearer Key 鉴权） =================

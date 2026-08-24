@@ -72,7 +72,7 @@ if __name__ == "__main__":
             logger.warning(f"登录失败 user={username} ip={web_auth.client_ip()}")
             raise HTTPException(status_code=400, detail="用户名或密码错误")
         web_auth.clear_failures(username)
-        chatstore.record_audit(username, "login", via)
+        chatstore.record_audit(username, "login", via, ip=web_auth.client_ip())
         token = web_auth.issue(username)
         # success 字段为 Gradio 登录契约保留：web/src/api/core.ts 以 j.success 判定成败，
         # 缺失会导致浏览器端密码正确也弹「用户名或密码错误」（2026-08 去 Gradio 化回归）
@@ -359,6 +359,13 @@ if __name__ == "__main__":
         ok, msg = chatstore.change_password(user, body.old_password, body.new_password)
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
+        # 密码已变即吊销本人其余会话：否则旧会话凭滑动续期存活至 12h TTL，
+        # 被窃会话在改密后依旧可用（二轮回归盲区 J 实测确认）；当前会话保留避免自踢
+        revoked = web_auth.revoke_other_sessions(
+            user, request.cookies.get(web_auth.TOKEN_COOKIE))
+        chatstore.record_audit(user, "auth.password-change",
+                               f"revoked_sessions={revoked}",
+                               ip=web_auth.client_ip())
         return {"ok": True}
 
     # ---- 多会话侧边栏：会话列表 + 删除 ----

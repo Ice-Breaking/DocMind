@@ -93,13 +93,17 @@ def stats_for_user(user: str) -> dict:
 
 # ================= 审计日志 =================
 
-def record_audit(actor: str, action: str, target: str = "", detail: str = "") -> None:
-    """记录治理事件；失败静默，绝不影响业务主链路"""
+def record_audit(actor: str, action: str, target: str = "", detail: str = "",
+                 ip: str = "") -> None:
+    """记录治理事件；失败静默，绝不影响业务主链路。
+    ip 为来源客户端 IP（XFF 解析后的真实来源），安全类动作务必传入"""
     try:
         c = store._conn()
         c.execute(
-            "INSERT INTO audit_events(actor, action, target, detail, created_at) VALUES(?,?,?,?,?)",
-            (actor or "", action, target or "", str(detail)[:300], time.time()))
+            """INSERT INTO audit_events(actor, action, target, detail, ip, created_at)
+               VALUES(?,?,?,?,?,?)""",
+            (actor or "", action, target or "", str(detail)[:300],
+             (ip or "")[:64], time.time()))
         c.commit()
     except Exception:  # noqa: BLE001
         pass

@@ -8,6 +8,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
+import anyio
 import fastapi
 from fastapi import HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -211,6 +212,14 @@ def _require_user(request, app) -> str:
     return web_auth.require_user(request)
 
 
+# import-url 抓取专用并发闸（per-user）：anyio 全局线程池仅约 40 tokens
+# （4.x 默认），40 个并发慢抓取即可占满并拖慢全部同步路由——次生 DoS 面。
+# 单账号最多占住自己队列的 4 个槽位，互不影响他人；配合下方 fail_after
+# 排队超时兜底。dict 仅在事件循环线程读写，无锁安全
+_IMPORT_LIMITERS: "dict[str, anyio.CapacityLimiter]" = {}
+_IMPORT_QUEUE_TIMEOUT = 25   # 排队+抓取总预算（秒）；requests 自身 timeout=15
+
+
 def _assert_public_host(url: str) -> None:
     """SSRF 防护：URL 主机解析出的全部 IP 必须是公网地址。
     拒绝环回/私网/链路本地/保留/组播段——否则登录用户可借服务器抓取
@@ -337,12 +346,18 @@ def register_docs_routes(app) -> None:
         # 整个服务（实测抓取 httpbin delay/10 期间 /health 从 0.8ms 劣化至 11.2s）。
         # 抓取走线程池，且由 _fetch_public 完成「校验与连接同源」的 SSRF 加固
         # （http pin-IP 直连 / https 双解析一致性 / 禁重定向），一并消除
-        # DNS rebinding TOCTOU——原实现校验后由 requests 二次解析，可被绕过
-        import anyio
-
+        # DNS rebinding TOCTOU——原实现校验后由 requests 二次解析，可被绕过。
+        # per-user limiter 防线程池被单账号占满（次生 DoS），fail_after 兜底排队超时：
+        # 超时只取消协程立即释放连接，已入池的线程会跑完 requests 自身 timeout
+        limiter = _IMPORT_LIMITERS.setdefault(user, anyio.CapacityLimiter(4))
         try:
-            resp = await anyio.to_thread.run_sync(_fetch_public, url)
+            async with anyio.fail_after(_IMPORT_QUEUE_TIMEOUT):
+                resp = await anyio.to_thread.run_sync(
+                    _fetch_public, url, limiter=limiter)
             resp.raise_for_status()
+        except TimeoutError:
+            raise HTTPException(status_code=429,
+                                detail="抓取排队超时，请稍后重试或减小并发")
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -366,7 +381,9 @@ def register_docs_routes(app) -> None:
 
         store.create_ingest_task(kb_id, filename, "import-url", "pending",
                                  "已抓取网页，等待重建索引后生效", user)
-        store.record_audit(user, "doc.import-url", f"kb:{kb_id}/{filename}", url)
+        from docmind import web_auth
+        store.record_audit(user, "doc.import-url", f"kb:{kb_id}/{filename}",
+                           url, ip=web_auth.client_ip())
         from docmind.auto_reindex import schedule_reindex
         schedule_reindex(kb_id)
         return {"ok": True, "name": filename, "size": len(content),
@@ -428,7 +445,13 @@ def register_docs_routes(app) -> None:
             if not is_admin:
                 raise HTTPException(status_code=404, detail="附件不存在")
         from fastapi.responses import FileResponse
-        return FileResponse(path)
+        # 显式 media_type：不依赖扩展名猜测——将来上传白名单若被放宽，
+        # html/svg 也不会以内联形态渲染成存储型 XSS；未知类型一律
+        # octet-stream 触发下载而非浏览器渲染/执行（纵深防御）
+        media = {".png": "image/png", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
+            os.path.splitext(path)[1].lower(), "application/octet-stream")
+        return FileResponse(path, media_type=media)
 
     @app.post("/api/ocr-image", include_in_schema=False)
     async def _ocr_image(request: fastapi.Request,

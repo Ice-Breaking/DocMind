@@ -111,6 +111,20 @@ def revoke(token: str | None) -> None:
             _tokens.pop(token, None)
 
 
+def revoke_other_sessions(username: str, keep_token: str | None = None) -> int:
+    """吊销该用户的其余全部会话，保留 keep_token（发起改密的当前会话）。
+    改密成功后必须调用：否则密码虽已更换，旧会话仍凭滑动续期存活至
+    12h TTL——丢失设备/被窃会话在改密后依旧可用（二轮回归盲区 J 实测）。
+    返回吊销数量"""
+    removed = 0
+    with _lock:
+        for t in [t for t, (u, _exp) in _tokens.items()
+                  if u == username and t != keep_token]:
+            _tokens.pop(t, None)
+            removed += 1
+    return removed
+
+
 # ---- 请求侧助手（各 API 模块共用，替代各自复制的 Gradio cookie 读取） ----
 def current_user(request) -> str:
     return validate(request.cookies.get(TOKEN_COOKIE))

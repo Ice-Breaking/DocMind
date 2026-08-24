@@ -30,9 +30,14 @@ services:
     environment:
       - SEARXNG_URL=http://searxng:8080   # 容器网络内直连 SearXNG，覆盖 .env 中的地址
       # 信任容器网络内 nginx 反代传来的 X-Forwarded-For（uvicorn proxy_headers），
-      # 使 IP 维度防爆破/审计日志记录真实客户端 IP；
-      # 后端若直接暴露公网必须改为明确的反代子网列表
-      - FORWARDED_ALLOW_IPS=*
+      # 使 IP 维度防爆破/审计日志记录真实客户端 IP。
+      # 收敛为 compose 固定子网（见文件底部 networks.default）：仅反代所在网段
+      # 的 XFF 被信任，网段外直连方伪造 XFF 不生效（uvicorn 0.52+ 支持 CIDR）。
+      # 实测教训：写 Docker 默认池 172.16.0.0/12 会失配——本机 Docker Desktop
+      # 配置了自定义地址池，chat-1_default 实际为 192.168.97.0/24；失配时 XFF
+      # 全部不被信任 → 审计退化为网关 IP、IP 维度防爆破误伤全部来源。
+      # 换机部署若网段被占：同步修改此处与底部 networks.default.subnet
+      - FORWARDED_ALLOW_IPS=192.168.97.0/24
     volumes:
       # data/ = chat.db（用户/会话/反馈/文档ACL）+ cache.db（语义缓存）+
       #         向量索引缓存 + trace 日志 + docx 转 PDF/OCR 预览缓存
@@ -75,3 +80,11 @@ services:
 
 volumes:
   docmind-data:
+
+# 固定 compose 子网：与 docmind 的 FORWARDED_ALLOW_IPS 对齐；换机部署若该网段
+# 被占用，需同步修改此处与 FORWARDED_ALLOW_IPS
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.97.0/24
