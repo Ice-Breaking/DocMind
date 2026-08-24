@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { avatarDataUri, ensureAvatarGen } from './avatarGen';
+import { avatarDataUri, ensureStyle } from './avatarGen';
 
 /**
  * DiceBear 自托管风格集合:多元人物 / 卡通 / 萌童 / 极简线描(MIT,本地生成零外部依赖)。
- * 生成器本体经 avatarGen 动态加载(约 600KB 独立分包),首屏不引入;
- * 此处仅暴露风格 id 集合供选择器做归属判断。
+ * 生成器按风格经 avatarGen 动态分包(每风格数十 KB,渲染到对应头像才拉取),
+ * 首屏不引入;此处仅暴露风格 id 集合供选择器做归属判断。
  */
 export const DB_STYLES: Record<string, true> = {
   personas: true,
@@ -51,7 +51,9 @@ export default function UserAvatar({
   useEffect(() => {
     if (!isDb) return;
     let alive = true;
-    ensureAvatarGen().then(() => {
+    // 只加载该头像所属的风格分包(未知风格 resolve(false),色块兜底)
+    const styleId = avatar!.split(':')[1] || '';
+    ensureStyle(styleId).then(() => {
       if (alive) setUri(avatarDataUri(avatar!));
     });
     return () => { alive = false; };
