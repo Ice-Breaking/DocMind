@@ -611,16 +611,24 @@ if __name__ == "__main__":
         async def _spa_index():
             return FileResponse(os.path.join(_dist_dir, "index.html"))
 
+        # 注意:mount 必须先于下方 catch-all 注册,否则 /assets/* 会被
+        # SPA fallback 截获返回 text/html,浏览器拒绝执行模块脚本(白屏)
+        app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")),
+                  name="spa-assets")
+
         @app.get("/{full_path:path}", include_in_schema=False)
         async def _spa_fallback(full_path: str):
             # SPA history 路由:非 API/开放/文件路径回退 index.html
             if full_path.startswith(("api/", "open/", "files/", "vendor/",
                                       "metrics", "health", "mermaid")):
                 raise HTTPException(status_code=404)
+            # dist 根目录真实文件(favicon/manifest 等)直接返回,
+            # 其余路径回退 index.html
+            _dist_real = os.path.realpath(_dist_dir)
+            candidate = os.path.realpath(os.path.join(_dist_real, full_path))
+            if candidate.startswith(_dist_real + os.sep) and os.path.isfile(candidate):
+                return FileResponse(candidate)
             return FileResponse(os.path.join(_dist_dir, "index.html"))
-
-        app.mount("/assets", StaticFiles(directory=os.path.join(_dist_dir, "assets")),
-                  name="spa-assets")
 
     # ---- 启动(uvicorn 阻塞式,信号优雅退出;MCP 连接随进程退出清理) ----
     _host = os.getenv("DOCMIND_HOST", os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"))
