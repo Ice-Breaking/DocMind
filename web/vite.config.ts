@@ -55,11 +55,12 @@ export default defineConfig({
         manualChunks: {
           // 核心框架单独打包
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          // UI 库单独打包。注意 @ant-design/x 刻意不在此列:它仅被 Chat /
-          // SessionHistory 两个懒加载页使用,强制并入 vendor-antd 会让首屏
-          // (登录页)白下载;移除后随 lazy 页自动共享分包,进入相关页面才拉取
-          'vendor-antd': ['antd', '@ant-design/icons'],
-          // 注:react-markdown 不在此声明——仅懒加载页面使用,
+          // antd 刻意不做单一 vendor 块:强制分块会把懒加载页才用的重型
+          // 组件(rc-table/rc-tree/rc-picker 等,合计数百 KB)提升进首屏
+          // HTML 必引的 vendor,登录页陪跑下载。交给默认策略后 antd 按
+          // 实际引用自然分割:首屏只含 Login/AppLayout 用到的轻组件子集,
+          // 重型组件随对应 lazy 页的共享异步分包按需拉取
+          // 注:react-markdown 同理不在此声明——仅懒加载页面使用,
           // 强制手动分块会被提升进首屏 HTML,反而增大初始加载体积
         },
       },
