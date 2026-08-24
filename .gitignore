@@ -32,3 +32,11 @@ data/backups/
 .pytest_cache/
 *.tsbuildinfo
 node_modules/
+
+# 前端构建产物（本地构建即可，不入库；web/.gitignore 同步忽略）
+web/dist/
+
+# 运行时用户数据不入库（聊天上传图片 / 头像 / 知识库入库文档副本）
+data/uploads/
+data/avatars/
+data/kb_docs/

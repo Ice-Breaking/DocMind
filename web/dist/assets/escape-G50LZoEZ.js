@@ -1,1 +1,0 @@
-function r(e){return e.replace(/&/g,"&amp;").replace(/'/g,"&apos;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}const t=Object.freeze(Object.defineProperty({__proto__:null,xml:r},Symbol.toStringTag,{value:"Module"}));export{t as e,r as x};
