@@ -242,6 +242,43 @@ def _assert_public_host(url: str) -> None:
                 detail="不允许抓取指向内网/保留地址的 url")
 
 
+def _fetch_public(url: str):
+    """公网抓取（SSRF 加固版）：校验与连接使用同一组已验证 IP，
+    消除「校验时解析一次、requests 自行再解析一次」的 DNS rebinding TOCTOU。
+
+    - http  → 锁定首个已校验公网 IP 直连（Host 头保留原域名）
+    - https → TLS/SNI 证书校验要求以域名建连，无法按 IP 直连；
+      改用「双解析一致性」：前后两次解析无交集即判定 rebinding 拒绝，
+      把 TOCTOU 窗口从秒级压缩到毫秒级
+    - 禁跟随重定向：跟随会重新解析新主机，绕过上述全部校验
+
+    同步 IO：调用方必须经 anyio.to_thread.run_sync 放入线程池执行，
+    禁止在 async def 路由体内直接调用（会冻结整个事件循环）。"""
+    import socket as _socket
+    import requests as _requests
+    from urllib.parse import urlsplit as _usplit
+
+    _assert_public_host(url)   # 复用既有公网校验（HTTPException 直接穿透）
+    sp = _usplit(url)
+    host = (sp.hostname or "").strip().lower()
+    ips = [ai[4][0] for ai in _socket.getaddrinfo(host, None)]
+    if not ips:
+        raise ValueError("url 域名无法解析")
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; DocMindBot/1.0)"}
+    if (sp.scheme or "http") == "http":
+        target = f"http://{ips[0]}{sp.path}" + (f"?{sp.query}" if sp.query else "")
+        headers["Host"] = host
+    else:
+        ips2 = {ai[4][0] for ai in _socket.getaddrinfo(host, None)}
+        if not set(ips) & ips2:
+            raise ValueError("DNS 解析不稳定（疑似 rebinding），拒绝抓取")
+        target = url
+    resp = _requests.get(target, timeout=15, headers=headers, allow_redirects=False)
+    if 300 <= resp.status_code < 400:
+        raise ValueError(f"目标返回重定向({resp.status_code})，请直接填写最终地址")
+    return resp
+
+
 def _resolve_doc_dir(kb_id: str) -> str:
     """获取 KB 的 doc_dir，不存在时自动创建；KB 不存在抛 404。"""
     kb = store.get_kb(kb_id)
@@ -295,14 +332,19 @@ def register_docs_routes(app) -> None:
         url = str(body.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=400, detail="url 必须以 http(s):// 开头")
-        _assert_public_host(url)
 
-        import requests as _requests
+        # 同步 IO 必须移出事件循环：async 路由体内裸调 requests.get 会冻结
+        # 整个服务（实测抓取 httpbin delay/10 期间 /health 从 0.8ms 劣化至 11.2s）。
+        # 抓取走线程池，且由 _fetch_public 完成「校验与连接同源」的 SSRF 加固
+        # （http pin-IP 直连 / https 双解析一致性 / 禁重定向），一并消除
+        # DNS rebinding TOCTOU——原实现校验后由 requests 二次解析，可被绕过
+        import anyio
 
         try:
-            resp = _requests.get(url, timeout=15, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; DocMindBot/1.0)"})
+            resp = await anyio.to_thread.run_sync(_fetch_public, url)
             resp.raise_for_status()
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"网页抓取失败: {e}")
 

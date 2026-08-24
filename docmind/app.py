@@ -144,7 +144,20 @@ if __name__ == "__main__":
         return response
 
     @app.get("/metrics", include_in_schema=False)
-    async def _metrics_route():
+    async def _metrics_route(request: fastapi.Request, token: str = ""):
+        """/metrics 门禁：配置 METRICS_TOKEN 后凭 token（query 或 Bearer 头）访问；
+        未配置时仅允许回环直连（本机调试 / Prometheus 同机部署零配置）。
+        拒绝时返回 404 而非 401：不向探测者确认端点存在"""
+        expected = os.getenv("METRICS_TOKEN", "")
+        peer = request.client.host if request.client else ""
+        if expected:
+            provided = (token or request.headers.get("authorization", "")
+                        .removeprefix("Bearer ").strip())
+            ok = bool(provided) and provided == expected
+        else:
+            ok = peer in ("127.0.0.1", "::1")
+        if not ok:
+            raise HTTPException(status_code=404, detail="Not Found")
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
         from fastapi.responses import Response as _MR
         return _MR(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -658,6 +671,13 @@ if __name__ == "__main__":
     _host = os.getenv("DOCMIND_HOST", "127.0.0.1")
     _port = int(os.getenv("DOCMIND_PORT", "7860"))
     logger.info(f"DocMind 启动: http://{_host}:{_port}")
-    uvicorn.run(app, host=_host, port=_port, log_level="warning")
+    # 反代场景必须采信 X-Forwarded-For，否则 client.host 恒为代理 IP：
+    # web_auth 的 IP 维度防爆破退化为共享全局计数（20 次失败锁死所有人 =
+    # 全站登录 DoS 开关）、审计日志 IP 全部失真。
+    # forwarded_allow_ips 默认仅信任本机反代；compose 部署经环境变量注入
+    # FORWARDED_ALLOW_IPS=* 信任容器网络（端口仅映射到宿主回环）
+    uvicorn.run(app, host=_host, port=_port, log_level="warning",
+                proxy_headers=True,
+                forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"))
 
     finally_placeholder = None  # noqa

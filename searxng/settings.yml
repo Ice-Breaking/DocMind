@@ -5,8 +5,12 @@ use_default_settings: true
 
 server:
   # 本地演示用固定密钥；生产环境请换成随机值
-  secret_key: "docmind-searxng-demo-secret"
+  # 真实密钥由 compose entrypoint 启动时经 sed 注入（SEARXNG_SECRET，缺失拒启），
+  # 仓库只保留占位符——固定 secret 可被攻击者伪造实例会话、绕过 bot 防护
+  secret_key: "PLACEHOLDER-SET-BY-COMPOSE"
   # 关闭限流（供本机 Agent 调用；公网部署务必重新开启）
+  # limiter 依赖 Redis 计数，本部署未引入 redis 服务；实例仅绑定宿主回环 +
+  # 容器内网，暴露面可控故保持关闭。若公网部署：先补 redis 服务再开启
   limiter: false
   image_proxy: false
 

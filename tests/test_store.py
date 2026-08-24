@@ -1,4 +1,6 @@
 """存储层单测：用户认证 / 会话持久化 / 反馈 / badcase 流转"""
+import pytest
+
 from docmind import store
 
 
@@ -24,9 +26,18 @@ def test_admin_role(temp_db):
     assert not store.is_admin("ghost")
 
 
-def test_seed_admin_is_admin(temp_db):
+def test_seed_admin_is_admin(temp_db, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "seed-strong-pw-1")
     store.ensure_seed_admin()
     assert store.is_admin("admin")
+
+
+def test_seed_admin_refuses_without_password(temp_db, monkeypatch):
+    """安全回归（红队 P0）：空库且未配置 ADMIN_PASSWORD 必须拒绝播种，
+    杜绝 admin123 默认凭据随新环境上线"""
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
+        store.ensure_seed_admin()
 
 
 def test_session_messages(temp_db):

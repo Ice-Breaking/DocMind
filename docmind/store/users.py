@@ -161,15 +161,22 @@ def delete_user_cascade(username: str) -> dict:
 
 
 def ensure_seed_admin() -> None:
-    """无任何账号时播种 admin（密码取 ADMIN_PASSWORD 环境变量，默认 admin123）"""
+    """无任何账号时播种 admin；密码必须经 ADMIN_PASSWORD 显式提供。
+
+    安全约束：不再回退弱默认密码 admin123——空库且未配置时直接拒绝启动，
+    防止新环境带着众所周知的默认凭据上线（红队实测可一键接管全站）。"""
     if list_users():
         return
-    pw = os.getenv("ADMIN_PASSWORD", "admin123")
+    pw = os.getenv("ADMIN_PASSWORD", "")
+    if not pw:
+        raise RuntimeError(
+            "检测到空用户库且未设置 ADMIN_PASSWORD：拒绝以默认密码创建管理员。"
+            "请在 .env 中设置强密码（可用 openssl rand -base64 18 生成）后重启")
     create_user("admin", pw)
     set_admin("admin", True)
     store._conn().execute("UPDATE users SET must_change_pwd = 1 WHERE username = 'admin'")
     store._conn().commit()
-    logger.info("已创建初始账号 admin（请尽快用 manage_users reset 修改密码）")
+    logger.info("已创建初始账号 admin（首登强制改密）")
 
 
 def get_must_change_pwd(username: str) -> bool:

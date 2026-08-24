@@ -31,6 +31,14 @@ ENV DOCMIND_HOST=0.0.0.0 \
     DOCMIND_PORT=7860 \
     PYTHONUNBUFFERED=1
 
+# 非 root 运行：容器逃逸纵深防御。LibreOffice 转码/OCR 临时文件走 /tmp，
+# 端口 7860 为非特权端口；data 卷(named volume)首次挂载沿用镜像内属主。
+# 宿主 bind mount 场景需自行保证目录可写(chown -R 10001)
+RUN useradd --system --uid 10001 docmind \
+    && mkdir -p /app/data \
+    && chown -R docmind:docmind /app/data
+USER docmind
+
 EXPOSE 7860
 
 # 健康检查：/health 端点检查数据库/磁盘/知识库状态（不依赖登录态）
