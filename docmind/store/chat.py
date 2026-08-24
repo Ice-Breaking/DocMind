@@ -4,6 +4,19 @@
 import time
 from docmind import store
 
+
+def _gen_title(content: str) -> str:
+    """首条 user 消息 → 会话标题：剥离图片 markdown（/files/uploads 短链与
+    data URL 两种形式均覆盖，右括号可选以兼容历史 30 字截断残串），折叠
+    空白后取前 30 字；纯图消息标题即 [图片]。列表/审计页会直接渲染标题
+    文本，源码串露出既难看又占宽。（2026-08-24 修复：原建会话分支直接
+    content[:30] 漏清洗；补标题分支 re.sub 少传 string 参数，走到必 TypeError）"""
+    import re as _re
+    clean = _re.sub(r"!\[[^\]]*\]\([^)]*\)?", "[图片]", content or "")
+    clean = _re.sub(r"\s+", " ", clean).strip()
+    return clean[:30] or "[图片]"
+
+
 def append_message(session_id: str, role: str, content: str, raw: str | None = None,
                    user: str | None = None, assistant_id: str = "") -> int:
     """追加一条消息，返回其在会话内的序号（从 0 起）。
@@ -26,16 +39,15 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
     if row is None:
         c.execute(
             "INSERT INTO sessions(id, title, user, assistant_id, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-            (session_id, content[:30] if role == "user" else "", user or "", assistant_id, now, now),
+            (session_id, _gen_title(content) if role == "user" else "",
+             user or "", assistant_id, now, now),
         )
     else:
         if not row["title"] and role == "user":
-            # 标题取首条 user 消息：剥离图片 markdown（列表/审计页标题列
-            # 会直接渲染标题文本，源码串出来既难看又占宽），以 [图片] 占位
-            import re as _re_title
-            clean = _re_title.sub(r'[图片]', content or '')
-            clean = _re_title.sub(r'\s+', ' ', clean)[:30].strip() or '[图片]'
-            c.execute("UPDATE sessions SET title = ? WHERE id = ?", (clean, session_id))
+            # 补标题：会话先由 assistant 消息创建时 title 为空，首条 user
+            # 消息到达时在此清洗落库
+            c.execute("UPDATE sessions SET title = ? WHERE id = ?",
+                      (_gen_title(content), session_id))
         if not row["user"] and user:
             c.execute("UPDATE sessions SET user = ? WHERE id = ?", (user, session_id))
         c.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))

@@ -91,6 +91,19 @@ export function splitImagesFromText(content: string): { imgs: string[]; text: st
   return { imgs, text };
 }
 
+/**
+ * 会话标题展示清洗：图片 markdown 折叠为 [图片] 占位并压缩空白。
+ * 右括号可选——兼容历史按 30 字截断产生的 `![图片](/files/uploads/…`
+ * 无右括号残串。后端 _gen_title 已在落库时清洗，此处兜底存量脏标题
+ * （侧栏/顶栏/会话历史/工作台均直接渲染 title 文本）。
+ */
+export function titleFromContent(title: string | undefined | null): string {
+  return (title || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)?/g, '[图片]')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export interface WarnCapsule {
   cls: string;
   label: string;

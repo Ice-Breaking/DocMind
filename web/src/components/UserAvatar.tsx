@@ -43,7 +43,10 @@ export default function UserAvatar({
   size?: number;
 }) {
   const isDb = !!avatar && avatar.startsWith('db:');
-  const fileSrc = avatar && avatar.startsWith('file:')
+  const [fileFailed, setFileFailed] = useState(false);
+  // avatar 变化时重置失败标记（切换头像后应重新尝试加载）
+  useEffect(() => { setFileFailed(false); }, [avatar]);
+  const fileSrc = avatar && avatar.startsWith('file:') && !fileFailed
     ? `/api/avatar-file/${avatar.slice(5)}`
     : null;
 
@@ -70,7 +73,14 @@ export default function UserAvatar({
     overflow: 'hidden',
   };
   if (fileSrc) {
-    return <img src={fileSrc} alt="avatar" style={{ ...base, background: '#fff', objectFit: 'cover' }} />;
+    return (
+      <img
+        src={fileSrc}
+        alt="avatar"
+        onError={() => setFileFailed(true)}   // 文件丢失(404/500)→ 退回首字母色块，不留裂图
+        style={{ ...base, background: '#fff', objectFit: 'cover' }}
+      />
+    );
   }
   if (uri) {
     return <img src={uri} alt="avatar" style={{ ...base, background: '#fff' }} />;

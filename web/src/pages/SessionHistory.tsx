@@ -7,6 +7,7 @@ import {
   Collapse,
   Drawer,
   Empty,
+  Image,
   List,
   Modal,
   Spin,
@@ -17,6 +18,7 @@ import Bubble from '@ant-design/x/es/bubble';
 import type { BubbleDataType } from '@ant-design/x/es/bubble/BubbleList';
 import MarkdownContent from '../components/MarkdownContent';
 import UserAvatar from '../components/UserAvatar';
+import { splitImagesFromText, titleFromContent } from './chat/utils';
 import {
   fetchAssistants,
   fetchMessages,
@@ -157,6 +159,36 @@ export default function SessionHistory({ me }: { me: Me }) {
           style: { background: 'transparent' },
         },
         variant: 'filled' as const,
+        messageRender: (content: string) => {
+          // 与对话页一致：图片消息以缩略图渲染（历史为 /files/uploads 短链），
+          // 避免源码 markdown 以文本形式露出
+          const { imgs, text } = splitImagesFromText(content);
+          return (
+            <div>
+              {imgs.length > 0 && (
+                <div
+                  style={{
+                    display: 'flex', gap: 6, flexWrap: 'wrap',
+                    marginBottom: text ? 6 : 0, justifyContent: 'flex-end',
+                  }}
+                >
+                  {imgs.map((u, i) => (
+                    <Image
+                      key={i}
+                      src={u}
+                      alt="图片"
+                      width={160}
+                      height={160}
+                      style={{ borderRadius: 10, objectFit: 'cover' }}
+                      preview={{ mask: '预览' }}
+                    />
+                  ))}
+                </div>
+              )}
+              {text && <div style={{ whiteSpace: 'pre-wrap' }}>{text}</div>}
+            </div>
+          );
+        },
       },
       assistant: {
         placement: 'start' as const,
@@ -232,7 +264,7 @@ export default function SessionHistory({ me }: { me: Me }) {
                     ]}
                   >
                     <List.Item.Meta
-                      title={s.title || '（未命名会话）'}
+                      title={titleFromContent(s.title) || '（未命名会话）'}
                       description={`更新于 ${formatTime(s.updated_at)}`}
                     />
                   </List.Item>
@@ -245,7 +277,7 @@ export default function SessionHistory({ me }: { me: Me }) {
 
       {/* ---- 会话详情 Drawer：与对话页同款气泡样式 ---- */}
       <Drawer
-        title={activeSession ? activeSession.title || '（未命名会话）' : '会话详情'}
+        title={activeSession ? titleFromContent(activeSession.title) || '（未命名会话）' : '会话详情'}
         placement="right"
         width={640}
         open={drawerOpen}

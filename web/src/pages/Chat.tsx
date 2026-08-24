@@ -43,6 +43,7 @@ import {
   fmtSessionTime,
   groupSessions,
   newSessionId,
+  titleFromContent,
 } from './chat/utils';
 import { useVoiceInput } from './chat/useVoiceInput';
 import { useSpeech } from './chat/useSpeech';
@@ -349,7 +350,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 600, fontSize: 13.5, overflow: 'hidden',
                          textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-            {s.title || s.id.slice(0, 16)}
+            {titleFromContent(s.title) || s.id.slice(0, 16)}
           </span>
           <span style={{ fontSize: 11, color: '#9a9a9a', flexShrink: 0 }}>
             {fmtSessionTime(s.updated_at || 0)}
@@ -358,14 +359,14 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
         {s.last_msg && (
           <span style={{ fontSize: 12, color: '#9a9a9a', overflow: 'hidden',
                          textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {s.last_msg}
+            {titleFromContent(s.last_msg)}
           </span>
         )}
       </div>
     ),
   });
   const convItems: Conversation[] = sessions
-    .filter((s) => !kw || (s.title || '').toLowerCase().includes(kw))
+    .filter((s) => !kw || titleFromContent(s.title).toLowerCase().includes(kw))
     .map(toConv);
 
   /* ---- menu for conversations ---- */
@@ -487,7 +488,7 @@ export default function Chat({ me: _me, onLogout }: { me: Me; onLogout: () => vo
             <MenuOutlined />
           </button>
           <span className="dm-topbar-title">
-            {sessions.find((x) => x.id === activeSid)?.title || '新对话'}
+            {titleFromContent(sessions.find((x) => x.id === activeSid)?.title || '') || '新对话'}
           </span>
           <div className="dm-topbar-actions">
             <Select

@@ -6,6 +6,7 @@ import {
   groupSessions,
   newSessionId,
   splitImagesFromText,
+  titleFromContent,
 } from './utils';
 
 describe('newSessionId', () => {
@@ -104,6 +105,21 @@ describe('splitImagesFromText', () => {
     expect(splitImagesFromText('')).toEqual({ imgs: [], text: '' });
   });
 });
+
+describe('titleFromContent', () => {
+  it('图片 markdown 折叠为 [图片]，保留正文并压缩空白', () => {
+    expect(titleFromContent('![图片](/files/uploads/1787.jpg)\n\n这是什么？')).toBe('[图片] 这是什么？');
+  });
+  it('兼容被截断的无右括号残串（历史 30 字截断标题）', () => {
+    expect(titleFromContent('![图片](/files/uploads/178753829')).toBe('[图片]');
+  });
+  it('普通标题与空值原样返回', () => {
+    expect(titleFromContent('普通标题')).toBe('普通标题');
+    expect(titleFromContent('')).toBe('');
+    expect(titleFromContent(undefined)).toBe('');
+  });
+});
+
 
 describe('extractWarnCapsules', () => {
   it('提取知识库无相关内容标注', () => {

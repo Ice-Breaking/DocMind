@@ -24,6 +24,7 @@ import {
   Typography,
 } from 'antd';
 import { fetchDashboard, type DashboardStats, type Me, type Session } from '../api';
+import { titleFromContent } from './chat/utils';
 
 /** 秒级时间戳 → 本地可读时间 */
 function formatTime(ts: number): string {
@@ -172,7 +173,7 @@ export default function Dashboard({ me }: { me: Me }) {
                 actions={[<span key="count">{s.msg_count} 条消息</span>]}
               >
                 <List.Item.Meta
-                  title={s.title || '（未命名会话）'}
+                  title={titleFromContent(s.title) || '（未命名会话）'}
                   description={`更新于 ${formatTime(s.updated_at)}`}
                 />
               </List.Item>

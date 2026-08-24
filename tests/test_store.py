@@ -49,6 +49,24 @@ def test_session_title_from_first_user_msg(temp_db):
     assert s2["user"] == "bob"
 
 
+def test_session_title_strips_image_markdown(temp_db):
+    """图片消息建会话：标题剥离 markdown，以 [图片] 占位 + 保留正文
+    （2026-08-24 修复：原实现 content[:30] 直接落库，列表/审计页露出源码串）"""
+    store.append_message(
+        "s_img", "user",
+        "![图片](/files/uploads/1787538290201_9e3ce6.jpg)\n\n这是什么？", user="bob")
+    s = next(x for x in store.list_all_sessions() if x["id"] == "s_img")
+    assert s["title"] == "[图片] 这是什么？"
+
+
+def test_session_title_pure_image(temp_db):
+    """纯图消息：标题即 [图片] 占位"""
+    store.append_message(
+        "s_img2", "user", "![图片](data:image/png;base64,AAA)", user="bob")
+    s = next(x for x in store.list_all_sessions() if x["id"] == "s_img2")
+    assert s["title"] == "[图片]"
+
+
 def test_feedback_upsert(temp_db):
     store.append_message("s1", "user", "q", user="u")
     store.append_message("s1", "assistant", "a", user="u")

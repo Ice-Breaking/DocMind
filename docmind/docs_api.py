@@ -40,6 +40,9 @@ def _meta_conn():
     对话图片(可能含隐私内容)"""
     import sqlite3 as _sq
     conn = _sq.connect(_META_DB)
+    # _serve_upload 以 row["owner"] 按列名取值：默认 tuple 下标会 TypeError
+    # → 所有带属主记录的附件 500（2026-08-24 修复的对话图片裂图根因）
+    conn.row_factory = _sq.Row
     conn.execute("""CREATE TABLE IF NOT EXISTS attachments(
         fname TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at REAL)""")
     return conn
