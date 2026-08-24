@@ -686,7 +686,8 @@ if __name__ == "__main__":
     # web_auth 的 IP 维度防爆破退化为共享全局计数（20 次失败锁死所有人 =
     # 全站登录 DoS 开关）、审计日志 IP 全部失真。
     # forwarded_allow_ips 默认仅信任本机反代；compose 部署经环境变量注入
-    # FORWARDED_ALLOW_IPS=* 信任容器网络（端口仅映射到宿主回环）
+    # FORWARDED_ALLOW_IPS=固定容器子网（与 compose 底部 networks.default 对齐，
+    # 见 docker-compose.yml 注释——勿写通配 * 或照抄 Docker 默认地址池）
     uvicorn.run(app, host=_host, port=_port, log_level="warning",
                 proxy_headers=True,
                 forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"))
