@@ -65,7 +65,7 @@ services:
     # 该镜像的 YAML 加载器不支持 !env 标签：启动前用 sed 将密钥写入
     # bind mount 的 settings.yml（占位符被真实值替换，仅存在于部署机本地）
     entrypoint: ["/bin/sh", "-c",
-      "sed -i \"s|^secret_key:.*|secret_key: \\\"${SEARXNG_SECRET}\\\"|\" /etc/searxng/settings.yml && exec /usr/local/searxng/entrypoint.sh"]
+      'sed -i "s|^[[:space:]]*secret_key:.*|  secret_key: \"${SEARXNG_SECRET}\"|" /etc/searxng/settings.yml && exec /usr/local/searxng/entrypoint.sh']
     restart: unless-stopped
     deploy:
       resources:

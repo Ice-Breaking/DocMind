@@ -346,7 +346,11 @@ if __name__ == "__main__":
 
     @app.post("/api/change-password", include_in_schema=False)
     async def _change_password(body: ChangePasswordIn, request: _fastapi.Request):
-        user = _require_user(request)
+        # 仅校验登录态（current_user），不能用 require_user：
+        # 后者对 must_change_pwd 一律 403——若这里也走它，首登用户连改密
+        # 接口本身都被拦，「强制改密」变成永久死锁（2026-08 二轮回归实测）。
+        # 权限不放权：改密仍需本人会话 + 旧密码校验在 store.change_password 内部
+        user = web_auth.current_user(request)
         # 密码强度：≥8 位且同时含字母与数字（防弱口令 + 直链/撞库组合利用）
         np = body.new_password or ""
         if len(np) < 8 or not any(c.isalpha() for c in np) or not any(c.isdigit() for c in np):

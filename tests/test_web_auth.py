@@ -70,6 +70,28 @@ def test_ip_lockout_triggers_at_threshold():
     assert web_auth.is_locked("fresh-user") > 0   # 新用户名也被 IP 维度拦
 
 
+def test_must_change_pwd_blocks_business_but_not_password_change(monkeypatch):
+    """P0 死锁回归（2026-08-24 二轮实弹发现）：require_user 对强制改密用户
+    一律 403——若 /api/change-password 也走它，首登用户连改密接口本身都被拦，
+    「强制改密」沦为永久死锁。修复后改密端点用 current_user（仅校验登录态，
+    旧密码在 store.change_password 内部另行校验）。本例锁定两个守卫的分野"""
+    from types import SimpleNamespace
+
+    import fastapi
+
+    monkeypatch.setattr("docmind.store.get_must_change_pwd", lambda u: True)
+    web_auth._tokens.clear()
+    try:
+        token = web_auth.issue("dave")
+        req = SimpleNamespace(cookies={web_auth.TOKEN_COOKIE: token})
+        with pytest.raises(fastapi.HTTPException) as ei:
+            web_auth.require_user(req)              # 业务端点：拦截正确
+        assert ei.value.status_code == 403
+        assert web_auth.current_user(req) == "dave"  # 改密端点：必须放行
+    finally:
+        web_auth._tokens.clear()
+
+
 # ---- normalize_http_path ----
 
 def test_normalize_session_id_paths():
