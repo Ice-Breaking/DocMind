@@ -49,6 +49,69 @@ if __name__ == "__main__":
     app = FastAPI(title="DocMind")
 
     # ---- 登录 / 登出（自研 token 会话，替代 Gradio auth） ----
+    # 后端直连端口（7860）友好兜底：纯 API 模式（web/dist 不存在，compose 形态）
+    # 下浏览器误访 7860 只会看到 FastAPI 默认 {"detail":"Not Found"} 裸 JSON，
+    # 对非技术用户如同「系统坏了」。改为中文提示页 + 指向正确入口（80）的链接。
+    # 仅当 dist 不存在时注册：dist 存在（单容器模式）时后端自己托管 SPA，
+    # 根路径/未知路径已有 SPA 路由，不得遮蔽。且仅对浏览器导航
+    # （Accept: text/html）生效，API 客户端仍收 JSON 保持契约兼容
+    import fastapi as _fastapi
+    import html as _html
+
+    _dist_dir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "web", "dist")
+
+    if not os.path.isdir(_dist_dir):
+        _FRIENDLY_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocMind</title>
+<style>
+ body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+      font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+      background:#f5f7fa;color:#1f2329}}
+ .card{{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);
+       padding:40px 48px;max-width:520px;text-align:center}}
+ h1{{font-size:20px;margin:0 0 12px}} p{{font-size:14px;line-height:1.8;margin:8px 0;color:#4e5969}}
+ code{{background:#f2f3f5;padding:2px 8px;border-radius:4px;font-size:13px}}
+ a.btn{{display:inline-block;margin-top:16px;padding:10px 28px;background:#2563eb;color:#fff;
+       border-radius:8px;text-decoration:none;font-size:14px}}
+ a.btn:hover{{background:#1d4ed8}}
+ .tip{{font-size:12px;color:#86909c;margin-top:18px}}
+</style></head><body><div class="card">
+<h1>这里是 DocMind 的 API 后端</h1>
+<p>此端口（<code>{port}</code>）仅供程序调试直连，没有可交互的网页界面。</p>
+<p>请从下面入口登录使用：</p>
+<a class="btn" href="{url}">打开 DocMind（端口 80）</a>
+<p class="tip">若链接不可达，请联系管理员确认 nginx 服务（frontend 容器）是否在运行。</p>
+</div></body></html>"""
+
+        def _friendly_backend_page(request: "_fastapi.Request") -> str:
+            # 反射 Host 头拼正确入口链接：先 HTML 转义防 Host 头注入，再剥掉
+            # 当前调试端口换 80（nginx 入口）。取不到 Host 时退化为相对提示
+            host = _html.escape(request.headers.get("host") or "", quote=True)
+            if host:
+                bare = host.split(":", 1)[0]
+                return _FRIENDLY_PAGE.format(port=host.split(":", 1)[1] or "7860",
+                                             url=f"http://{bare}/")
+            return _FRIENDLY_PAGE.format(port="7860", url="/")
+
+        @app.get("/", include_in_schema=False)
+        async def _backend_root(request: _fastapi.Request):
+            return _fastapi.responses.HTMLResponse(
+                _friendly_backend_page(request))
+
+        @app.exception_handler(404)
+        @app.exception_handler(405)
+        async def _friendly_404_405(request: _fastapi.Request, exc):
+            # 浏览器导航才给友好页；API 客户端（前端 fetch/脚本）保持 JSON 契约
+            status = getattr(exc, "status_code", 404)
+            if "text/html" in (request.headers.get("accept") or "").lower():
+                return _fastapi.responses.HTMLResponse(
+                    _friendly_backend_page(request), status_code=status)
+            return _fastapi.responses.JSONResponse(
+                {"detail": getattr(exc, "detail", "Not Found")}, status_code=status)
+
     @app.post("/login", include_in_schema=False)
     async def _login(request: fastapi.Request):
         form = await request.form()
