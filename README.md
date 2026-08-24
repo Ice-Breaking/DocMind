@@ -3,7 +3,7 @@
 > 手写 ReAct Agent + 混合检索 RAG + 多知识库多助手 + RetrievalOps 质量闭环 + 企业治理。
 > 不依赖 LangChain / LlamaIndex，Agent 核心与平台能力全部自研，便于理解、讲解与二次开发。
 
-前端为 React + Ant Design SPA（`web/`），后端为 Gradio 挂载的 FastAPI 应用；生产形态 `docker compose up -d` 一键部署（nginx 单入口）。
+前端为 React + Ant Design SPA（`web/`），后端为纯 FastAPI 应用；生产形态 `docker compose up -d` 一键部署（nginx 单入口）。
 
 ---
 
@@ -139,7 +139,7 @@ docker compose up -d --build
 - 后端仅监听 127.0.0.1:7860，nginx 单入口（SPA history fallback + SSE 安全代理 + 限流）
 - 安全基线：登录防爆破（15 分钟锁）、写请求 Origin 同源校验（CSRF）、/files 直链走登录+文档 ACL、
   附件属主隔离、开放 API 每 Key 限流（OPEN_API_RPM，默认 60/分钟）；上 HTTPS 后建议确认
-  Gradio 会话 Cookie 带 Secure 标志（nginx 层加 `proxy_cookie_flags ~ secure;`）
+  登录会话 Cookie 带 Secure 标志（nginx 层加 `proxy_cookie_flags ~ secure;`）
 - 数据在命名卷 `docmind-data` 与 `docs/knowledge` 挂载；备份：应用内「备份与恢复」页或 `scripts/backup.sh` + cron
 - 企业集成：管理端创建 API Key 后调用：
 
@@ -173,7 +173,7 @@ curl -X POST https://<domain>/open/v1/retrieve \
 
 ```
 docmind/
-├── app.py              # 装配入口：Gradio launch + 全部 REST/SSE 路由注册
+├── app.py              # 装配入口：纯 FastAPI 宿主 + 全部 REST/SSE 路由注册
 ├── core.py             # Agent 装配、knowledge_search、增量重建
 ├── chat_stream.py      # SSE 应答流（cache/thinking/token/step/final 事件）
 ├── agent/              # 手写 ReAct + 工具注册表 + 注入防护 guard

@@ -27,8 +27,8 @@ COPY docs/knowledge ./docs/knowledge
 COPY docs/glossary.md ./docs/glossary.md
 
 # 容器内监听所有网卡（否则宿主机映射访问不到）
-ENV GRADIO_SERVER_NAME=0.0.0.0 \
-    GRADIO_SERVER_PORT=7860 \
+ENV DOCMIND_HOST=0.0.0.0 \
+    DOCMIND_PORT=7860 \
     PYTHONUNBUFFERED=1
 
 EXPOSE 7860

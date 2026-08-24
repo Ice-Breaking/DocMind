@@ -1,7 +1,7 @@
-"""DocMind Web 界面（Gradio）：展示 Agent 思考过程 + 引用来源。
+"""DocMind Web 服务入口（纯 FastAPI 宿主）：装配全部 REST/SSE 路由并托管 React SPA 构建产物。
 
 启动：python -m docmind.app
-监听地址/端口可用环境变量 GRADIO_SERVER_NAME / GRADIO_SERVER_PORT 覆盖
+监听地址/端口可用环境变量 DOCMIND_HOST / DOCMIND_PORT 覆盖
 （Docker 部署时容器内需要 0.0.0.0）。
 """
 import os
@@ -633,8 +633,8 @@ if __name__ == "__main__":
             return FileResponse(os.path.join(_dist_dir, "index.html"))
 
     # ---- 启动(uvicorn 阻塞式,信号优雅退出;MCP 连接随进程退出清理) ----
-    _host = os.getenv("DOCMIND_HOST", os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"))
-    _port = int(os.getenv("DOCMIND_PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
+    _host = os.getenv("DOCMIND_HOST", "127.0.0.1")
+    _port = int(os.getenv("DOCMIND_PORT", "7860"))
     logger.info(f"DocMind 启动: http://{_host}:{_port}")
     uvicorn.run(app, host=_host, port=_port, log_level="warning")
 

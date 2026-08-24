@@ -24,7 +24,10 @@ langfuse==4.14.4
 # MCP 官方 Python SDK（钉住 1.x：2.0 移除了 FastMCP，接口不兼容）
 mcp==1.29.0
 
-# Web 界面（5.0+ 默认 messages 对话格式）
+# Web 服务：纯 FastAPI 宿主。去 Gradio 化后必须显式声明——此前 fastapi 经 chromadb/gradio
+# 传递引入，python-multipart 是 request.form() 登录表单解析的硬依赖，缺失则登录接口直接报错
+fastapi==0.141.1
+python-multipart==0.0.32
 uvicorn==0.52.1
 
 # 环境变量
