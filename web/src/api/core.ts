@@ -29,7 +29,8 @@ export async function login(username: string, password: string): Promise<boolean
   const r = await fetch('/login', { method: 'POST', body: fd });
   try {
     const j = await r.json();
-    return !!j.success;
+    // 兼容两种响应契约：Gradio 风格 {success:true} 与纯 FastAPI {ok:true}
+    return !!(j.success || j.ok);
   } catch {
     return false;
   }

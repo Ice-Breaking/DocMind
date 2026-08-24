@@ -74,7 +74,9 @@ if __name__ == "__main__":
         web_auth.clear_failures(username)
         chatstore.record_audit(username, "login", via)
         token = web_auth.issue(username)
-        resp = JSONResponse({"ok": True, "user": username,
+        # success 字段为 Gradio 登录契约保留：web/src/api/core.ts 以 j.success 判定成败，
+        # 缺失会导致浏览器端密码正确也弹「用户名或密码错误」（2026-08 去 Gradio 化回归）
+        resp = JSONResponse({"ok": True, "success": True, "user": username,
                              "must_change_pwd": chatstore.get_must_change_pwd(username)})
         resp.set_cookie(web_auth.TOKEN_COOKIE, token, httponly=True,
                         samesite="lax", max_age=web_auth.TOKEN_TTL, path="/")
