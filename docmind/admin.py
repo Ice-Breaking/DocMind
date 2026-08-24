@@ -420,7 +420,10 @@ ADMIN_HTML = """<!DOCTYPE html>
 <script>
 const $ = (sel) => document.querySelector(sel);
 const fmt = (ts) => ts ? new Date(ts * 1000).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
-const esc = (s) => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// esc 必须同时转义引号：插值点含 HTML 属性(value="...")与内联事件
+// (onclick="fn('${id}')")，只转义 &<> 时属性可被双引号/单引号截断注入
+const esc = (s) => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 async function api(path, opt) {
   const r = await fetch(path, opt);
@@ -490,7 +493,7 @@ async function renderAudit() {
     ${list.map(s => `<tr>
       <td>${fmt(s.updated_at)}</td><td>${esc(s.user)}</td>
       <td>${esc(s.title || '(空会话)')}</td><td>${s.msg_count}</td>
-      <td><button class="mini ok" onclick="viewSession('${s.id}')">查看对话</button></td>
+      <td><button class="mini ok" onclick="viewSession('${esc(s.id)}')">查看对话</button></td>
     </tr>`).join('')}</table><div id="conv" style="margin-top:14px"></div>`;
 }
 window.viewSession = async (sid) => {

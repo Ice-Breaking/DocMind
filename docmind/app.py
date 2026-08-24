@@ -300,7 +300,11 @@ if __name__ == "__main__":
     from pydantic import BaseModel, Field
 
     class FeedbackIn(BaseModel):
-        session_id: str = Field(..., min_length=1, max_length=64)
+        # 字符白名单：session_id 会进入 admin 审计页的内联事件/属性插值，
+        # 任意字符入库等于给存储型 XSS 留载体（前端生成的 sess-xxx 格式
+        # 天然满足 [\\w-]，存量会话不受影响——读取侧不做此校验）
+        session_id: str = Field(..., min_length=1, max_length=64,
+                                pattern=r"^[\w-]+$")
         seq: int
         rating: Literal["up", "down"]
 
@@ -416,8 +420,11 @@ if __name__ == "__main__":
 
     class ChatIn(BaseModel):
         question: str = Field(..., min_length=1, max_length=4000)
-        session_id: str = Field(default="", max_length=64)
-        assistant_id: str = Field(default="", max_length=64)
+        # session_id/assistant_id 白名单同 FeedbackIn（防 XSS 载体入库）
+        session_id: str = Field(default="", max_length=64,
+                                pattern=r"^[\w-]*$")
+        assistant_id: str = Field(default="", max_length=64,
+                                  pattern=r"^[\w-]*$")
         # 图片附件（base64，可带 data URL 前缀）：模型真看图（多模态），非仅 OCR；
         # 支持单张(str)或多张(list,上限 5)
         image_data: "str | list[str]" = Field(default="", max_length=60_000_000)
