@@ -6,19 +6,25 @@
 - app.py HTTP 延迟埋点误用 time()-monotonic()，指标全为废数据；
 - Prometheus path 标签未归一化，每个新会话 id 派生新时间序列（基数爆炸）。
 """
+import threading
 import time
 
 import pytest
 
-from docmind import metrics, web_auth
+from docmind import metrics, store, web_auth
 
 
 @pytest.fixture(autouse=True)
-def _reset_auth_state():
-    """每个用例前后清空内存态，避免用例间串扰"""
+def _reset_auth_state(tmp_path, monkeypatch):
+    """每个用例前后清空内存态 + 指向临时 DB，避免用例间串扰与污染真实库
+    （token 持久化后 auth_tokens 表会写 store._conn() 对应的库）"""
     web_auth._failures.clear()
+    web_auth._tokens.clear()
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "chat.db"))
+    monkeypatch.setattr(store, "_local", threading.local())
     yield
     web_auth._failures.clear()
+    web_auth._tokens.clear()
 
 
 def test_user_dimension_locks_after_max_fails():

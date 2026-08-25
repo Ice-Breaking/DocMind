@@ -117,7 +117,9 @@ cd web && npm install && npm run dev     # 监听 127.0.0.1:5173，代理 /api�
 #    首次登录 admin / ADMIN_PASSWORD（默认 admin123），强制改密
 ```
 
-测试：`python -m pytest tests/ -q`（71 个离线单测，无需 API Key）。
+测试：`python -m pytest tests/ -q`（离线单测，无需 API Key）；前端 `cd web && npm test`。
+部署验证：`python scripts/smoke.py`（部署冒烟，<1 分钟，CI deploy-smoke job 同款）；
+发版前验收：`python scripts/qa_full.py`（深度 E2E，覆盖全部业务流，含真实 LLM 调用）。
 
 索引维护：知识库页上传文档后需重建索引才可检索/预览（页面一键重建，或 `python scripts/rebuild_kb.py`）。
 增量重建按逐文件 manifest 指纹判定，只重新嵌入变化的文件；脚本必须使用与服务一致的

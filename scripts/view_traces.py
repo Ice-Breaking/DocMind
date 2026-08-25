@@ -2,24 +2,20 @@
 
 用法：PYTHONPATH=. .venv/bin/python scripts/view_traces.py [显示最近 N 条，默认 20]
 """
-import json
 import sys
 
-from docmind import config
 
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-    try:
-        with open(config.TRACE_LOG_PATH, encoding="utf-8") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
+    from docmind import trace_store
+    records = trace_store.recent_events(limit=n)
+    if not records:
         print("暂无调用链日志（先跑一轮对话）")
         return
 
     total_tokens_in, total_tokens_out = 0, 0
-    for line in lines[-n:]:
-        r = json.loads(line)
+    for r in records:
         icon = "🤖" if r.get("kind") == "generation" else "🔧"
         usage = r.get("usage")
         usage_str = f" tokens={usage['input']}+{usage['output']}" if usage else ""
@@ -31,7 +27,7 @@ def main():
         print(f"{r.get('ts','')} {icon} {r.get('name',''):<28} "
               f"{r.get('duration_ms', 0):>6}ms {status}{usage_str} | {out}")
 
-    print(f"\n--- 最近 {min(n, len(lines))} 条 | LLM 累计 tokens: "
+    print(f"\n--- 最近 {min(n, len(records))} 条 | LLM 累计 tokens: "
           f"输入 {total_tokens_in} + 输出 {total_tokens_out} ---")
 
 

@@ -22,6 +22,7 @@ import {
 import {
   DatabaseOutlined,
   DeleteOutlined,
+  EditOutlined,
   FileTextOutlined,
   FolderOpenOutlined,
   InboxOutlined,
@@ -34,6 +35,7 @@ import type { UploadProps } from 'antd';
 import {
   createKb,
   deleteKb,
+  updateKb,
   deleteKbDoc,
   fetchIngestTasks,
   fetchKbDocs,
@@ -230,6 +232,41 @@ export default function KnowledgeBases() {
     onError: (e: Error) => msgApi.error(e.message || '创建失败'),
   });
 
+  /* ---- 重命名知识库（QA 契约补齐：后端 PUT /api/kbs/{id}） ---- */
+  const [renameTarget, setRenameTarget] = useState<KnowledgeBase | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameForm] = Form.useForm();
+
+  const renameMut = useMutation({
+    mutationFn: (v: { id: string; name: string; description: string | null }) =>
+      updateKb(v.id, { name: v.name, description: v.description }),
+    onSuccess: () => {
+      msgApi.success('知识库已更新');
+      setRenameOpen(false);
+      setRenameTarget(null);
+      qc.invalidateQueries({ queryKey: ['kbs'] });
+    },
+    onError: (e: Error) => {
+      if (e.message !== 'UNAUTHORIZED') msgApi.error(e.message || '更新失败');
+    },
+  });
+
+  const handleRenameOk = async () => {
+    let values: { name: string; description?: string };
+    try {
+      values = await renameForm.validateFields();
+    } catch {
+      return;
+    }
+    const desc = (values.description || '').trim();
+    renameMut.mutate({
+      id: renameTarget!.id,
+      name: values.name.trim(),
+      // 描述未填写时传 null 保持原值（后端 None = 不修改）
+      description: desc === '' ? null : desc,
+    });
+  };
+
   const deleteKbMut = useMutation({
     mutationFn: (kb: KnowledgeBase) => deleteKb(kb.id),
     onSuccess: () => {
@@ -310,6 +347,21 @@ export default function KnowledgeBases() {
           >
             重建索引
           </Button>
+          {kb.id === 'default' ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>不可删除/改名</Text>
+          ) : (
+            <Button
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => {
+                setRenameTarget(kb);
+                renameForm.setFieldsValue({ name: kb.name, description: kb.description || '' });
+                setRenameOpen(true);
+              }}
+            >
+              重命名
+            </Button>
+          )}
           {kb.id === 'default' ? (
             <Text type="secondary" style={{ fontSize: 12 }}>不可删除</Text>
           ) : (
@@ -441,6 +493,33 @@ export default function KnowledgeBases() {
         </Form>
       </Modal>
 
+      {/* 重命名知识库 */}
+      <Modal
+        title={`重命名「${renameTarget?.name ?? ''}」`}
+        open={renameOpen}
+        onOk={handleRenameOk}
+        onCancel={() => { setRenameOpen(false); setRenameTarget(null); }}
+        confirmLoading={renameMut.isPending}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form form={renameForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="知识库名称"
+            rules={[
+              { required: true, message: '请输入名称' },
+              { max: 64, message: '名称最长 64 字符' },
+            ]}
+          >
+            <Input placeholder="知识库名称" />
+          </Form.Item>
+          <Form.Item name="description" label="描述（留空保持不变）">
+            <Input.TextArea rows={2} placeholder="知识库用途说明" maxLength={200} />
+          </Form.Item>
+        </Form>
+      </Modal>
       {/* ---- 知识库详情 Drawer ---- */}
       <Drawer
         title={

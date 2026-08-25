@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 
+import anyio
 import certifi
 import requests
 
@@ -34,8 +35,9 @@ import fastapi
 from fastapi import HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse, Response
 
+from docmind.deps import RequireUser
 from docmind import config
-from docmind.docs_api import _require_user
+from docmind.api_utils import server_error
 
 TTS_CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "tts_cache")
 TTS_URL = ("https://dashscope.aliyuncs.com/api/v1/services/aigc/"
@@ -89,13 +91,11 @@ def _synthesize(text: str, voice: str) -> bytes:
 def register_voice_routes(app) -> None:
 
     @app.get("/api/voice/voices", include_in_schema=False)
-    async def _voices(request: fastapi.Request):
-        _require_user(request, app)
+    async def _voices(request: fastapi.Request, _user: RequireUser):
         return JSONResponse(VOICES)
 
     @app.post("/api/voice/asr", include_in_schema=False)
-    async def _asr(request: fastapi.Request, file: UploadFile = File(...)):
-        _require_user(request, app)
+    async def _asr(request: fastapi.Request, _user: RequireUser, file: UploadFile = File(...)):
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="空音频")
@@ -123,13 +123,13 @@ def register_voice_routes(app) -> None:
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"识别失败: {e}")
+            # 上游 ASR SDK 报文不外泄（可能含 endpoint/凭证线索）
+            raise server_error("语音识别", e, __name__)
         finally:
             os.unlink(tmp)
 
     @app.post("/api/voice/tts", include_in_schema=False)
-    async def _tts(request: fastapi.Request):
-        _require_user(request, app)
+    async def _tts(request: fastapi.Request, _user: RequireUser):
         body = await request.json()
         raw = str(body.get("text") or "")
         voice = str(body.get("voice") or "Cherry")
@@ -143,9 +143,14 @@ def register_voice_routes(app) -> None:
             with open(cached, "rb") as f:
                 return Response(f.read(), media_type="audio/wav")
         try:
-            audio = _synthesize(text, voice)
+            # 合成 + 音频下载是同步网络 IO（timeout 最长 60s），必须下放
+            # 线程池——事件循环冻结期间全站无响应（QA 审查发现，与 OCR 同类）
+            audio = await anyio.to_thread.run_sync(_synthesize, text, voice)
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=str(e))
+            # 上游 TTS SDK 报文不外泄（可能含 endpoint/凭证线索）
+            raise server_error("语音合成", e, __name__)
         with open(cached, "wb") as f:
             f.write(audio)
         return Response(audio, media_type="audio/wav")

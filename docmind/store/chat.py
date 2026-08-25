@@ -2,6 +2,7 @@
 
 连接经包门面晚绑定获取（store._conn()），便于测试整体替换 DB。"""
 import os
+import sqlite3
 import time
 from docmind import store
 
@@ -18,16 +19,13 @@ def _gen_title(content: str) -> str:
     return clean[:30] or "[图片]"
 
 
-def append_message(session_id: str, role: str, content: str, raw: str | None = None,
-                   user: str | None = None, assistant_id: str = "") -> int:
-    """追加一条消息，返回其在会话内的序号（从 0 起）。
+def _append_message_conn(c, session_id: str, role: str, content: str,
+                         raw: str | None, user: str | None,
+                         assistant_id: str, now: float) -> int:
+    """在给定连接上追加一条消息（不 commit，由调用方控制事务边界）。
 
-    content 为展示内容（含思维链/引用标记等渲染格式）；
-    raw 为干净文本（assistant 的纯净回答），用于切换会话时恢复 LLM 多轮上下文。
-    assistant_id：新建会话时归属的助手（空串=默认助手），已存在会话不受影响。
-    """
-    c = store._conn()
-    now = time.time()
+    调用方持写锁（BEGIN IMMEDIATE）时 MAX(seq)+1 与 INSERT 之间
+    不可能有其他写者插入，序号计算天然原子。"""
     seq = c.execute(
         "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
         (session_id,),
@@ -37,12 +35,9 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
             "INSERT INTO messages(session_id, seq, role, content, raw, created_at) VALUES(?,?,?,?,?,?)",
             (session_id, seq, role, content, raw if raw is not None else content, now),
         )
-    except Exception as e:  # noqa: BLE001 - 精确匹配唯一索引冲突见下
-        import sqlite3 as _sq
-        if not isinstance(e, _sq.IntegrityError):
-            raise
+    except sqlite3.IntegrityError:
         # 并发窗口另一请求已插入同 seq（idx_messages_session_seq 唯一约束
-        # 兜底触发）：重算序号再插一次；再撞则让异常上抛（极端争用）
+        # 兜底触发，未持写锁的调用方路径）：重算序号再插一次；再撞则让异常上抛
         seq = c.execute(
             "SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?",
             (session_id,),
@@ -52,11 +47,14 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
             (session_id, seq, role, content, raw if raw is not None else content, now),
         )
     row = c.execute("SELECT title, user FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    # 冗余列维护：msg_count/last_msg 写入时更新（list_sessions 直读，
+    # 免去每会话相关子查询随消息量线性恶化）
+    last_msg = (raw if raw is not None else content or "").replace("\n", " ")[:60]
     if row is None:
         c.execute(
-            "INSERT INTO sessions(id, title, user, assistant_id, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO sessions(id, title, user, msg_count, last_msg, assistant_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
             (session_id, _gen_title(content) if role == "user" else "",
-             user or "", assistant_id, now, now),
+             user or "", 1, last_msg, assistant_id, now, now),
         )
     else:
         if not row["title"] and role == "user":
@@ -66,9 +64,56 @@ def append_message(session_id: str, role: str, content: str, raw: str | None = N
                       (_gen_title(content), session_id))
         if not row["user"] and user:
             c.execute("UPDATE sessions SET user = ? WHERE id = ?", (user, session_id))
-        c.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
-    c.commit()
+        c.execute("UPDATE sessions SET msg_count = msg_count + 1, last_msg = ?, "
+                  "updated_at = ? WHERE id = ?", (last_msg, now, session_id))
     return seq
+
+
+def append_message(session_id: str, role: str, content: str, raw: str | None = None,
+                   user: str | None = None, assistant_id: str = "") -> int:
+    """追加一条消息，返回其在会话内的序号（从 0 起）。
+
+    content 为展示内容（含思维链/引用标记等渲染格式）；
+    raw 为干净文本（assistant 的纯净回答），用于切换会话时恢复 LLM 多轮上下文。
+    assistant_id：新建会话时归属的助手（空串=默认助手），已存在会话不受影响。
+    """
+    c = store._conn()
+    # BEGIN IMMEDIATE： upfront 取写锁，MAX(seq)+1 与 INSERT 原子化
+    # （默认 deferred 事务下 SELECT 不加锁，两写者可同时算出同一 seq）
+    if not c.in_transaction:
+        c.execute("BEGIN IMMEDIATE")
+    try:
+        seq = _append_message_conn(c, session_id, role, content, raw,
+                                   user, assistant_id, time.time())
+        c.commit()
+        return seq
+    except Exception:
+        if c.in_transaction:
+            c.rollback()
+        raise
+
+
+def append_exchange(session_id: str, user_content: str, user_raw: str,
+                    assistant_content: str, user: str | None = None,
+                    assistant_id: str = "") -> None:
+    """一轮问答（user + assistant 两条消息）单事务落库。
+
+    原先两条消息各自独立 commit：进程在两次 commit 之间崩溃会留下
+    只有半轮的会话（多轮上下文重建时 user 悬空）；单事务保证原子。"""
+    c = store._conn()
+    if not c.in_transaction:
+        c.execute("BEGIN IMMEDIATE")
+    try:
+        now = time.time()
+        _append_message_conn(c, session_id, "user", user_content, user_raw,
+                             user, assistant_id, now)
+        _append_message_conn(c, session_id, "assistant", assistant_content,
+                             assistant_content, user, assistant_id, now)
+        c.commit()
+    except Exception:
+        if c.in_transaction:
+            c.rollback()
+        raise
 
 
 def load_session(session_id: str) -> list[dict]:
@@ -134,29 +179,28 @@ def load_pairs_with_images(session_id: str) -> list[tuple[str, str, str | None]]
 
 
 def list_sessions(user: str | None = None, limit: int = 50,
-                  assistant_id: str | None = None) -> list[dict]:
+                  assistant_id: str | None = None,
+                  offset: int = 0) -> list[dict]:
     """会话列表（按最近活跃倒序）：只看本人会话 + 尚未归属的历史会话（打开即认领）
 
     assistant_id 为 None 时行为与旧版完全一致；指定时额外按助手过滤。
     返回项含 assistant_id（空值归一为 "default"）。
-    """
+    msg_count/last_msg 直读 sessions 冗余列（写入时维护）——
+    原先每会话相关子查询随消息量线性恶化。"""
     c = store._conn()
-    sql = """SELECT s.id, s.title, s.updated_at, s.assistant_id, COUNT(m.id) AS msg_count,
-           (SELECT substr(REPLACE(COALESCE(m2.raw, m2.content), char(10), ' '), 1, 60)
-              FROM messages m2 WHERE m2.session_id = s.id
-             ORDER BY m2.seq DESC LIMIT 1) AS last_msg
-           FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
+    sql = """SELECT s.id, s.title, s.updated_at, s.assistant_id,
+             COALESCE(s.msg_count, 0) AS msg_count, COALESCE(s.last_msg, '') AS last_msg
+           FROM sessions s
            WHERE (s.user = '' OR s.user = ?)"""
     params: list = [user or ""]
     if assistant_id is not None:
         sql += " AND s.assistant_id = ?"
         params.append(assistant_id)
-    sql += " GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY s.updated_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, max(0, offset)])
     rows = c.execute(sql, params).fetchall()
     return [{"id": r["id"], "title": r["title"], "msg_count": r["msg_count"],
-             "updated_at": r["updated_at"],
-             "last_msg": (r["last_msg"] or "") if "last_msg" in r.keys() else "",
+             "updated_at": r["updated_at"], "last_msg": r["last_msg"] or "",
              "assistant_id": (r["assistant_id"] or "default") if "assistant_id" in r.keys() else "default"}
             for r in rows]
 
@@ -177,7 +221,7 @@ def delete_session(session_id: str) -> None:
     c.commit()
 
 
-def list_all_sessions(limit: int = 100) -> list[dict]:
+def list_all_sessions(limit: int = 100, offset: int = 0) -> list[dict]:
     """审计：全部用户的会话列表（first_image：首条 user 消息携带的
     图片 URL，审计页标题列渲染缩略图供直接查看）"""
     import re as _re_img
@@ -188,7 +232,8 @@ def list_all_sessions(limit: int = 100) -> list[dict]:
                  WHERE m2.session_id = s.id AND m2.role = 'user'
                  ORDER BY m2.seq LIMIT 1) AS first_user_content
            FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
-           GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?""", (limit,)).fetchall()
+           GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ? OFFSET ?""",
+           (limit, max(0, offset))).fetchall()
     out = []
     # uploads 目录与 docs_api._UPLOADS_DIR 同布局（容器/本地 CWD 均为项目根）
     _uploads_dir = os.path.join("data", "uploads")

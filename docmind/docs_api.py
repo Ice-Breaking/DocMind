@@ -13,7 +13,8 @@ import fastapi
 from fastapi import HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 
-from docmind import store
+from docmind.deps import RequireUser
+from docmind import config, store
 
 # ---- 常量 ----
 _ALLOWED_EXT = {".pdf", ".md", ".txt", ".docx", ".csv", ".json"}
@@ -201,17 +202,6 @@ def _check_quota(doc_dir: str, incoming: int) -> None:
 
 
 # ---- 当前用户解析：复用 Gradio 登录 cookie（与 assistants_api.py 保持一致） ----
-def _current_user(request, app) -> str:
-    """自研 token 会话(web_auth),与 app.py 登录链路一致"""
-    from docmind import web_auth
-    return web_auth.current_user(request)
-
-def _require_user(request, app) -> str:
-    """校验登录态；被要求强制改密的用户返回 403（统一委托 web_auth.require_user）"""
-    from docmind import web_auth
-    return web_auth.require_user(request)
-
-
 # import-url 抓取专用并发闸（per-user）：anyio 全局线程池仅约 40 tokens
 # （4.x 默认），40 个并发慢抓取即可占满并拖慢全部同步路由——次生 DoS 面。
 # 单账号最多占住自己队列的 4 个槽位，互不影响他人；配合下方 fail_after
@@ -289,15 +279,36 @@ def _fetch_public(url: str):
 
 
 def _resolve_doc_dir(kb_id: str) -> str:
-    """获取 KB 的 doc_dir，不存在时自动创建；KB 不存在抛 404。"""
+    """获取 KB 的 doc_dir，不存在时自动创建；KB 不存在抛 404。
+
+    跨环境兼容：doc_dir 持久化的是建库时的路径——开发机上是绝对路径
+    （如 /Users/.../docs/knowledge），换 Docker 部署后该路径不存在且
+    不可创建（/Users 属 root），直接 makedirs 会 PermissionError 500。
+    回退到当前部署形态的约定位置：default 库=知识库目录（容器内为
+    bind mount /app/docs/knowledge），其余库=数据卷内 data/kb_docs/<id>。"""
     kb = store.get_kb(kb_id)
     if kb is None:
         raise HTTPException(status_code=404, detail="知识库不存在")
     doc_dir = kb.get("doc_dir") or ""
-    if not doc_dir:
-        doc_dir = os.path.join("data", "kb_docs", kb_id)
+    if doc_dir:
+        if not os.path.isdir(doc_dir):
+            try:
+                os.makedirs(doc_dir, exist_ok=True)
+            except OSError:
+                doc_dir = (config.KNOWLEDGE_DIR if kb_id == "default"
+                           else os.path.join("data", "kb_docs", kb_id))
+                os.makedirs(doc_dir, exist_ok=True)
+        return doc_dir
+    doc_dir = (config.KNOWLEDGE_DIR if kb_id == "default"
+               else os.path.join("data", "kb_docs", kb_id))
     os.makedirs(doc_dir, exist_ok=True)
     return doc_dir
+
+
+def _write_text_sync(path: str, content: str) -> None:
+    """文本写盘（供 async 路由经 to_thread 调用）"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 def _extract_html_article(html: str) -> tuple[str, str]:
@@ -328,10 +339,9 @@ def register_docs_routes(app) -> None:
     """注册文档管理路由到 FastAPI app。"""
 
     @app.post("/api/kbs/{kb_id}/import-url", include_in_schema=False)
-    async def _import_url(kb_id: str, request: fastapi.Request):
+    async def _import_url(kb_id: str, request: fastapi.Request, user: RequireUser):
         """网页导入：抓取 URL 正文 → 存为 Markdown → 走既有入库管线（含自动重建）。
         body: {"url": "https://..."}；企业 wiki/文档站内容一键入库"""
-        user = _require_user(request, app)
         doc_dir = _resolve_doc_dir(kb_id)
 
         try:
@@ -351,7 +361,10 @@ def register_docs_routes(app) -> None:
         # 超时只取消协程立即释放连接，已入池的线程会跑完 requests 自身 timeout
         limiter = _IMPORT_LIMITERS.setdefault(user, anyio.CapacityLimiter(4))
         try:
-            async with anyio.fail_after(_IMPORT_QUEUE_TIMEOUT):
+            # 注意：anyio.fail_after 是同步上下文管理器（内部实现为
+            # cancel scope，包裹 await 正是官方用法）——写成 async with
+            # 在 anyio 4.x 直接 TypeError（QA 实测发现）
+            with anyio.fail_after(_IMPORT_QUEUE_TIMEOUT):
                 resp = await anyio.to_thread.run_sync(
                     _fetch_public, url, limiter=limiter)
             resp.raise_for_status()
@@ -374,10 +387,14 @@ def register_docs_routes(app) -> None:
         filename = f"{host}_{safe_title}.md"
         content = f"---\nsource_url: {url}\n抓取时间: {datetime.now().isoformat()}\n---\n\n{text}".encode("utf-8")
 
-        _check_quota(doc_dir, len(content))
-        _backup_existing(kb_id, filename, doc_dir)
-        with open(os.path.join(doc_dir, filename), "wb") as f:
-            f.write(content)
+        # 配额遍历 + 备份 + 写盘：同步 IO 下放线程池（与上传路径同策略）
+        def _persist_sync() -> None:
+            _check_quota(doc_dir, len(content))
+            _backup_existing(kb_id, filename, doc_dir)
+            with open(os.path.join(doc_dir, filename), "wb") as f:
+                f.write(content)
+
+        await anyio.to_thread.run_sync(_persist_sync)
 
         store.create_ingest_task(kb_id, filename, "import-url", "pending",
                                  "已抓取网页，等待重建索引后生效", user)
@@ -390,10 +407,9 @@ def register_docs_routes(app) -> None:
                 "title": title, "chars": len(text)}
 
     @app.get("/api/kbs/{kb_id}/docs/search", include_in_schema=False)
-    async def _search_docs(kb_id: str, request: fastapi.Request, q: str = ""):
+    async def _search_docs(kb_id: str, request: fastapi.Request, _user: RequireUser, q: str = ""):
         """文档内容搜索：关键词 → 命中文档列表（含片段与次数）。
         「哪份文档提到 XX」不用逐个点开预览"""
-        _require_user(request, app)
         q = (q or "").strip()
         if len(q) < 2:
             raise HTTPException(status_code=400, detail="关键词至少 2 个字符")
@@ -421,10 +437,9 @@ def register_docs_routes(app) -> None:
                                    key=lambda x: -x["count"]))
 
     @app.get("/files/uploads/{name}", include_in_schema=False)
-    async def _serve_upload(name: str, request: fastapi.Request):
+    async def _serve_upload(name: str, request: fastapi.Request, user: RequireUser):
         """对话图片附件：登录 + 属主隔离（admin 可见全部）；
         存量无属主记录的文件回退为登录可见"""
-        user = _require_user(request, app)
         safe = os.path.basename(name)
         path = os.path.join(_UPLOADS_DIR, safe)
         if not os.path.isfile(path):
@@ -454,11 +469,10 @@ def register_docs_routes(app) -> None:
         return FileResponse(path, media_type=media)
 
     @app.post("/api/ocr-image", include_in_schema=False)
-    async def _ocr_image(request: fastapi.Request,
+    async def _ocr_image(request: fastapi.Request, user: RequireUser,
                          file: UploadFile = File(...)):
         """对话传图：图片 → 文字（复用索引侧百炼 OCR 与磁盘缓存）。
         前端把识别文本回填输入框由用户确认后发送，保持对话流不变"""
-        user = _require_user(request, app)
 
         ext = os.path.splitext(file.filename or "")[1].lower()
         if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -474,7 +488,11 @@ def register_docs_routes(app) -> None:
         try:
             tmp.write(content)
             tmp.close()
-            text = _ocr(tmp.name)
+            # OCR 是对 DashScope 的同步网络调用（单次数秒），必须下放
+            # 线程池——事件循环冻结期间全站无响应
+            text = await anyio.to_thread.run_sync(_ocr, tmp.name)
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"图片识别失败: {e}")
         finally:
@@ -485,8 +503,7 @@ def register_docs_routes(app) -> None:
         return {"text": text}
 
     @app.get("/api/kbs/{kb_id}/docs", include_in_schema=False)
-    async def _list_docs(kb_id: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _list_docs(kb_id: str, request: fastapi.Request, _user: RequireUser):
         doc_dir = _resolve_doc_dir(kb_id)
         items = []
         try:
@@ -505,9 +522,8 @@ def register_docs_routes(app) -> None:
         return JSONResponse(items)
 
     @app.post("/api/kbs/{kb_id}/docs", include_in_schema=False)
-    async def _upload_doc(kb_id: str, request: fastapi.Request,
+    async def _upload_doc(kb_id: str, request: fastapi.Request, user: RequireUser,
                           file: UploadFile = File(...)):
-        _require_user(request, app)
         doc_dir = _resolve_doc_dir(kb_id)
 
         # 文件名 sanitize
@@ -530,16 +546,18 @@ def register_docs_routes(app) -> None:
         if not content.strip():
             raise HTTPException(status_code=400, detail="文件内容为空")
 
-        _validate_content(filename, content)
-        _check_quota(doc_dir, len(content))
-        _backup_existing(kb_id, filename, doc_dir)
+        # 校验（zip 扫描）+ 配额（目录遍历）+ 备份 + 50MB 写盘均为同步
+        # IO/CPU，合并为一个同步函数整体下放线程池（并发上传互不放大）
+        def _persist_sync() -> None:
+            _validate_content(filename, content)
+            _check_quota(doc_dir, len(content))
+            _backup_existing(kb_id, filename, doc_dir)
+            with open(os.path.join(doc_dir, filename), "wb") as f:
+                f.write(content)
 
-        dest = os.path.join(doc_dir, filename)
-        with open(dest, "wb") as f:
-            f.write(content)
+        await anyio.to_thread.run_sync(_persist_sync)
 
         # 入库任务追踪：文件落盘成功，等待重建索引后生效
-        user = _require_user(request, app)
         store.create_ingest_task(kb_id, filename, "upload", "pending",
                                  "已上传，等待重建索引后生效", user)
         store.record_audit(user, "doc.upload", f"kb:{kb_id}/{filename}",
@@ -551,8 +569,7 @@ def register_docs_routes(app) -> None:
         return {"ok": True, "name": filename, "size": len(content)}
 
     @app.delete("/api/kbs/{kb_id}/docs/{filename}", include_in_schema=False)
-    async def _delete_doc(kb_id: str, filename: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _delete_doc(kb_id: str, filename: str, request: fastapi.Request, user: RequireUser):
         doc_dir = _resolve_doc_dir(kb_id)
 
         filename = os.path.basename(filename)
@@ -563,8 +580,7 @@ def register_docs_routes(app) -> None:
         if not os.path.isfile(fp):
             raise HTTPException(status_code=404, detail="文件不存在")
 
-        os.remove(fp)
-        user = _require_user(request, app)
+        await anyio.to_thread.run_sync(os.remove, fp)
         store.create_ingest_task(kb_id, filename, "delete", "pending",
                                  "已删除，等待重建索引后从检索移除", user)
         store.record_audit(user, "doc.delete", f"kb:{kb_id}/{filename}")
@@ -574,7 +590,7 @@ def register_docs_routes(app) -> None:
         return {"ok": True}
 
     @app.get("/api/kbs/{kb_id}/docs/{filename}/preview", include_in_schema=False)
-    async def _preview_doc_chunks(kb_id: str, filename: str, request: fastapi.Request):
+    async def _preview_doc_chunks(kb_id: str, filename: str, request: fastapi.Request, _user: RequireUser):
         """预览文档的切片内容（chunks）
 
         返回格式：
@@ -588,7 +604,6 @@ def register_docs_routes(app) -> None:
             ]
         }
         """
-        _require_user(request, app)
 
         # 获取知识库的向量存储
         from docmind.rag.kb_registry import get_registry
@@ -620,12 +635,11 @@ def register_docs_routes(app) -> None:
         })
 
     @app.put("/api/kbs/{kb_id}/docs/{filename}/content", include_in_schema=False)
-    async def _update_doc_content(kb_id: str, filename: str, request: fastapi.Request):
+    async def _update_doc_content(kb_id: str, filename: str, request: fastapi.Request, user: RequireUser):
         """更新文档内容（仅支持文本类文件）
 
         请求体：{"content": "新内容"}
         """
-        _require_user(request, app)
         doc_dir = _resolve_doc_dir(kb_id)
 
         filename = os.path.basename(filename)
@@ -658,12 +672,10 @@ def register_docs_routes(app) -> None:
                 detail=f"内容过大，上限 {_MAX_SIZE // (1024*1024)} MB"
             )
 
-        # 写入文件
-        with open(fp, 'w', encoding='utf-8') as f:
-            f.write(new_content)
+        # 写盘下放线程池
+        await anyio.to_thread.run_sync(_write_text_sync, fp, new_content)
 
         # 记录审计日志
-        user = _require_user(request, app)
         store.record_audit(user, "doc.edit", f"kb:{kb_id}/{filename}",
                           f"{len(new_content)} bytes")
 

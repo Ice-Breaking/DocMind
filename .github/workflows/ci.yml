@@ -54,6 +54,35 @@ jobs:
       - name: Build frontend image
         run: docker build -t docmind-web:test ./web
 
+  deploy-smoke:
+    # 部署冒烟：真实 compose 构建启动后验证「能跑起来且版本正确」——
+    # 单测层覆盖不了的部署形态问题在此拦截（QA 实测：doc_dir 跨环境、
+    # anyio 兼容、镜像漂移均属此类）。无 LLM 依赖，SSE 只验链路通。
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: 准备 .env（CI 无真实密钥：LLM 调用失败由 ⚠️ 兜底，冒烟只验链路）
+        run: |
+          cp .env.production .env
+          sed -i "s|^SEARXNG_SECRET=.*|SEARXNG_SECRET=$(openssl rand -hex 32)|" .env
+          grep -q '^SEARXNG_SECRET=' .env || echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> .env
+          sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=smoke-admin-pw|" .env
+          grep -q '^ADMIN_PASSWORD=' .env || echo "ADMIN_PASSWORD=smoke-admin-pw" >> .env
+      - name: 构建并启动三容器
+        run: docker compose up -d --build
+      - name: 冒烟（脚本自带就绪等待，含版本指纹漂移检测）
+        run: |
+          pip install requests
+          python scripts/smoke.py --base http://127.0.0.1:7860 \
+            --nginx http://localhost --admin-password smoke-admin-pw
+      - name: 失败时输出容器日志
+        if: failure()
+        run: docker compose logs --tail=100 docmind
+      - name: 收尾
+        if: always()
+        run: docker compose down -v || true
+
   security-scan:
     runs-on: ubuntu-latest
     continue-on-error: true

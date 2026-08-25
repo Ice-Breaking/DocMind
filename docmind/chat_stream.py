@@ -22,7 +22,7 @@ from docmind import acl, config, semantic_cache
 from docmind import agent_reasoning_cache
 from docmind import store
 from docmind.metrics import CACHE_HITS, CACHE_MISSES
-from docmind.agent.react_agent import SYSTEM_PROMPT
+from docmind.agent.react_agent import default_system_prompt
 from docmind.llm import embed
 
 logger = logging.getLogger(__name__)
@@ -90,16 +90,23 @@ current_query_vec: contextvars.ContextVar[tuple] = contextvars.ContextVar(
 def stream_events(agent, question: str, session_id: str = "",
                   user: str = "", assistant_id: str = "",
                   system_prompt: str | None = None,
-                  image_data: 'str | list[str] | None' = None) -> Iterator[dict]:
+                  image_data: 'str | list[str] | None' = None,
+                  kb_ids: list | None = None) -> Iterator[dict]:
     """核心应答流程，yield 结构化事件；任何异常收敛为 error+final，不挂空流
 
     assistant_id 非空且非 "default" 时视为自定义助手：跳过语义缓存
     （自定义 system_prompt/KB 的应答不应污染/命中默认缓存）；
     system_prompt 覆盖多轮历史重建用的系统提示。
     image_data：图片 base64（data URL）——多模态消息当轮现算，
-    与时效问题一样跳过答案缓存读写。"""
+    与时效问题一样跳过答案缓存读写。
+    kb_ids：当前请求绑定的知识库列表。必须显式传参而非依赖调用方
+    预先 set ContextVar——本生成器通常在独立 producer 线程中运行，
+    threading.Thread 不继承父线程的 contextvars，跨线程 set 的值
+    在本线程内读不到（自定义助手的 KB 路由会静默失效回退默认库）；
+    在本函数入口 set 保证与后续 knowledge_search 同线程可见。"""
     acl.set_current_user(user)   # 文档级 ACL：检索/缓存按当前用户过滤
-    sp = system_prompt if system_prompt else SYSTEM_PROMPT
+    current_kb_ids.set(list(kb_ids or []))   # 本线程内检索层可读（见 docstring）
+    sp = system_prompt if system_prompt else default_system_prompt()
     # 非默认助手不走语义缓存（读与写都跳过），默认链路行为保持逐字节一致
     use_cache = not assistant_id or assistant_id == "default"
 
@@ -164,7 +171,7 @@ def stream_events(agent, question: str, session_id: str = "",
         try:
             q_vec = embed([question])[0]
             current_query_vec.set((question, q_vec))   # 供检索层复用（文本一致时）
-            hit = semantic_cache.lookup(q_vec)
+            hit = semantic_cache.lookup(q_vec, kb_ids)
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路
             hit = None
             logger.warning(f"语义缓存查询失败: {e}")
@@ -188,8 +195,7 @@ def stream_events(agent, question: str, session_id: str = "",
     # 2.5) Agent 推理缓存：完全相同的问题跳过 LLM 推理（时效/图片问题同样跳过）
     if use_cache and not bypass_cache:
         try:
-            kb_ids = current_kb_ids.get() if assistant_id else []
-            reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids, sp)
+            reasoning_hit = agent_reasoning_cache.lookup(question, kb_ids or [], sp)
             if reasoning_hit and acl.answer_allowed(reasoning_hit, user):
                 if interpret_future is not None:
                     interpret_future.cancel()   # 同语义缓存命中：取消未启动任务
@@ -229,7 +235,7 @@ def stream_events(agent, question: str, session_id: str = "",
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
         try:
-            semantic_cache.save(question, final_answer, q_vec)
+            semantic_cache.save(question, final_answer, q_vec, kb_ids)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"语义缓存写入失败: {e}")
 
@@ -239,9 +245,8 @@ def stream_events(agent, question: str, session_id: str = "",
             and not (agent.last_tools & _TIME_SENSITIVE)
             and acl.answer_allowed(final_answer, user)):
         try:
-            kb_ids = current_kb_ids.get() if assistant_id else []
             agent_reasoning_cache.save(
-                question, kb_ids, sp, final_answer, list(agent.last_tools)
+                question, kb_ids or [], sp, final_answer, list(agent.last_tools)
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Agent推理缓存写入失败: {e}")

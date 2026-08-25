@@ -107,10 +107,36 @@ def get_kb(kb_id: str) -> dict | None:
 
 def create_kb(name: str, description: str = "") -> dict:
     c = store._conn()
+    # 重名校验：同名 KB 各持 UUID 并存会让用户/助手绑定混淆（QA 发现）
+    if c.execute("SELECT 1 FROM knowledge_bases WHERE name = ?", (name,)).fetchone():
+        raise ValueError(f"知识库名称已存在: {name}")
     kb_id = str(uuid.uuid4())
     c.execute(
         "INSERT INTO knowledge_bases(id,name,description,doc_dir,created_at) VALUES(?,?,?,?,?)",
         (kb_id, name, description, f"data/kb_docs/{kb_id}", time.time()))
+    c.commit()
+    return get_kb(kb_id)
+
+
+def rename_kb(kb_id: str, name: str,
+              description: str | None = None) -> dict | None:
+    """重命名/更新知识库描述（QA 契约补齐：原只有创建/删除）。
+
+    - 重名校验（排除自身）→ 重名抛 ValueError（路由层转 409）
+    - kb 不存在返回 None（路由层转 404）；default 内置库由路由层拦截
+    - description 传 None 表示不修改描述
+    """
+    c = store._conn()
+    if not c.execute("SELECT 1 FROM knowledge_bases WHERE id = ?", (kb_id,)).fetchone():
+        return None
+    if c.execute("SELECT 1 FROM knowledge_bases WHERE name = ? AND id != ?",
+                 (name, kb_id)).fetchone():
+        raise ValueError(f"知识库名称已存在: {name}")
+    if description is None:
+        c.execute("UPDATE knowledge_bases SET name=? WHERE id=?", (name, kb_id))
+    else:
+        c.execute("UPDATE knowledge_bases SET name=?, description=? WHERE id=?",
+                  (name, description, kb_id))
     c.commit()
     return get_kb(kb_id)
 

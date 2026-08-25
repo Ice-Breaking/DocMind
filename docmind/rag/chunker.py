@@ -35,7 +35,6 @@ _HEADING_RE = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)  # 零宽断言：切�
 
 # ---------------- 格式提取器 ----------------
 # 解析器资源上限:防恶意构造文件耗尽内存(zip bomb / 超大页)
-_MAX_PDF_PAGES = 2000
 _MAX_DOCX_UNCOMPRESSED = 200 * 1024 * 1024   # 解压后总大小上限 200MB
 
 
@@ -120,7 +119,7 @@ def _ocr_image(path: str) -> str:
     索引重建时不重复调 API；OCR 文本为空视为失败（抛错由建库流程告警跳过）"""
     st = os.stat(path)
     fp = hashlib.sha256(
-        f"{os.path.basename(path)}:{st.st_size}:{int(st.st_mtime)}".encode()
+        f"{os.path.basename(path)}:{st.st_size}:{st.st_mtime_ns}".encode()
     ).hexdigest()[:16]
     os.makedirs(OCR_CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(OCR_CACHE_DIR, fp + ".txt")
@@ -192,17 +191,29 @@ def load_documents(knowledge_dir: str | None = None) -> list[dict]:
 
 
 def _window_split(text: str) -> list[str]:
-    """滑窗切片：优先换行处断开"""
+    """滑窗切片：优先沿句子边界断开。
+
+    原实现只在窗口后半段找换行——密集中文长段落（无空行、句号密集）
+    前半段永远找不到断点而被硬切。现改为全窗搜索句末标点
+    （。！？；\\n 优先级递减），并要求断点不早于窗口 1/4 处（防碎片）。"""
     size, overlap = config.CHUNK_SIZE, config.CHUNK_OVERLAP
+    min_break = max(1, size // 4)
     chunks: list[str] = []
     start = 0
     while start < len(text):
         end = min(start + size, len(text))
         if end < len(text):
-            # 在窗口内找最后一个换行，让切片尽量沿段落边界
-            newline = text.rfind("\n", start + size // 2, end)
-            if newline > start:
-                end = newline + 1
+            window = text[start:end]
+            for punct in ("。", "！", "？", "；", "\n"):
+                pos = window.rfind(punct, min_break - 1)
+                if pos != -1:
+                    end = start + pos + len(punct)
+                    break
+            else:
+                # 无句末标点：退而求其次找空格（英文），再退硬切
+                sp = window.rfind(" ", min_break - 1)
+                if sp > 0:
+                    end = start + sp + 1
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
@@ -291,24 +302,53 @@ def _chunk_structured(text: str) -> list[str]:
     return [c.strip() for c in chunks if c.strip()]
 
 
+def _breadcrumb_prefix(sec: str, stack: list[tuple[int, str]]) -> str:
+    """小节切片的父标题链前缀（breadcrumb）：`###` 子节脱离 `#` 主标题后
+    语义残缺（检索命中「配置步骤」不知道属于哪个产品/主题），伤害召回。
+    返回形如 "[产品手册 > 部署]\\n" 的前缀；无父标题返回空串。
+    预算控制在 120 字符内（超长标题链截断，不挤占正文空间）。"""
+    m = re.match(r"(#{1,4})\s+(.+)", sec)
+    level = len(m.group(1)) if m else 1
+    parents = [t for lv, t in stack if lv < level]
+    if not parents:
+        return ""
+    chain = " > ".join(parents)[-120:]
+    return f"[{chain}]\n"
+
+
 def chunk_text(text: str) -> list[str]:
     """结构化切片：Markdown 先按标题分段；各段内表格整体保留（超大表格行分组
-    重复表头），段落贪心装箱；无结构文本直接结构化装箱（滑窗仅作超大段落兜底）"""
+    重复表头），段落贪心装箱；无结构文本直接结构化装箱（滑窗仅作超大段落兜底）。
+    独立成片的子节携带父标题链前缀（breadcrumb），保住层级上下文。"""
     if _HEADING_RE.search(text):
         sections = [p.strip() for p in _HEADING_RE.split(text) if p.strip()]
         chunks: list[str] = []
         buffer = ""
+        stack: list[tuple[int, str]] = []   # 标题栈：[(层级, 标题文本)]
         for sec in sections:
             if len(sec) > config.CHUNK_SIZE:
                 if buffer:
                     chunks.append(buffer)
                     buffer = ""
-                chunks.extend(_chunk_structured(sec))
+                prefix = _breadcrumb_prefix(sec, stack)
+                pieces = _chunk_structured(sec)
+                if prefix:
+                    # 首片带完整正文（含本节标题），后续片补父标题链防脱离上下文
+                    chunks.extend(pieces[:1])
+                    chunks.extend(f"{prefix}{p}" for p in pieces[1:])
+                else:
+                    chunks.extend(pieces)
             elif len(buffer) + len(sec) + 1 <= config.CHUNK_SIZE:
                 buffer = f"{buffer}\n\n{sec}" if buffer else sec
             else:
                 chunks.append(buffer)
                 buffer = sec
+            # 维护标题栈（本节标题入栈，供后续子节取父链）
+            m = re.match(r"(#{1,4})\s+(.+)", sec)
+            if m:
+                level, title = len(m.group(1)), m.group(2).strip()
+                stack = [(lv, t) for lv, t in stack if lv < level]
+                stack.append((level, title))
         if buffer:
             chunks.append(buffer)
         return [c for c in chunks if c.strip()]
@@ -320,9 +360,30 @@ def chunk_single_file(root: str, name: str) -> list[dict]:
 
     全量建库（load_chunks）与增量索引（VectorStore.rebuild_incremental）
     共用本函数，保证两条路径的切片行为完全一致。
+    PDF 只解析一次：按页提取成功时正文直接由各页文本派生——
+    原实现先跑整篇提取判空、再按页重解析一遍，每个 PDF 建库成本翻倍。
     """
     ext = os.path.splitext(name)[1].lower()
     path = os.path.join(root, name)
+    chunks = []
+    if ext == ".pdf":
+        try:
+            pages = _extract_pdf_pages(path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"PDF 按页切片失败，退回整篇切片 {name}: {e}")
+            pages = None
+        if pages is not None:
+            for page_no, page_text in pages:
+                page_text = (page_text or "")[:_MAX_EXTRACT_CHARS]
+                if not page_text.strip():
+                    continue
+                for piece in chunk_text(page_text):
+                    item = {"source": name, "text": piece}
+                    if page_no:
+                        item["page"] = page_no
+                    chunks.append(item)
+            return chunks
+        # 按页提取失败：退回整篇提取（单次解析兜底），继续走通用路径
     try:
         if ext in _EXTRACTORS:
             text = _EXTRACTORS[ext](path)
@@ -335,22 +396,8 @@ def chunk_single_file(root: str, name: str) -> list[dict]:
     text = (text or "")[:_MAX_EXTRACT_CHARS]
     if not text.strip():
         return []
-    chunks = []
-    if ext == ".pdf":
-        try:
-            pages = _extract_pdf_pages(path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"PDF 按页切片失败，退回整篇切片 {name}: {e}")
-            pages = [(0, text.strip())]
-        for page_no, page_text in pages:
-            for piece in chunk_text(page_text):
-                item = {"source": name, "text": piece}
-                if page_no:
-                    item["page"] = page_no
-                chunks.append(item)
-    else:
-        for piece in chunk_text(text.strip()):
-            chunks.append({"source": name, "text": piece})
+    for piece in chunk_text(text.strip()):
+        chunks.append({"source": name, "text": piece})
     return chunks
 
 

@@ -1,13 +1,15 @@
 """自研会话认证：替代 Gradio 的 token/cookie 机制（去 Gradio 化的一部分）。
 
 设计：
-- token：secrets.token_urlsafe(32)，内存表 + 12h 滑动过期（重启失效，
-  用户重登即可；单进程部署下与原 Gradio 行为一致但完全自控）
+- token：secrets.token_urlsafe(32)，内存 L1 + SQLite 持久化 L2
+  （重启不再全员掉线；单进程部署下完全自控）。DB 只存 sha256 哈希，
+  库泄露不等于会话泄露
 - cookie：dm_session，HttpOnly + SameSite=Lax + Path=/
 - 登录防爆破：用户名 15 分钟 5 次锁定 + IP 15 分钟 20 次锁定
   （IP 经 contextvar 由中间件注入，见 app.py）
 """
 import contextvars
+import hashlib
 import secrets
 import threading
 import time
@@ -19,7 +21,7 @@ from docmind import store
 TOKEN_COOKIE = "dm_session"
 TOKEN_TTL = 12 * 3600
 
-_tokens: dict[str, tuple[str, float]] = {}   # token -> (username, expires)
+_tokens: dict[str, tuple[str, float]] = {}   # token -> (username, expires)（L1 缓存）
 _lock = threading.Lock()
 
 # ---- 登录防爆破（用户名 + IP 双维度，内存态） ----
@@ -42,10 +44,15 @@ def client_ip() -> str:
 
 
 def _recent(key: str, window: float, max_n: int) -> int:
-    """清理并返回窗口内失败次数；达到阈值返回 -1 表示应锁定"""
+    """清理并返回窗口内失败次数；达到阈值返回 -1 表示应锁定。
+    窗口外记录清空后删除字典键——_failures 若只增不删，用户名枚举
+    请求可无限撑大内存"""
     now = time.time()
     fails = [t for t in _failures.get(key, []) if now - t < window]
-    _failures[key] = fails
+    if fails:
+        _failures[key] = fails
+    else:
+        _failures.pop(key, None)
     return -1 if len(fails) >= max_n else len(fails)
 
 
@@ -79,6 +86,23 @@ def clear_failures(username: str) -> None:
 
 
 # ---- token 生命周期 ----
+def _th(token: str) -> str:
+    """token 的 sha256（DB 只存哈希：chat.db 备份/泄露不等于会话泄露）"""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _db_persist(token_hash: str, username: str, expires: float) -> None:
+    try:
+        c = store._conn()
+        c.execute(
+            "INSERT INTO auth_tokens(token_hash, username, expires_at) VALUES(?,?,?) "
+            "ON CONFLICT(token_hash) DO UPDATE SET expires_at = excluded.expires_at",
+            (token_hash, username, expires))
+        c.commit()
+    except Exception:  # noqa: BLE001 - 持久化失败降级纯内存模式（重启需重登）
+        pass
+
+
 def issue(username: str) -> str:
     token = secrets.token_urlsafe(32)
     with _lock:
@@ -86,29 +110,77 @@ def issue(username: str) -> str:
         now = time.time()
         for t in [t for t, (_u, exp) in _tokens.items() if exp < now]:
             _tokens.pop(t, None)
-        _tokens[token] = (username, now + TOKEN_TTL)
+        expires = now + TOKEN_TTL
+        _tokens[token] = (username, expires)
+    _db_persist(_th(token), username, expires)
+    try:
+        c = store._conn()
+        c.execute("DELETE FROM auth_tokens WHERE expires_at < ?", (now,))
+        c.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    # 顺带清扫防爆破字典的过期键（窗口 15 分钟，登录频度下开销可忽略）
+    with _lock:
+        stale = [k for k, ts in _failures.items()
+                 if not ts or now - ts[-1] > _LOCK_SECONDS * 2]
+        for k in stale:
+            _failures.pop(k, None)
     return token
 
 
 def validate(token: str | None) -> str:
     if not token:
         return ""
+    now = time.time()
     with _lock:
         entry = _tokens.get(token)
-        if not entry:
-            return ""
-        username, expires = entry
-        if time.time() > expires:
-            _tokens.pop(token, None)
-            return ""
-        _tokens[token] = (username, time.time() + TOKEN_TTL)   # 滑动续期
-        return username
+        if entry:
+            username, expires = entry
+            if now > expires:
+                _tokens.pop(token, None)
+                return ""
+            # 滑动续期（内存 L1）；剩余不足一半时才同步 DB，
+            # 免去每请求一次写放大
+            new_exp = now + TOKEN_TTL
+            _tokens[token] = (username, new_exp)
+            if expires - now < TOKEN_TTL / 2:
+                _db_persist(_th(token), username, new_exp)
+            return username
+    # L1 未命中（进程重启场景）：回源 DB
+    try:
+        row = store._conn().execute(
+            "SELECT username, expires_at FROM auth_tokens WHERE token_hash = ?",
+            (_th(token),)).fetchone()
+    except Exception:  # noqa: BLE001
+        row = None
+    if not row:
+        return ""
+    if now > row["expires_at"]:
+        try:
+            c = store._conn()
+            c.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (_th(token),))
+            c.commit()
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+    username = row["username"]
+    new_exp = now + TOKEN_TTL
+    with _lock:
+        _tokens[token] = (username, new_exp)
+    _db_persist(_th(token), username, new_exp)
+    return username
 
 
 def revoke(token: str | None) -> None:
     if token:
         with _lock:
             _tokens.pop(token, None)
+        try:
+            c = store._conn()
+            c.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (_th(token),))
+            c.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def revoke_other_sessions(username: str, keep_token: str | None = None) -> int:
@@ -117,11 +189,20 @@ def revoke_other_sessions(username: str, keep_token: str | None = None) -> int:
     12h TTL——丢失设备/被窃会话在改密后依旧可用（二轮回归盲区 J 实测）。
     返回吊销数量"""
     removed = 0
+    keep_hash = _th(keep_token) if keep_token else ""
     with _lock:
         for t in [t for t, (u, _exp) in _tokens.items()
                   if u == username and t != keep_token]:
             _tokens.pop(t, None)
             removed += 1
+    try:
+        c = store._conn()
+        c.execute(
+            "DELETE FROM auth_tokens WHERE username = ? AND token_hash != ?",
+            (username, keep_hash))
+        c.commit()
+    except Exception:  # noqa: BLE001
+        pass
     return removed
 
 

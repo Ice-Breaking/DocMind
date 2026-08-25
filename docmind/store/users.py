@@ -83,17 +83,22 @@ def export_user_data(username: str) -> dict:
 
     sessions = c.execute(
         """SELECT s.id, s.title, s.created_at, s.updated_at,
-                  COUNT(m.id) AS msg_count
-           FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
-           WHERE s.user = ? GROUP BY s.id ORDER BY s.updated_at DESC""",
+                  COALESCE(s.msg_count, 0) AS msg_count
+           FROM sessions s
+           WHERE s.user = ? ORDER BY s.updated_at DESC""",
         (username,)).fetchall()
 
-    all_messages: dict[str, list[dict]] = {}
-    for sess in sessions:
+    # 单查询取全部消息按会话分组（原逐会话循环查询 N+1，会话多时
+    # GDPR 导出慢一个数量级）
+    all_messages: dict[str, list[dict]] = {s["id"]: [] for s in sessions}
+    if sessions:
+        placeholders = ",".join("?" for _ in sessions)
         msgs = c.execute(
-            "SELECT seq, role, content, raw, created_at FROM messages "
-            "WHERE session_id = ? ORDER BY seq", (sess["id"],)).fetchall()
-        all_messages[sess["id"]] = [dict(m) for m in msgs]
+            f"SELECT session_id, seq, role, content, raw, created_at FROM messages "
+            f"WHERE session_id IN ({placeholders}) ORDER BY seq",
+            [s["id"] for s in sessions]).fetchall()
+        for m in msgs:
+            all_messages[m["session_id"]].append(dict(m))
 
     feedback = c.execute(
         """SELECT f.id, f.session_id, f.seq, f.rating, f.created_at

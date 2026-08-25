@@ -132,6 +132,14 @@ def extract_sources(text: str) -> list[str]:
 
 
 def answer_allowed(answer_text: str, username: str) -> bool:
-    """答案引用的受限文档当前用户是否全部有权（语义缓存防跨用户泄露用）"""
-    allowed = allowed_docs(username)
-    return all(src in allowed for src in extract_sources(answer_text))
+    """答案引用的受限文档当前用户是否全部有权（语义缓存防跨用户泄露用）。
+
+    按「是否 restricted」精确判定而非要求来源 ∈ 默认库白名单：
+    非默认知识库（data/kb_docs/<kb_id>/）的文档不在 all_docs() 清单里，
+    但它们不受 ACL 管辖（默认公开）——按白名单判定会把多库答案一律
+    判为无权，语义缓存对多库用户永久失效。"""
+    c = _conn()
+    granted = {r["doc_name"] for r in c.execute(
+        "SELECT doc_name FROM doc_grants WHERE username = ?", (username or "",))}
+    return all(not is_restricted(src) or src in granted
+               for src in extract_sources(answer_text))

@@ -26,6 +26,11 @@ COPY mcp_servers ./mcp_servers
 COPY docs/knowledge ./docs/knowledge
 COPY docs/glossary.md ./docs/glossary.md
 
+# 构建指纹：对镜像内全部 Python 源码取哈希，/health 暴露——
+# 防止「运行容器 ≠ 工作区代码」的部署漂移（QA 实测发现：容器跑着
+# 11 小时前旧镜像而无人察觉）。本地开发（非镜像）回退实时计算
+RUN python -c "import hashlib,glob; h=hashlib.sha256(); [h.update(open(f,'rb').read()) for f in sorted(glob.glob('docmind/**/*.py', recursive=True)+glob.glob('mcp_servers/**/*.py', recursive=True))]; open('/app/.build_fingerprint','w').write(h.hexdigest()[:12])"
+
 # 容器内监听所有网卡（否则宿主机映射访问不到）
 ENV DOCMIND_HOST=0.0.0.0 \
     DOCMIND_PORT=7860 \

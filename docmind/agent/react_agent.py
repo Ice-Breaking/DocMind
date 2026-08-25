@@ -139,7 +139,7 @@ def interpret_terms(question: str) -> str:
         logger.warning(f"术语解读步失败，跳过: {e}")
         return ""
 
-SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天是 {date.today().isoformat()}。
+_SYSTEM_PROMPT_TEMPLATE = """你是 DocMind，一个严谨的知识助理 Agent。今天是 {today}。
 
 【重要】你的训练知识截止时间早于今天，所有时效性问题必须联网核实，严禁凭记忆作答。
 
@@ -180,6 +180,20 @@ SYSTEM_PROMPT = f"""你是 DocMind，一个严谨的知识助理 Agent。今天�
     回答中；工具失败时用一句自然语言简要告知（如”联网搜索暂时不可用，
     以下基于已有资料回答”），然后基于已有信息继续作答，不要渲染失败过程。
 {_GLOSSARY}"""
+
+
+def default_system_prompt() -> str:
+    """默认系统提示词（每次调用取当天日期）。
+
+    不能在 import 时固化日期：长期运行的进程跨天后，「检索时间：[今天日期]」
+    等时效声明会失真；每请求生成保证日期恒为当天。"""
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        today=date.today().isoformat(), _GLOSSARY=_GLOSSARY)
+
+
+# 兼容旧引用（scripts/测试直接 import）：import 时快照；
+# 运行时链路请用 default_system_prompt()
+SYSTEM_PROMPT = default_system_prompt()
 
 
 # OOD 透明度标注守卫：评测发现 LLM 偶发漏标【知识库无相关内容】（依从性非确定），
@@ -253,7 +267,7 @@ class ReActAgent:
     system_prompt: str | None = None
 
     def __post_init__(self):
-        self.system_prompt = self.system_prompt if self.system_prompt else SYSTEM_PROMPT
+        self.system_prompt = self.system_prompt if self.system_prompt else default_system_prompt()
 
     def start_interpret(self, question: str, skip: bool = False):
         """预启动术语解读步（后台线程），返回 Future 供 ask(interpret_future=…)
@@ -276,6 +290,14 @@ class ReActAgent:
         （CLI/评测等调用方）保持原同步行为不变"""
         if not self.history:
             self.history.append({"role": "system", "content": self.system_prompt})
+
+        # 多轮改写预启动：改写与下方意图/时效/术语解读互不依赖（输入均为
+        # 当前问题 + 既有历史，历史在本方法内只读不写），串行会白加
+        # 300-800ms 首响应延迟——与 interpret 同思路预启动，稍后收取
+        rewrite_future = None
+        if not image_data and self._should_rewrite(question):
+            rewrite_future = _INTERPRET_POOL.submit(self._rewrite_if_followup,
+                                                    question)
 
         # 层-1：意图理解 - 判断是否需要最新数据（新增）
         from docmind.intent_understanding import detect_question_intent
@@ -333,7 +355,10 @@ class ReActAgent:
                     self._interpret_step, question)
                 _f_web = _ex.submit(self._force_web_step,
                                     question, timeliness_analysis)
-                interp = _f_interp.result()
+                try:
+                    interp = _f_interp.result(timeout=15)
+                except Exception:  # noqa: BLE001 - 解读排队/超时不阻塞主链路
+                    interp = ""
                 web_note, web_search_failed = _f_web.result()
         else:
             # 图片消息以视觉理解为主，文本术语解读步跳过（省一次 LLM 调用）
@@ -341,7 +366,7 @@ class ReActAgent:
                 interp = ""
             elif interpret_future is not None:
                 try:
-                    interp = interpret_future.result()
+                    interp = interpret_future.result(timeout=15)
                 except Exception:  # noqa: BLE001 - 与 _interpret_step 同容错语义
                     interp = ""
             else:
@@ -365,6 +390,12 @@ class ReActAgent:
                     web_note = ""
 
         note = "；".join(x for x in [intent_note, timeliness_note, ambiguity_hint, gloss, interp, web_note] if x)
+        if web_note:
+            # 抑制重复搜索：时效/梗/术语前置步已拿到联网结果，模型按
+            # SYSTEM_PROMPT 规则 5 仍会再调一次 web_search（同问题最多
+            # 重复 3-4 次计费）——在注记中显式豁免本轮
+            note += ("\n（以上联网结果已获取完毕，无需为同一问题重复调用 "
+                     "web_search；仅当需要明显不同的关键词补充检索时才再次调用）")
         if note:
             self.history.append({
                 "role": "system",
@@ -385,7 +416,13 @@ class ReActAgent:
         # 多轮查询改写：仅多轮且含指代/过短时触发；改写失败静默回退原问题
         # （图片消息不改写：图片无法参与文本改写，且当轮已附视觉内容）
         if not image_data:
-            rewritten = self._rewrite_if_followup(question)
+            if rewrite_future is not None:
+                try:
+                    rewritten = rewrite_future.result(timeout=15)
+                except Exception:  # noqa: BLE001 - 改写失败不阻塞主链路
+                    rewritten = None
+            else:
+                rewritten = self._rewrite_if_followup(question)
             if rewritten:
                 yield AgentStep("rewrite", f"多轮改写：{question} → {rewritten}")
                 question = rewritten
@@ -511,11 +548,12 @@ class ReActAgent:
                 name, args = acc["name"], acc["arguments"]
                 yield AgentStep("tool_call", f"调用工具 `{name}`，参数: {args}")
 
-                # 防死循环：同样的调用连续出现两次则打断
+                # 防死循环：最近 4 步内出现过的同签名调用直接打断。
+                # 只比较上一步抓不住 A→B→A→B 交替循环，会一路烧到
+                # MAX_AGENT_STEPS；滑动窗口覆盖交替与间隔重复
                 sig = f"{name}:{args}"
-                if recent_signatures and recent_signatures[-1] == sig:
+                if sig in recent_signatures[-4:]:
                     result = "[错误] 检测到重复调用同一工具，请换一种方式或直接回答"
-                    recent_signatures.clear()
                 else:
                     recent_signatures.append(sig)
                     with trace.span(f"tool:{name}", input=args) as tctx:
@@ -528,12 +566,18 @@ class ReActAgent:
                     yield AgentStep("guard",
                                     f"{name} 结果注入检测：{guard.summarize(findings)}")
 
-                yield AgentStep("tool_result", f"`{name}` 返回: {result}")
+                # 展示与历史均截断：工具结果全文进 history 会让后续每步
+                # 请求的 token 随步数线性膨胀（8 步轻松翻倍计费）；
+                # OOD/守卫判定已在完整 result 上完成，此处只裁剪透传内容
+                yield AgentStep("tool_result", f"`{name}` 返回: {result[:800]}")
                 self.last_tools.add(name)
+                history_result = (result if len(result) <= 2000 else
+                                  result[:2000] +
+                                  f"\n…[工具结果过长已截断，完整长度 {len(result)} 字符]")
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": acc["id"] or f"call_{i}",
-                    "content": result,
+                    "content": history_result,
                 })
                 # OOD 守卫状态更新（多次调用时任一命中即算命中）
                 if name == "knowledge_search":
@@ -608,14 +652,22 @@ class ReActAgent:
             return web_note, True
         return web_note, False
 
-    def _rewrite_if_followup(self, question: str) -> str | None:
-        """多轮追问消解指代：返回改写后的问题；首轮/自包含/失败均返回 None"""
+    def _should_rewrite(self, question: str) -> bool:
+        """改写触发的本地预判（廉价规则，供预启动决策）：仅多轮且
+        含指代/过短/命中术语表时才值得花一次 LLM 改写"""
         turns = [m for m in self.history if m["role"] in ("user", "assistant")]
         if not turns:
-            return None
+            return False
         q = question.strip()
-        if not (_FOLLOWUP_RE.search(q) or len(q) <= _SHORT_Q_LEN or glossary_note(q)):
+        return bool(_FOLLOWUP_RE.search(q) or len(q) <= _SHORT_Q_LEN
+                    or glossary_note(q))
+
+    def _rewrite_if_followup(self, question: str) -> str | None:
+        """多轮追问消解指代：返回改写后的问题；首轮/自包含/失败均返回 None"""
+        if not self._should_rewrite(question):
             return None
+        turns = [m for m in self.history if m["role"] in ("user", "assistant")]
+        q = question.strip()
         ctx = "\n".join(
             f"{'用户' if m['role'] == 'user' else '助手'}: {str(m.get('content') or '')[:200]}"
             for m in turns[-4:]

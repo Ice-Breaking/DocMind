@@ -4,8 +4,6 @@
 前端轮询 /api/admin/eval/runs 获取状态。
 质量信号：线上反馈（好评/差评/Badcase）+ 证据拒答次数 + 评测 Recall 趋势。
 """
-import json
-import os
 import threading
 import time
 from datetime import datetime
@@ -14,8 +12,8 @@ import fastapi
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
-from docmind import config, semantic_cache, store
-from docmind.admin import _require_admin
+from docmind.deps import RequireAdmin
+from docmind import semantic_cache, store
 
 
 def _seed_default_datasets() -> None:
@@ -106,30 +104,10 @@ def _execute_run(run_id: int) -> None:
 
 
 def _count_refusals(days: int) -> int:
-    """统计最近 N 天的证据拒答事件（trace 中 name=evidence-refusal）"""
-    path = config.TRACE_LOG_PATH
-    if not os.path.exists(path):
-        return 0
-    cutoff = time.time() - days * 86400
-    n = 0
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f.readlines()[-10000:]:
-                try:
-                    d = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if d.get("name") != "evidence-refusal":
-                    continue
-                ts = str(d.get("ts", ""))[:19]
-                try:
-                    if datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp() >= cutoff:
-                        n += 1
-                except ValueError:
-                    continue
-    except OSError:
-        pass
-    return n
+    """统计最近 N 天的证据拒答事件（trace SQLite，name=evidence-refusal）"""
+    from docmind import trace_store
+    return trace_store.count_refusals(days)
+
 
 
 def register_eval_routes(app) -> None:
@@ -137,13 +115,11 @@ def register_eval_routes(app) -> None:
 
     # ================= 评测集 CRUD =================
     @app.get("/api/admin/eval/datasets", include_in_schema=False)
-    async def _datasets(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _datasets(request: fastapi.Request, _user: RequireAdmin):
         return JSONResponse(store.list_eval_datasets())
 
     @app.post("/api/admin/eval/datasets", include_in_schema=False)
-    async def _create_dataset(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _create_dataset(request: fastapi.Request, _user: RequireAdmin):
         body = await request.json()
         name = str(body.get("name") or "").strip()
         if not name:
@@ -155,8 +131,7 @@ def register_eval_routes(app) -> None:
         return JSONResponse(ds, status_code=201)
 
     @app.put("/api/admin/eval/datasets/{ds_id}", include_in_schema=False)
-    async def _update_dataset(ds_id: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _update_dataset(ds_id: int, request: fastapi.Request, _user: RequireAdmin):
         body = await request.json()
         ds = store.update_eval_dataset(
             ds_id,
@@ -168,16 +143,14 @@ def register_eval_routes(app) -> None:
         return JSONResponse(ds)
 
     @app.delete("/api/admin/eval/datasets/{ds_id}", include_in_schema=False)
-    async def _delete_dataset(ds_id: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _delete_dataset(ds_id: int, request: fastapi.Request, _user: RequireAdmin):
         if not store.delete_eval_dataset(ds_id):
             raise HTTPException(status_code=404, detail="评测集不存在")
         return {"ok": True}
 
     # ================= 评测运行 =================
     @app.post("/api/admin/eval/datasets/{ds_id}/run", include_in_schema=False)
-    async def _run_eval(ds_id: int, request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _run_eval(ds_id: int, request: fastapi.Request, user: RequireAdmin):
         if not store.get_eval_dataset(ds_id):
             raise HTTPException(status_code=404, detail="评测集不存在")
         try:
@@ -192,13 +165,11 @@ def register_eval_routes(app) -> None:
         return JSONResponse({"ok": True, "run_id": run_id}, status_code=202)
 
     @app.get("/api/admin/eval/runs", include_in_schema=False)
-    async def _runs(request: fastapi.Request, dataset_id: int = 0, limit: int = 50):
-        _require_admin(request, app)
+    async def _runs(request: fastapi.Request, _user: RequireAdmin, dataset_id: int = 0, limit: int = 50):
         return JSONResponse(store.list_eval_runs(dataset_id or None, limit))
 
     @app.get("/api/admin/eval/runs/{run_id}", include_in_schema=False)
-    async def _run_detail(run_id: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _run_detail(run_id: int, request: fastapi.Request, _user: RequireAdmin):
         run = store.get_eval_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="评测运行不存在")
@@ -206,9 +177,8 @@ def register_eval_routes(app) -> None:
 
     # ================= 质量监控 =================
     @app.get("/api/admin/quality", include_in_schema=False)
-    async def _quality(request: fastapi.Request, days: int = 30):
+    async def _quality(request: fastapi.Request, _user: RequireAdmin, days: int = 30):
         """质量信号聚合：线上反馈 + 拒答次数 + 缓存 + 评测 Recall 趋势"""
-        _require_admin(request, app)
         ov = store.stats_overview()
         try:
             cache = semantic_cache.stats()

@@ -1,11 +1,13 @@
-"""调用链追踪：Langfuse / 本地 JSONL 双后端。
+"""调用链追踪：SQLite（主）/ Langfuse（云）/ 本地 JSONL（降级）。
 
 设计要点（面试可讲）：
 - 配置了 LANGFUSE_PUBLIC_KEY/SECRET_KEY → 上报 Langfuse（云或自托管均可）
-- 未配置 → 自动降级写本地 JSONL（data/trace_log.jsonl），零依赖也能看链路
+- span 默认经 docmind.trace_store 无阻塞入队批量落 SQLite（data/trace.db），
+  管理端聚合走 SQL 索引，不再全量扫描文件
+- trace_store 落库失败自动降级写本地 JSONL（data/trace_log.jsonl）
 - 追踪失败绝不影响主链路：所有上报均包在 try/except 里
 - 用 contextmanager 统一两种后端的 span 生命周期
-- 日志轮转：单文件 50MB，保留最近 5 个归档
+- JSONL 仅作降级通道与迁移源（历史数据由 trace_store 迁移导入）
 
 查看本地日志：python scripts/view_traces.py
 """
@@ -151,4 +153,8 @@ def span(name: str, kind: str = "span", **meta):
     finally:
         record["duration_ms"] = round((time.time() - start) * 1000)
         record.update({k: v for k, v in data.items() if v is not None})
-        _append_jsonl(_mask_record(record))
+        try:
+            from docmind import trace_store
+            trace_store.record(_mask_record(record))
+        except Exception:  # noqa: BLE001 - 入队失败降级 JSONL
+            _append_jsonl(_mask_record(record))

@@ -13,9 +13,8 @@ import fastapi
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
+from docmind.deps import RequireAdmin, RequireUser
 from docmind import store
-from docmind.admin import _require_admin
-from docmind.docs_api import _require_user
 
 _USERNAME_RE = re.compile(r"^[\w.@-]{2,64}$")
 
@@ -27,9 +26,8 @@ _MAX_AVATAR = 2 * 1024 * 1024
 def register_users_routes(app) -> None:
 
     @app.post("/api/me/avatar", include_in_schema=False)
-    async def _set_my_avatar(request: fastapi.Request):
+    async def _set_my_avatar(request: fastapi.Request, user: RequireUser):
         """任何登录用户（含管理员）修改自己的头像"""
-        user = _require_user(request, app)
         body = await request.json()
         avatar = str(body.get("avatar") or "")[:64]
         store.set_user_avatar(user, avatar)
@@ -37,9 +35,8 @@ def register_users_routes(app) -> None:
         return {"ok": True}
 
     @app.post("/api/me/avatar-upload", include_in_schema=False)
-    async def _upload_avatar(request: fastapi.Request, file: fastapi.UploadFile = fastapi.File(...)):
+    async def _upload_avatar(request: fastapi.Request, user: RequireUser, file: fastapi.UploadFile = fastapi.File(...)):
         """上传自定义头像：存为待审核（pending_avatar），审核通过前展示旧头像"""
-        user = _require_user(request, app)
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="空文件")
@@ -60,9 +57,8 @@ def register_users_routes(app) -> None:
         return {"ok": True, "pending": fname}
 
     @app.get("/api/avatar-file/{name}", include_in_schema=False)
-    async def _avatar_file(name: str, request: fastapi.Request):
+    async def _avatar_file(name: str, request: fastapi.Request, _user: RequireUser):
         """头像文件（登录态可读，img 标签同源自动带 cookie）"""
-        _require_user(request, app)
         safe = os.path.basename(name)
         path = os.path.join(AVATAR_DIR, safe)
         if not os.path.isfile(path):
@@ -72,14 +68,13 @@ def register_users_routes(app) -> None:
         return FileResponse(path, media_type=media)
 
     @app.get("/api/admin/avatar-reviews", include_in_schema=False)
-    async def _avatar_reviews(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _avatar_reviews(request: fastapi.Request, _user: RequireAdmin):
         return JSONResponse(store.list_pending_avatars())
 
     @app.post("/api/admin/avatar-review/{username}", include_in_schema=False)
-    async def _avatar_review(username: str, request: fastapi.Request):
+    async def _avatar_review(username: str, request: fastapi.Request,
+                         admin: RequireAdmin):
         """人工审核：approve → 待审核转正为正式头像；reject → 丢弃保留旧头像"""
-        admin = _require_admin(request, app)
         body = await request.json()
         action = str(body.get("action") or "")
         pend, _ts = store.get_pending_avatar(username)
@@ -97,13 +92,11 @@ def register_users_routes(app) -> None:
         return {"ok": True}
 
     @app.get("/api/admin/users", include_in_schema=False)
-    async def _users(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _users(request: fastapi.Request, _user: RequireAdmin):
         return JSONResponse(store.list_users_rich())
 
     @app.post("/api/admin/users", include_in_schema=False)
-    async def _create_user(request: fastapi.Request):
-        actor = _require_admin(request, app)
+    async def _create_user(request: fastapi.Request, actor: RequireAdmin):
         body = await request.json()
         username = str(body.get("username") or "").strip()
         password = str(body.get("password") or "")
@@ -126,8 +119,8 @@ def register_users_routes(app) -> None:
         return JSONResponse({"ok": True, "username": username}, status_code=201)
 
     @app.post("/api/admin/users/{username}/reset-password", include_in_schema=False)
-    async def _reset_pwd(username: str, request: fastapi.Request):
-        actor = _require_admin(request, app)
+    async def _reset_pwd(username: str, request: fastapi.Request,
+                         actor: RequireAdmin):
         body = await request.json()
         ok, msg = store.reset_password(username, str(body.get("new_password") or ""))
         if not ok:
@@ -136,8 +129,8 @@ def register_users_routes(app) -> None:
         return {"ok": True, "message": msg}
 
     @app.post("/api/admin/users/{username}/admin", include_in_schema=False)
-    async def _toggle_admin(username: str, request: fastapi.Request):
-        actor = _require_admin(request, app)
+    async def _toggle_admin(username: str, request: fastapi.Request,
+                            actor: RequireAdmin):
         body = await request.json()
         grant = bool(body.get("is_admin"))
         if not grant and store.is_admin(username) and store.count_admins() <= 1:
@@ -151,8 +144,8 @@ def register_users_routes(app) -> None:
         return {"ok": True}
 
     @app.delete("/api/admin/users/{username}", include_in_schema=False)
-    async def _delete_user(username: str, request: fastapi.Request):
-        actor = _require_admin(request, app)
+    async def _delete_user(username: str, request: fastapi.Request,
+                           actor: RequireAdmin):
         if username == actor:
             raise HTTPException(status_code=400, detail="不能删除当前登录的自己")
         try:

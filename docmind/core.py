@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 # 供管理端点 /api/admin/reindex 触发知识库增量重建
 _shared_state: dict = {}
 
+# 文档时效判定记忆化（knowledge_search 热路径）
+_freshness_cache: dict[tuple, dict] = {}
+
+
+def get_shared(key: str):
+    """共享运行态公开访问器（替代跨模块直挖 _shared_state 私有字典）"""
+    return _shared_state.get(key)
+
 
 def build_shared():
     """构建共享资源（registry、store、连接），启动时调用一次。
@@ -47,7 +55,12 @@ def build_shared():
         if not query:
             return "[错误] 缺少 query 参数"
 
-        # 文档级 ACL：只检索当前用户可见的文档
+        # 文档级 ACL：只检索当前用户可见的文档。
+        # 注意 allowed_docs 只覆盖默认库（docs/knowledge，ACL 管理页的唯一对象）；
+        # 非默认库（data/kb_docs/<kb_id>/）不受 ACL 管辖（默认公开），
+        # 该白名单只应作用于默认库检索——传给多库路径会把非默认库候选
+        # 全部误滤掉（文件名不在白名单 → 恒空），多库检索在有 ACL 记录
+        # 的部署下必然返回空
         allowed = acl.allowed_docs(acl.get_current_user())
 
         # 多 KB 路由 + 查询向量复用（语义缓存已 embed 过原始问题，
@@ -64,7 +77,6 @@ def build_shared():
         if kb_ids:
             from docmind.rag.kb_registry import get_registry
             hits = get_registry().search_multi(kb_ids, query, top_k=config.TOP_K,
-                                               allowed_sources=allowed,
                                                query_vec=q_vec)
         else:
             hits = retriever.search(query, top_k=config.TOP_K, rerank=True,
@@ -76,14 +88,23 @@ def build_shared():
                         "当前为严格模式：请明确告知用户无法回答，禁止用通识编造。")
             return "知识库中没有找到与问题相关的内容（未通过相关性阈值）。"
 
-        # 新增：文档时效性检测
+        # 新增：文档时效性检测（结果记忆化：同一文档同一内容前缀的
+        # 判定在进程内不变——年份正则+类型分类是热路径纯 CPU 重复劳动；
+        # 上限 1024 条防膨胀，超限整体清空）
         from docmind.doc_freshness import check_document_freshness
 
+        def _freshness(h) -> dict:
+            key = (h.source, hash(h.text[:200]))
+            hit = _freshness_cache.get(key)
+            if hit is None:
+                hit = check_document_freshness(h.source, h.text[:200])
+                if len(_freshness_cache) >= 1024:
+                    _freshness_cache.clear()
+                _freshness_cache[key] = hit
+            return hit
+
         # 检查最旧和最新文档的年份
-        freshness_checks = []
-        for h in hits:
-            freshness = check_document_freshness(h.source, h.text[:200])
-            freshness_checks.append(freshness)
+        freshness_checks = [_freshness(h) for h in hits]
 
         # 找出最严重的过期风险
         max_risk = 'none'
@@ -148,6 +169,14 @@ def build_shared():
     )
 
     # ---- 联网搜索：多引擎并发降级 + 结果缓存 + 超时优化 ----
+    def _format_web_results(results: list[dict]) -> str:
+        """搜索结果统一格式化（缓存命中/实时结果共用一份实现）"""
+        lines = []
+        for i, r in enumerate(results, 1):
+            date = f" ({str(r.get('date', ''))[:10]})" if r.get("date") else ""
+            lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
+        return "\n\n".join(lines)
+
     def _search_tavily(query: str) -> list[dict]:
         """Tavily：专为 AI Agent 设计的搜索 API，新鲜度/摘要质量最佳；需 TAVILY_API_KEY"""
         import requests
@@ -234,11 +263,7 @@ def build_shared():
         from docmind import web_search_cache
         cached = web_search_cache.get(query)
         if cached:
-            lines = []
-            for i, r in enumerate(cached, 1):
-                date = f" ({r['date'][:10]})" if r.get("date") else ""
-                lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
-            return "\n\n".join(lines)
+            return _format_web_results(cached)
 
         # 2) 构建引擎列表：优先级 Tavily > Serper > Bing > SearXNG
         engines = []
@@ -289,11 +314,7 @@ def build_shared():
                     "暂时不可用，基于知识库与已有知识继续作答；"
                     "严禁向用户复述错误码、JSON 或任何错误细节。")
 
-        lines = []
-        for i, r in enumerate(results, 1):
-            date = f" ({str(r['date'])[:10]})" if r.get("date") else ""
-            lines.append(f"[{i}] {r['title']}{date}\n{r['body']}\n链接: {r['href']}")
-        return "\n\n".join(lines)
+        return _format_web_results(results)
 
     registry.register(
         name="web_search",

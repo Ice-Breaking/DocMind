@@ -4,27 +4,19 @@
 须先修改密码的用户返回 403（code=MUST_CHANGE_PWD）。
 数据源：store（assistants / knowledge_bases / sessions / 统计）+ semantic_cache 命中率。
 """
+import logging
 import os
 
 import fastapi
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from docmind.deps import RequireUser
+from docmind.api_utils import server_error
 from docmind import semantic_cache, store
 
 
 # ---- 当前用户解析：复用 Gradio 登录 cookie（与 admin.py 保持一致） ----
-def _current_user(request, app) -> str:
-    """自研 token 会话(web_auth),与 app.py 登录链路一致"""
-    from docmind import web_auth
-    return web_auth.current_user(request)
-
-def _require_user(request, app) -> str:
-    """校验登录态；被要求强制改密的用户返回 403（统一委托 web_auth.require_user）"""
-    from docmind import web_auth
-    return web_auth.require_user(request)
-
-
 async def _json_body(request) -> dict:
     try:
         body = await request.json()
@@ -73,28 +65,25 @@ def register_assistant_routes(app) -> None:
 
     # ================= 个人看板 =================
     @app.get("/api/dashboard", include_in_schema=False)
-    async def _dashboard(request: fastapi.Request):
-        user = _require_user(request, app)
+    async def _dashboard(request: fastapi.Request, user: RequireUser):
         try:
             data = store.stats_for_user(user)
             data["cache_hit_rate"] = _cache_hit_rate()
             data["recent_sessions"] = store.list_sessions(user, limit=5)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"看板数据加载失败: {e}")
+            raise server_error("看板数据加载失败", e)
         return JSONResponse(data)
 
     # ================= 助手 CRUD =================
     @app.get("/api/assistants", include_in_schema=False)
-    async def _list_assistants(request: fastapi.Request):
-        _require_user(request, app)
+    async def _list_assistants(request: fastapi.Request, _user: RequireUser):
         try:
             return JSONResponse(store.list_assistants())
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"助手列表加载失败: {e}")
+            raise server_error("助手列表加载失败", e)
 
     @app.post("/api/assistants", include_in_schema=False)
-    async def _create_assistant(request: fastapi.Request):
-        user = _require_user(request, app)
+    async def _create_assistant(request: fastapi.Request, user: RequireUser):
         body = await _json_body(request)
         name = str(body.get("name") or "").strip()
         if not name:
@@ -111,21 +100,19 @@ def register_assistant_routes(app) -> None:
                 system_prompt=str(body.get("system_prompt") or ""),
                 kb_ids=kb_ids, model_config=model_config)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"助手创建失败: {e}")
+            raise server_error("助手创建失败", e)
         store.record_audit(user, "assistant.create", f"assistant:{a['id']}", name)
         return JSONResponse(a, status_code=201)
 
     @app.get("/api/assistants/{aid}", include_in_schema=False)
-    async def _get_assistant(aid: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _get_assistant(aid: str, request: fastapi.Request, _user: RequireUser):
         a = store.get_assistant(aid)
         if not a:
             raise HTTPException(status_code=404, detail="助手不存在")
         return JSONResponse(a)
 
     @app.put("/api/assistants/{aid}", include_in_schema=False)
-    async def _update_assistant(aid: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _update_assistant(aid: str, request: fastapi.Request, _user: RequireUser):
         if not store.get_assistant(aid):
             raise HTTPException(status_code=404, detail="助手不存在")
         body = await _json_body(request)
@@ -143,56 +130,78 @@ def register_assistant_routes(app) -> None:
         try:
             a = store.update_assistant(aid, **fields)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"助手更新失败: {e}")
+            raise server_error("助手更新失败", e)
         if not a:
             raise HTTPException(status_code=400, detail="更新参数非法")
         return JSONResponse(a)
 
     @app.delete("/api/assistants/{aid}", include_in_schema=False)
-    async def _delete_assistant(aid: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _delete_assistant(aid: str, request: fastapi.Request, user: RequireUser):
         if aid == "default":
             raise HTTPException(status_code=400, detail="默认助手不可删除")
         try:
             ok = store.delete_assistant(aid)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"助手删除失败: {e}")
+            raise server_error("助手删除失败", e)
         if not ok:
             raise HTTPException(status_code=404, detail="助手不存在")
-        user = _current_user(request, app)
         store.record_audit(user, "assistant.delete", f"assistant:{aid}")
         return {"ok": True}
 
     # ================= 知识库 CRUD =================
     @app.get("/api/kbs", include_in_schema=False)
-    async def _list_kbs(request: fastapi.Request):
-        _require_user(request, app)
+    async def _list_kbs(request: fastapi.Request, _user: RequireUser):
         try:
             kbs = store.list_kbs()
             for kb in kbs:
                 kb.update(_kb_doc_stats(kb))
             return JSONResponse(kbs)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"知识库列表加载失败: {e}")
+            raise server_error("知识库列表加载失败", e)
 
     @app.post("/api/kbs", include_in_schema=False)
-    async def _create_kb(request: fastapi.Request):
-        _require_user(request, app)
+    async def _create_kb(request: fastapi.Request, user: RequireUser):
         body = await _json_body(request)
         name = str(body.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name 必填")
         try:
             kb = store.create_kb(name, str(body.get("description") or ""))
+        except ValueError as e:
+            # 重名：409 冲突（QA 发现——原先同名 KB 可重复创建）
+            raise HTTPException(status_code=409, detail=str(e))
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"知识库创建失败: {e}")
-        user = _current_user(request, app)
+            raise server_error("知识库创建失败", e)
         store.record_audit(user, "kb.create", f"kb:{kb['id']}", name)
         return JSONResponse(kb, status_code=201)
 
+    @app.put("/api/kbs/{kb_id}", include_in_schema=False)
+    async def _update_kb(kb_id: str, request: fastapi.Request, user: RequireUser):
+        """重命名/更新知识库描述（QA 契约补齐）。
+
+        default 内置库不可改名；重名 409；不存在 404。"""
+        if kb_id == "default":
+            raise HTTPException(status_code=400, detail="默认知识库不可重命名")
+        body = await _json_body(request)
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name 必填")
+        description = body.get("description")
+        if description is not None:
+            description = str(description)
+        try:
+            kb = store.rename_kb(kb_id, name, description)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except Exception as e:  # noqa: BLE001
+            raise server_error("知识库更新失败", e)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        store.record_audit(user, "kb.rename", f"kb:{kb_id}", name)
+        return kb
+
     @app.delete("/api/kbs/{kb_id}", include_in_schema=False)
-    async def _delete_kb(kb_id: str, request: fastapi.Request):
-        _require_user(request, app)
+    async def _delete_kb(kb_id: str, request: fastapi.Request, user: RequireUser):
         if kb_id == "default":
             raise HTTPException(status_code=400, detail="默认知识库不可删除")
         if not store.get_kb(kb_id):
@@ -202,29 +211,26 @@ def register_assistant_routes(app) -> None:
         try:
             store.delete_kb(kb_id)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"知识库删除失败: {e}")
+            raise server_error("知识库删除失败", e)
         try:
             from docmind.rag.kb_registry import get_registry
             get_registry().invalidate(kb_id)
         except Exception:  # noqa: BLE001
             pass
-        user = _current_user(request, app)
         store.record_audit(user, "kb.delete", f"kb:{kb_id}")
         return {"ok": True}
 
     # ================= 入库任务 =================
     @app.get("/api/kbs/{kb_id}/tasks", include_in_schema=False)
-    async def _kb_tasks(kb_id: str, request: fastapi.Request, limit: int = 50):
-        _require_user(request, app)
+    async def _kb_tasks(kb_id: str, request: fastapi.Request, _user: RequireUser, limit: int = 50):
         if not store.get_kb(kb_id):
             raise HTTPException(status_code=404, detail="知识库不存在")
         return JSONResponse(store.list_ingest_tasks(kb_id, max(1, min(limit, 200))))
 
     # ================= 重建索引（异步 + 任务追踪） =================
     @app.post("/api/kbs/{kb_id}/reindex", include_in_schema=False)
-    async def _reindex_kb(kb_id: str, request: fastapi.Request):
+    async def _reindex_kb(kb_id: str, request: fastapi.Request, user: RequireUser):
         """异步重建：立即返回 task_id，后台线程执行，进度查 /api/kbs/{kb_id}/tasks"""
-        user = _require_user(request, app)
         if not store.get_kb(kb_id):
             raise HTTPException(status_code=404, detail="知识库不存在")
         task_id = store.create_ingest_task(kb_id, "*", "reindex", "running",
@@ -276,8 +282,10 @@ def _do_reindex(kb_id: str, task_id: int) -> None:
             n1 = semantic_cache.clear()
             n2 = agent_reasoning_cache.clear()
             if n1 or n2:
-                print(f"[reindex] 知识库变更，已清空答案缓存：语义 {n1} 条 / 推理 {n2} 条")
+                logging.getLogger(__name__).info(
+                f"知识库变更，已清空答案缓存：语义 {n1} 条 / 推理 {n2} 条")
         except Exception as e:  # noqa: BLE001 - 缓存清理失败不影响重建结果
-            print(f"[reindex] 答案缓存清理失败（不影响索引）: {e}")
+            logging.getLogger(__name__).warning(
+                f"答案缓存清理失败（不影响索引）: {e}")
     except Exception as e:  # noqa: BLE001 - 后台线程异常收敛为任务失败状态
         store.update_ingest_task(task_id, "error", str(e)[:200])

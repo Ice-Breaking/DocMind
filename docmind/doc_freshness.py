@@ -122,10 +122,12 @@ def check_document_freshness(source_file: str, content_preview: str = '') -> dic
     }
 
     if doc_year is None:
-        # 无法判断年份，保守处理
-        result['expire_risk'] = 'medium'
-        result['warning_message'] = '⚠️ 文档未标注年份，无法判断时效性'
-        result['should_web_search'] = (doc_type in ['policy', 'data'])
+        # 无法判断年份：降为 low 提示（原 medium 会把大量正常文档标成
+        # 过期，诱导多余的 web_search 调用——延迟与 token 成本双输）。
+        # 强联网建议仅保留给政策/数据类（这类内容时效敏感度确实高）
+        result['expire_risk'] = 'low'
+        result['warning_message'] = '💡 文档未标注年份，无法判断时效性'
+        result['should_web_search'] = False
         return result
 
     age_years = current_year - doc_year

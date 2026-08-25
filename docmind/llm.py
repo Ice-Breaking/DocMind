@@ -1,5 +1,9 @@
 """LLM 客户端封装：OpenAI 兼容模式对接百炼（DashScope）"""
+import logging
+import os
+import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from openai import (
     APIConnectionError,
@@ -14,6 +18,8 @@ from docmind import config
 from docmind import trace
 from docmind.metrics import ERRORS, LLM_CALLS, LLM_LATENCY, LLM_TOKENS
 
+logger = logging.getLogger(__name__)
+
 
 def _record_llm_metrics(status: str, start: float, resp=None) -> None:
     """记录 LLM 调用指标；任何异常静默吞掉，绝不影响主链路"""
@@ -26,60 +32,85 @@ def _record_llm_metrics(status: str, start: float, resp=None) -> None:
     except Exception:  # noqa: BLE001
         pass
 
-_client: OpenAI | None = None
+_client: OpenAI | None = None  # 兼容旧引用（部分测试/脚本 import 该符号）
 
 # 可重试的瞬时错误（限流/超时/服务端抖动）
 _RETRYABLE = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
 _MAX_RETRIES = 3
 
 
+_active_cfg_cache: dict[str, tuple[float, tuple[str, str, str]]] = {}
+_ACTIVE_CFG_TTL = 30.0   # 秒；模型管理页切换后最迟 30s 生效（切换时主动失效）
+
+
+def invalidate_active_cfg() -> None:
+    """主动失效模型配置缓存（模型管理页 set_active_model 后调用），
+    切换立即生效而不必等 TTL 过期"""
+    _active_cfg_cache.clear()
+
+
 def _active_cfg(kind: str) -> tuple[str, str, str]:
     """在线模型配置优先：返回 (model_name, base_url, api_key)；
-    未配置生效模型时回退 .env。kind: llm / embedding"""
+    未配置生效模型时回退 .env。kind: llm / embedding
+
+    带 30s TTL 缓存：ReAct 每步循环都会触发本查询，原先每次都打
+    一遍 SQLite（get_active_model），纯浪费。"""
+    cached = _active_cfg_cache.get(kind)
+    if cached and time.time() - cached[0] < _ACTIVE_CFG_TTL:
+        return cached[1]
     try:
         from docmind import store as _store
         m = _store.get_active_model(kind)
         if m:
-            return (m["model_name"],
-                    m.get("base_url") or config.DASHSCOPE_BASE_URL,
-                    m.get("api_key") or config.DASHSCOPE_API_KEY)
+            cfg = (m["model_name"],
+                   m.get("base_url") or config.DASHSCOPE_BASE_URL,
+                   m.get("api_key") or config.DASHSCOPE_API_KEY)
+            _active_cfg_cache[kind] = (time.time(), cfg)
+            return cfg
     except Exception:  # noqa: BLE001 - 库未就绪/异常时回退 env 配置
         pass
     model = config.EMBEDDING_MODEL if kind == "embedding" else config.CHAT_MODEL
-    return model, config.DASHSCOPE_BASE_URL, config.DASHSCOPE_API_KEY
+    cfg = (model, config.DASHSCOPE_BASE_URL, config.DASHSCOPE_API_KEY)
+    _active_cfg_cache[kind] = (time.time(), cfg)
+    return cfg
 
 
 _clients: dict[tuple, OpenAI] = {}
 
 
-def get_client() -> OpenAI:
-    """获取 OpenAI 客户端：按在线配置的 (base_url, key) 缓存多实例，
-    模型管理页切换供应商后立即生效；无在线配置时用默认单例"""
-    global _client
-    model_name, base_url, api_key = _active_cfg("llm")
-    cache_key = (base_url, api_key)
-    cli = _clients.get(cache_key)
+def _get_or_create_client(base_url: str, api_key: str, timeout: float = 60.0) -> OpenAI:
+    cli = _clients.get((base_url, api_key))
     if cli is None:
         if not api_key:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，请在 .env 中填写")
-        cli = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=60.0,  # 避免请求挂起导致界面卡在“思考中”
-        )
-        _clients[cache_key] = cli
+        # max_retries=0：SDK 自带 2 次重试与 _with_retry 叠加会把最坏情况
+        # 放大到 3×2=6 次同请求重试，限流场景反而加重上游压力——
+        # 退避策略统一收敛到 _with_retry 一处
+        cli = OpenAI(api_key=api_key, base_url=base_url,
+                     timeout=timeout, max_retries=0)
+        _clients[(base_url, api_key)] = cli
     return cli
 
 
+def get_client() -> OpenAI:
+    """获取 OpenAI 客户端：按在线配置的 (base_url, key) 缓存多实例，
+    模型管理页切换供应商后立即生效；无在线配置时用默认单例"""
+    _model, base_url, api_key = _active_cfg("llm")
+    return _get_or_create_client(base_url, api_key)
+
+
 def _with_retry(fn):
-    """瞬时错误退避重试，避免偶发限流/超时导致回答中断"""
+    """瞬时错误指数退避 + 抖动重试，避免偶发限流/超时导致回答中断。
+
+    固定间隔退避在多客户端同时被限流时会造成同步重试风暴
+    （thundering herd），jitter 打散重试时刻。"""
     for attempt in range(_MAX_RETRIES):
         try:
             return fn()
         except _RETRYABLE:
             if attempt == _MAX_RETRIES - 1:
                 raise
-            time.sleep(2 * (attempt + 1))
+            time.sleep(2 * (attempt + 1) + random.uniform(0, 1))
 
 
 def _brief_messages(messages: list[dict]) -> list[dict]:
@@ -219,20 +250,25 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交。
-    注意：切换在线 Embedding 模型只影响新增切片，存量索引维度不变——
-    换模型后必须全量重建知识库索引。"""
+    """文本向量化（RAG 用）。百炼单次最多 10 条，自动分批提交；
+    批间受控并行（4 路）——千级切片首建原先要数百次串行往返，
+    纯 RTT 叠加。注意：切换在线 Embedding 模型只影响新增切片，
+    存量索引维度不变——换模型后必须全量重建知识库索引。"""
     _model, _base, _key = _active_cfg("embedding")
-    cli = _clients.get((_base, _key))
-    if cli is None:
-        cli = OpenAI(api_key=_key, base_url=_base, timeout=60.0)
-        _clients[(_base, _key)] = cli
-    batch_size = 10
-    results: list[list[float]] = []
-    for i in range(0, len(texts), batch_size):
-        resp = _with_retry(lambda chunk=texts[i:i + batch_size]: cli.embeddings.create(
-            model=_model,
-            input=chunk,
-        ))
-        results.extend(d.embedding for d in resp.data)
-    return results
+    cli = _get_or_create_client(_base, _key)
+    batch_size = int(os.getenv("DOCMIND_EMBED_BATCH_SIZE", "10"))
+    if len(texts) <= batch_size:
+        resp = _with_retry(lambda: cli.embeddings.create(
+            model=_model, input=texts))
+        return [d.embedding for d in resp.data]
+
+    batches = [texts[i:i + batch_size] for i in range(0, len(texts), batch_size)]
+
+    def _embed_batch(chunk: list[str]) -> list[list[float]]:
+        resp = _with_retry(lambda: cli.embeddings.create(model=_model, input=chunk))
+        return [d.embedding for d in resp.data]
+
+    # 保序：executor.map 按提交顺序返回结果
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results: list[list[list[float]]] = list(ex.map(_embed_batch, batches))
+    return [vec for batch in results for vec in batch]

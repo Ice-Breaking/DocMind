@@ -12,8 +12,9 @@ import fastapi
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from docmind.deps import RequireAdmin
+from docmind.api_utils import server_error
 from docmind import store
-from docmind.admin import _require_admin
 
 
 # 开放 API 每 key 限流：内存滑动窗口（单进程部署足够；
@@ -46,13 +47,11 @@ def register_platform_routes(app) -> None:
 
     # ================= API Key 管理（管理端） =================
     @app.get("/api/admin/api-keys", include_in_schema=False)
-    async def _list_keys(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _list_keys(request: fastapi.Request, _user: RequireAdmin):
         return JSONResponse(store.list_api_keys())
 
     @app.post("/api/admin/api-keys", include_in_schema=False)
-    async def _create_key(request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _create_key(request: fastapi.Request, user: RequireAdmin):
         body = await request.json()
         name = str(body.get("name") or "").strip()
         if not name:
@@ -71,8 +70,7 @@ def register_platform_routes(app) -> None:
         return JSONResponse(key, status_code=201)
 
     @app.delete("/api/admin/api-keys/{key_id}", include_in_schema=False)
-    async def _revoke_key(key_id: int, request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _revoke_key(key_id: int, request: fastapi.Request, user: RequireAdmin):
         if not store.revoke_api_key(key_id):
             raise HTTPException(status_code=404, detail="密钥不存在或已吊销")
         store.record_audit(user, "apikey.revoke", f"key#{key_id}",
@@ -80,9 +78,8 @@ def register_platform_routes(app) -> None:
         return {"ok": True}
 
     @app.post("/api/admin/api-keys/{key_id}/rotate", include_in_schema=False)
-    async def _rotate_key(key_id: int, request: fastapi.Request):
+    async def _rotate_key(key_id: int, request: fastapi.Request, user: RequireAdmin):
         """轮换：吊销旧密钥并以相同名称/范围签发新密钥（明文仅本次返回）"""
-        user = _require_admin(request, app)
         rows = [k for k in store.list_api_keys() if k["id"] == key_id]
         if not rows:
             raise HTTPException(status_code=404, detail="密钥不存在")
@@ -144,7 +141,7 @@ def register_platform_routes(app) -> None:
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"检索失败: {e}")
+            raise server_error("检索失败", e)
 
         try:
             store.touch_api_key(key_row["id"])
@@ -220,7 +217,7 @@ def register_platform_routes(app) -> None:
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"问答失败: {e}")
+            raise server_error("问答失败", e)
         finally:
             if kb_tok is not None:
                 current_kb_ids.reset(kb_tok)
@@ -234,13 +231,11 @@ def register_platform_routes(app) -> None:
 
     # ================= 模型在线配置（管理端） =================
     @app.get("/api/admin/models", include_in_schema=False)
-    async def _list_models(request: fastapi.Request, kind: str = ""):
-        _require_admin(request, app)
+    async def _list_models(request: fastapi.Request, _user: RequireAdmin, kind: str = ""):
         return JSONResponse(store.list_models(kind or None))
 
     @app.post("/api/admin/models", include_in_schema=False)
-    async def _create_model(request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _create_model(request: fastapi.Request, user: RequireAdmin):
         body = await request.json()
         kind = body.get("kind")
         if kind not in ("llm", "embedding", "rerank"):
@@ -256,8 +251,7 @@ def register_platform_routes(app) -> None:
         return JSONResponse({"ok": True, "id": m["id"]}, status_code=201)
 
     @app.put("/api/admin/models/{mid}", include_in_schema=False)
-    async def _update_model(mid: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _update_model(mid: int, request: fastapi.Request, _user: RequireAdmin):
         if not store.get_model(mid):
             raise HTTPException(status_code=404, detail="模型不存在")
         body = await request.json()
@@ -270,29 +264,27 @@ def register_platform_routes(app) -> None:
         return {"ok": True}
 
     @app.delete("/api/admin/models/{mid}", include_in_schema=False)
-    async def _delete_model(mid: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _delete_model(mid: int, request: fastapi.Request, user: RequireAdmin):
         if not store.delete_model(mid):
             raise HTTPException(status_code=404, detail="模型不存在")
-        user = _require_admin(request, app)
         store.record_audit(user, "model.delete", f"model#{mid}")
         return {"ok": True}
 
     @app.post("/api/admin/models/{mid}/activate", include_in_schema=False)
-    async def _activate_model(mid: int, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _activate_model(mid: int, request: fastapi.Request, user: RequireAdmin):
         if not store.set_active_model(mid):
             raise HTTPException(status_code=404, detail="模型不存在")
-        user = _require_admin(request, app)
+        # 主动失效模型配置 TTL 缓存：切换立即生效（不必等 30s 过期）
+        from docmind.llm import invalidate_active_cfg
+        invalidate_active_cfg()
         m = store.get_model(mid) or {}
         store.record_audit(user, "model.activate", f"model#{mid}",
                            f"{m.get('kind')}:{m.get('model_name')}")
         return {"ok": True}
 
     @app.post("/api/admin/models/{mid}/test", include_in_schema=False)
-    async def _test_model(mid: int, request: fastapi.Request):
+    async def _test_model(mid: int, request: fastapi.Request, _user: RequireAdmin):
         """连通性测试：llm 发一条最小对话；embedding 向量化一个词；rerank 调精排 API"""
-        _require_admin(request, app)
         m = store.get_model(mid)
         if not m:
             raise HTTPException(status_code=404, detail="模型不存在")

@@ -8,76 +8,40 @@
 同一 dedupe_key 已有 open 告警时不重复创建（避免刷屏）。
 评估由后台线程每 ALERT_INTERVAL_MIN 分钟执行一次，也可手动触发。
 """
-import json
 import logging
-import os
 import threading
 import time
-from collections import defaultdict
-from datetime import datetime
 
+import anyio
 import fastapi
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from docmind.deps import RequireAdmin
 from docmind import config, store
-from docmind.admin import MODEL_PRICING, _DEFAULT_PRICING, _require_admin
+from docmind.admin import MODEL_PRICING, _DEFAULT_PRICING
 
 logger = logging.getLogger(__name__)
 
 
 # ================= trace 聚合工具 =================
 
-def _iter_traces(max_lines: int = 8000):
-    path = config.TRACE_LOG_PATH
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()[-max_lines:]
-    except OSError:
-        return
-    for line in lines:
-        try:
-            yield json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-
-def _ts_epoch(d: dict) -> float | None:
-    try:
-        return datetime.strptime(str(d.get("ts", ""))[:19],
-                                 "%Y-%m-%d %H:%M:%S").timestamp()
-    except ValueError:
-        return None
-
-
 def _cost_last_hours(hours: float) -> float:
-    cutoff = time.time() - hours * 3600
+    """最近 N 小时 LLM 成本（SQL 按模型聚合，价目 Python 侧套用；
+    原实现每轮评估全量扫描 JSONL 8000 行）"""
+    from docmind import trace_store
+    per_model = trace_store.cost_last_hours(hours)
     total = 0.0
-    for d in _iter_traces():
-        if d.get("kind") != "generation":
-            continue
-        ts = _ts_epoch(d)
-        if ts is None or ts < cutoff:
-            continue
-        usage = d.get("usage") or {}
-        pricing = MODEL_PRICING.get(d.get("model", ""), _DEFAULT_PRICING)
-        total += ((usage.get("input", 0) / 1000.0) * pricing[0]
-                  + (usage.get("output", 0) / 1000.0) * pricing[1])
+    for model, (inp, outp) in per_model.items():
+        pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
+        total += ((inp / 1000.0) * pricing[0]
+                  + (outp / 1000.0) * pricing[1])
     return total
 
 
 def _errors_last_hours(hours: float) -> int:
-    cutoff = time.time() - hours * 3600
-    n = 0
-    for d in _iter_traces():
-        if d.get("status") != "error":
-            continue
-        ts = _ts_epoch(d)
-        if ts is not None and ts >= cutoff:
-            n += 1
-    return n
+    from docmind import trace_store
+    return trace_store.errors_last_hours(hours)
 
 
 # ================= 规则引擎 =================
@@ -183,13 +147,51 @@ def evaluate_all() -> list[dict]:
 _loop_started = False
 
 
+def _daily_cache_cleanup() -> None:
+    """每日一次：清理语义/推理缓存中过期未命中的条目。
+
+    cleanup 函数原先全仓无调用点（死代码）→ cache.db 只进不出无限膨胀；
+    挂进告警周期循环复用其唤醒时机，无需新增调度线程。"""
+    import threading as _th
+
+    def _run():
+        try:
+            from docmind import semantic_cache
+            n1 = semantic_cache.cleanup_stale_entries(days=7)
+            n2 = 0
+            try:
+                from docmind import agent_reasoning_cache
+                if hasattr(agent_reasoning_cache, "cleanup_expired"):
+                    n2 = agent_reasoning_cache.cleanup_expired()
+            except Exception:  # noqa: BLE001
+                pass
+            if n1 or n2:
+                logger.info(f"周期缓存清理：语义 {n1} 条 / 推理 {n2} 条")
+            try:
+                from docmind import trace_store
+                trace_store.retention(days=90)   # 保留策略：90 天过期
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001 - 清理失败不影响告警主流程
+            logger.warning(f"周期缓存清理失败: {e}")
+
+    _th.Thread(target=_run, daemon=True, name="cache-cleanup").start()
+
+
 def _loop():
+    # 启动即先评估一次：原先先 sleep 再评估，告警要等 10 分钟才首轮检查；
+    # 顺带在首轮触发缓存周期清理
+    last_cleanup_day = ""
     while True:
-        time.sleep(max(1, config.ALERT_INTERVAL_MIN) * 60)
         try:
             evaluate_all()
         except Exception as e:  # noqa: BLE001 - 后台评估绝不抛出
             logger.warning(f"告警周期评估失败: {e}")
+        today = time.strftime("%Y-%m-%d")
+        if today != last_cleanup_day:
+            last_cleanup_day = today
+            _daily_cache_cleanup()
+        time.sleep(max(1, config.ALERT_INTERVAL_MIN) * 60)
 
 
 def start_loop() -> None:
@@ -206,26 +208,17 @@ def start_loop() -> None:
 def sla_stats(days: int = 7) -> dict:
     """SLA 口径：generation 调用的可用率（status=ok 占比）与耗时分位数，
     并按天给出最近 N 天趋势"""
-    cutoff = time.time() - days * 86400
+    from docmind import trace_store
     total = ok = 0
     durations: list[float] = []
-    daily: dict[str, dict] = defaultdict(lambda: {"total": 0, "ok": 0, "durs": []})
-    for d in _iter_traces():
-        if d.get("kind") != "generation":
-            continue
-        ts = _ts_epoch(d)
-        if ts is None or ts < cutoff:
-            continue
-        day = str(d.get("ts", ""))[:10]
-        dur = d.get("duration_ms")
-        total += 1
-        daily[day]["total"] += 1
-        if d.get("status") == "ok":
-            ok += 1
-            daily[day]["ok"] += 1
-        if isinstance(dur, (int, float)):
-            durations.append(float(dur))
-            daily[day]["durs"].append(float(dur))
+    raw = trace_store.sla_stats(days)
+    for day in sorted(raw.keys()):
+        v = raw[day]
+        total += v["total"]
+        ok += v["ok"]
+        durations.extend(v["durs"])
+    daily = {day: {"total": v["total"], "ok": v["ok"], "durs": v["durs"]}
+             for day, v in raw.items()}
 
     def _pct(arr: list[float], p: float) -> float:
         if not arr:
@@ -258,37 +251,35 @@ def sla_stats(days: int = 7) -> dict:
 def register_alert_routes(app) -> None:
 
     @app.get("/api/admin/alerts", include_in_schema=False)
-    async def _list_alerts(request: fastapi.Request, status: str = "",
+    async def _list_alerts(request: fastapi.Request, _user: RequireAdmin, status: str = "",
                            limit: int = 100):
-        _require_admin(request, app)
         return JSONResponse(store.list_alerts(status, max(1, min(limit, 500))))
 
     @app.post("/api/admin/alerts/evaluate", include_in_schema=False)
-    async def _evaluate(request: fastapi.Request):
-        user = _require_admin(request, app)
-        created = evaluate_all()
+    async def _evaluate(request: fastapi.Request, user: RequireAdmin):
+        # evaluate_all 内含 trace JSONL 全量扫描（同步 IO），下放线程池
+        created = await anyio.to_thread.run_sync(evaluate_all)
         if created:
             store.record_audit(user, "alert.evaluate", "",
                                f"新告警 {len(created)} 条")
         return JSONResponse({"ok": True, "created": created})
 
     @app.post("/api/admin/alerts/{aid}/ack", include_in_schema=False)
-    async def _ack_alert(aid: int, request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _ack_alert(aid: int, request: fastapi.Request, user: RequireAdmin):
         if not store.set_alert_status(aid, "acknowledged"):
             raise HTTPException(status_code=400, detail="告警不存在或非 open 状态")
         store.record_audit(user, "alert.ack", f"alert#{aid}")
         return {"ok": True}
 
     @app.post("/api/admin/alerts/{aid}/resolve", include_in_schema=False)
-    async def _resolve_alert(aid: int, request: fastapi.Request):
-        user = _require_admin(request, app)
+    async def _resolve_alert(aid: int, request: fastapi.Request, user: RequireAdmin):
         if not store.set_alert_status(aid, "resolved"):
             raise HTTPException(status_code=400, detail="告警不存在或已解决")
         store.record_audit(user, "alert.resolve", f"alert#{aid}")
         return {"ok": True}
 
     @app.get("/api/admin/sla", include_in_schema=False)
-    async def _sla(request: fastapi.Request, days: int = 7):
-        _require_admin(request, app)
-        return JSONResponse(sla_stats(max(1, min(days, 30))))
+    async def _sla(request: fastapi.Request, _user: RequireAdmin, days: int = 7):
+        # sla_stats 全量扫描 trace JSONL（同步 IO），下放线程池
+        return JSONResponse(await anyio.to_thread.run_sync(
+            sla_stats, max(1, min(days, 30))))

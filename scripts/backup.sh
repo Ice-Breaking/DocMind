@@ -9,7 +9,7 @@
 #   uploads/avatars    用户上传图片与头像——会话消息引用这些文件，
 #                      丢失即永久死链（实测教训：e2e 附件被清理后审计页破图）
 #   kb_docs            知识库入库文档副本
-#   trace_log.jsonl    调用链日志
+#   trace.db           调用链日志（SQLite；trace_log.jsonl 仅为迁移前遗留）
 #   docs/knowledge     知识库语料（bind mount 源）
 # 不备份（可重建）：index/ 向量缓存、*_cache.db、ocr/tts/preview 缓存
 
@@ -42,7 +42,7 @@ echo "[backup] 备份数据库..."
 docker exec "${CONTAINER}" python3 -c "
 import sqlite3, os
 os.makedirs('/tmp/backup', exist_ok=True)
-for db in ['data/chat.db', 'data/cache.db']:
+for db in ['data/chat.db', 'data/cache.db', 'data/trace.db']:
     if os.path.exists(db):
         src = sqlite3.connect(db)
         dst = sqlite3.connect(f'/tmp/backup/{os.path.basename(db)}')
@@ -61,7 +61,7 @@ for d in uploads avatars kb_docs; do
         && echo "  已备份 ${d}/" || echo "  跳过 ${d}/（不存在）"
 done
 
-# 3. trace 日志
+# 3. trace 日志（SQLite 已在上面在线备份；JSONL 仅为迁移前遗留，存在则顺带拷走）
 docker cp "${CONTAINER}:/app/data/trace_log.jsonl" "${BACKUP_PATH}/trace_log.jsonl" 2>/dev/null \
     && echo "  已备份 trace_log.jsonl" || true
 

@@ -3,16 +3,15 @@
 权限：仅管理员（调优属运维操作）；ACL 照常生效（只能调试自己可见文档）。
 数据源：kb_registry（多 KB 懒加载）+ trace_log.jsonl（阶段耗时统计）。
 """
-import json
-import os
 from collections import defaultdict
 
 import fastapi
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from docmind.deps import RequireAdmin
+from docmind.api_utils import server_error
 from docmind import acl, config
-from docmind.admin import _require_admin
 
 
 def _get_retriever(kb_id: str):
@@ -28,9 +27,8 @@ def _get_retriever(kb_id: str):
 def register_retrieval_routes(app) -> None:
 
     @app.post("/api/retrieval/debug", include_in_schema=False)
-    async def _debug(request: fastapi.Request):
+    async def _debug(request: fastapi.Request, _user: RequireAdmin):
         """输入问题 → 返回召回明细（分数/来源/排名）+ 路线 + 各阶段耗时"""
-        _require_admin(request, app)
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
@@ -50,31 +48,18 @@ def register_retrieval_routes(app) -> None:
             result = retriever.search_debug(
                 question, top_k=top_k, rerank=rerank, allowed_sources=allowed)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"检索调试失败: {e}")
+            raise server_error("检索调试失败", e)
         result["question"] = question
         result["kb_id"] = kb_id
         return JSONResponse(result)
 
     @app.get("/api/retrieval/stage-stats", include_in_schema=False)
-    async def _stage_stats(request: fastapi.Request):
+    async def _stage_stats(request: fastapi.Request, _user: RequireAdmin):
         """链路分析：从 trace 日志聚合各检索阶段的平均/P95 耗时"""
-        _require_admin(request, app)
-        path = config.TRACE_LOG_PATH
+        from docmind import trace_store
         agg: dict[str, list[float]] = defaultdict(list)
-        if os.path.exists(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    lines = f.readlines()[-5000:]
-                for line in lines:
-                    try:
-                        d = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    name = str(d.get("name", ""))
-                    if name.startswith("retrieval:") and isinstance(d.get("duration_ms"), (int, float)):
-                        agg[name].append(float(d["duration_ms"]))
-            except OSError:
-                pass
+        for name, arr in trace_store.stage_stats(last_n=5000).items():
+            agg[name].extend(arr)
         stages = []
         for name, arr in sorted(agg.items()):
             arr.sort()

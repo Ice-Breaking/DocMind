@@ -9,7 +9,7 @@
 备份内容（与 scripts/backup.sh 对齐）：
   chat.db / cache.db   sqlite3 在线备份 API（WAL 安全，一致性快照）
   uploads/avatars/kb_docs  用户数据——会话消息引用这些文件，丢失即永久死链
-  trace_log.jsonl      调用链日志
+  trace.db             调用链日志（SQLite，trace_log.jsonl 仅为迁移前遗留/降级通道）
 不备份（可重建）：index/ 向量缓存、ocr/tts/preview 缓存、语义缓存
 
 启动即补跑：距上次备份超过 24h（含首次）先备一次再进入每日循环——
@@ -34,7 +34,7 @@ STALE_HOURS = 24
 # 卷内直接拷贝的目录/文件（无一致性要求，cp 即可）
 COPY_ITEMS = ["uploads", "avatars", "kb_docs", "trace_log.jsonl"]
 # SQLite 库：必须走在线备份 API，直接拷 .db 会漏掉 WAL 里未合并的事务
-SQLITE_DBS = ["chat.db", "cache.db"]
+SQLITE_DBS = ["chat.db", "cache.db", "trace.db"]   # trace.db 不可重建，必须备份
 
 
 def backup_once() -> Path:

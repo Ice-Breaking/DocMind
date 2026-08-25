@@ -29,8 +29,33 @@ export async function createKb(data: {
     body: JSON.stringify(data),
   });
   if (r.status === 401) throw new Error('UNAUTHORIZED');
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!r.ok) throw new Error(await detailOf(r, '创建失败'));
   return r.json();
+}
+
+/** 重命名 / 更新知识库描述（description 传 null 表示不修改） */
+export async function updateKb(
+  id: string,
+  data: { name: string; description?: string | null },
+): Promise<KnowledgeBase> {
+  const r = await fetch(`/api/kbs/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  if (r.status === 401) throw new Error('UNAUTHORIZED');
+  if (!r.ok) throw new Error(await detailOf(r, '更新失败'));
+  return r.json();
+}
+
+/** 提取后端 detail 文案（409 重名等业务错误直接透出给用户） */
+async function detailOf(r: Response, fallback: string): Promise<string> {
+  try {
+    const d = (await r.json())?.detail;
+    if (typeof d === 'string' && d) return d;
+  } catch { /* 忽略解析失败 */
+  }
+  return `${fallback}（HTTP ${r.status}）`;
 }
 
 /** 删除知识库 */

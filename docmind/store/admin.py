@@ -1,6 +1,7 @@
 """运营面板：统计、badcase 处理、审计事件、告警。
 
 连接经包门面晚绑定获取（store._conn()），便于测试整体替换 DB。"""
+import logging
 import time
 from docmind import store
 
@@ -25,35 +26,34 @@ def stats_overview() -> dict:
     }
 
 
-def list_badcases(limit: int = 100) -> list[dict]:
-    """👎 反馈明细（badcase 流转列表）：问题 + 回答节选 + 处理状态"""
+def list_badcases(limit: int = 100, offset: int = 0) -> list[dict]:
+    """👎 反馈明细（badcase 流转列表）：问题 + 回答节选 + 处理状态。
+
+    单查询：LEFT JOIN messages 两次取回答（seq）与问题（seq-1）——
+    原实现每行再查 2 次 messages，100 条 badcase = 200 次查询（N+1）；
+    (session_id, seq) 唯一索引保证 JOIN 高效。"""
     c = store._conn()
     rows = c.execute(
         """SELECT f.id, f.session_id, f.seq, f.created_at,
                   s.user, s.title,
-                  fs.status, fs.note
+                  fs.status, fs.note,
+                  ma.content AS answer, mq.content AS question
            FROM feedback f
            JOIN sessions s ON s.id = f.session_id
            LEFT JOIN feedback_status fs ON fs.feedback_id = f.id
+           LEFT JOIN messages ma ON ma.session_id = f.session_id AND ma.seq = f.seq
+           LEFT JOIN messages mq ON mq.session_id = f.session_id AND mq.seq = f.seq - 1
            WHERE f.rating = 'down'
-           ORDER BY f.created_at DESC LIMIT ?""", (limit,)).fetchall()
-    out = []
-    for r in rows:
-        ans = c.execute(
-            "SELECT content FROM messages WHERE session_id = ? AND seq = ?",
-            (r["session_id"], r["seq"])).fetchone()
-        ques = c.execute(
-            "SELECT content FROM messages WHERE session_id = ? AND seq = ?",
-            (r["session_id"], r["seq"] - 1)).fetchone()
-        out.append({
-            "id": r["id"], "user": r["user"] or "(匿名)", "session": r["session_id"],
-            "session_title": r["title"], "status": r["status"] or "pending",
-            "note": r["note"] or "",
-            "question": (ques["content"] if ques else "")[:100],
-            "answer_excerpt": (ans["content"] if ans else "")[:200],
-            "created": r["created_at"],
-        })
-    return out
+           ORDER BY f.created_at DESC LIMIT ? OFFSET ?""",
+           (limit, max(0, offset))).fetchall()
+    return [{
+        "id": r["id"], "user": r["user"] or "(匿名)", "session": r["session_id"],
+        "session_title": r["title"], "status": r["status"] or "pending",
+        "note": r["note"] or "",
+        "question": (r["question"] or "")[:100],
+        "answer_excerpt": (r["answer"] or "")[:200],
+        "created": r["created_at"],
+    } for r in rows]
 
 
 def set_badcase_status(feedback_id: int, status: str, note: str = "") -> bool:
@@ -95,7 +95,8 @@ def stats_for_user(user: str) -> dict:
 
 def record_audit(actor: str, action: str, target: str = "", detail: str = "",
                  ip: str = "") -> None:
-    """记录治理事件；失败静默，绝不影响业务主链路。
+    """记录治理事件；失败不抛出（不影响业务主链路），但必须留痕——
+    审计日志静默丢失比业务失败更危险（安全事件无据可查）。
     ip 为来源客户端 IP（XFF 解析后的真实来源），安全类动作务必传入"""
     try:
         c = store._conn()
@@ -106,11 +107,13 @@ def record_audit(actor: str, action: str, target: str = "", detail: str = "",
              (ip or "")[:64], time.time()))
         c.commit()
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).warning(
+            "审计事件写入失败 actor=%s action=%s target=%s",
+            actor, action, target, exc_info=True)
 
 
 def list_audit(actor: str = "", action: str = "", days: int = 0,
-               limit: int = 500) -> list[dict]:
+               limit: int = 500, offset: int = 0) -> list[dict]:
     c = store._conn()
     sql = "SELECT * FROM audit_events WHERE 1=1"
     args: list = []
@@ -123,8 +126,9 @@ def list_audit(actor: str = "", action: str = "", days: int = 0,
     if days > 0:
         sql += " AND created_at>=?"
         args.append(time.time() - days * 86400)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
     args.append(max(1, min(limit, 5000)))
+    args.append(max(0, offset))
     return [dict(r) for r in c.execute(sql, args).fetchall()]
 
 

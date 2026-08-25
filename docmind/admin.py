@@ -3,10 +3,10 @@
 权限：仅 is_admin 用户可访问（Gradio 登录 cookie 解析身份）。
 数据源：chat.db（会话/消息/反馈）+ semantic_cache 统计 + trace_log.jsonl 用量。
 """
-import json
 import os
-from collections import defaultdict
+import time
 
+import anyio
 import fastapi
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -14,58 +14,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from docmind import config, semantic_cache, store
-
-
-def _current_user(request, app) -> str:
-    """自研 token 会话(web_auth),与 app.py 登录链路一致"""
-    from docmind import web_auth
-    return web_auth.current_user(request)
-
-def _require_admin(request, app) -> str:
-    user = _current_user(request, app)
-    if not user:
-        raise HTTPException(status_code=401, detail="未登录")
-    if not store.is_admin(user):
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    if store.get_must_change_pwd(user):
-        raise HTTPException(status_code=403, detail={"code": "MUST_CHANGE_PWD", "message": "请先修改密码"})
-    return user
+from docmind.deps import CurrentUser, RequireAdmin
+from docmind import semantic_cache, store
 
 
 def _trace_usage() -> dict:
-    """从本地 trace 日志聚合用量：LLM 调用数/token/工具调用数/近 7 日趋势"""
-    path = config.TRACE_LOG_PATH
-    agg = {"llm_calls": 0, "tool_calls": 0, "input_tokens": 0,
-           "output_tokens": 0, "errors": 0, "daily": defaultdict(lambda: [0, 0])}
-    if not os.path.exists(path):
-        return agg
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()[-3000:]   # 只统计最近 3000 条
-        for line in lines:
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            day = str(d.get("ts", ""))[:10]
-            if d.get("status") != "ok":
-                agg["errors"] += 1
-            if d.get("kind") == "generation":
-                agg["llm_calls"] += 1
-                usage = d.get("usage") or {}
-                ti, to = usage.get("input", 0), usage.get("output", 0)
-                agg["input_tokens"] += ti
-                agg["output_tokens"] += to
-                if day:
-                    agg["daily"][day][0] += ti
-                    agg["daily"][day][1] += to
-            elif str(d.get("name", "")).startswith("tool:"):
-                agg["tool_calls"] += 1
-    except OSError:
-        pass
-    agg["daily"] = {k: {"input": v[0], "output": v[1]}
-                    for k, v in sorted(agg["daily"].items())[-7:]}
+    """从 trace SQLite 聚合用量：LLM 调用数/token/工具调用数/近 7 日趋势。
+    SQL 一次聚合（原拉 3000 条完整记录到 Python 逐条数数，
+    每行还带 input JSON 反序列化——overview 每次打开都执行）"""
+    from docmind import trace_store
+    agg = trace_store.usage_summary(limit=3000)
+    agg["daily"] = dict(agg.get("daily") or {})
     return agg
 
 
@@ -86,10 +45,119 @@ class BadcaseStatusIn(BaseModel):
     note: str = Field(default="", max_length=500)
 
 
+# ---------------- trace 聚合 TTL 缓存 ----------------
+# usage/top-queries 每次请求全量读 trace JSONL（最大 50MB）并逐行解析，
+# 同一份数据被反复解析；按 (kind, days) 缓存聚合结果 60s（管理看板
+# 对实时性不敏感），文件 mtime 变化立即失效
+_AGG_TTL = 60.0
+_agg_cache: dict[tuple, tuple[float, float, object]] = {}   # key -> (ts, mtime, result)
+
+
+def _agg_cached(kind: str, days: int, compute):
+    """带 TTL + trace.db mtime 失效的聚合缓存；compute 为无参同步重活，
+    调用方须在 run_sync 内执行本函数"""
+    from docmind import trace_store
+    path = trace_store.DB_PATH
+    try:
+        mtime = os.path.getmtime(path) if os.path.exists(path) else 0.0
+    except OSError:
+        mtime = 0.0
+    key = (kind, days)
+    hit = _agg_cache.get(key)
+    if hit and time.time() - hit[0] < _AGG_TTL and hit[1] == mtime:
+        return hit[2]
+    result = compute()
+    _agg_cache[key] = (time.time(), mtime, result)
+    return result
+
+
+def _usage_detail_agg(days: int) -> dict:
+    """用量成本聚合：SQL GROUP BY (model, day) 一次取回，价目在 Python 侧套用。
+    （原实现全量读 JSONL 逐行 json.loads，50MB 文件每请求重解析一遍）"""
+    from docmind import trace_store
+    empty = {"summary": {"total_calls": 0, "total_input_tokens": 0,
+                         "total_output_tokens": 0, "total_cost": 0},
+             "by_model": [], "daily": []}
+    try:
+        result = trace_store.usage_detail(days)
+    except Exception:  # noqa: BLE001
+        return empty
+    by_model = {}
+    daily = {}
+    total_calls = 0
+    total_input = 0
+    total_output = 0
+    total_cost = 0.0
+    for row in result.get("rows", []):
+        model = row.get("model") or "unknown"
+        day = row.get("day") or ""
+        calls = row.get("calls") or 0
+        inp = row.get("inp") or 0
+        outp = row.get("outp") or 0
+        pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
+        cost = (inp / 1000.0) * pricing[0] + (outp / 1000.0) * pricing[1]
+        total_calls += calls
+        total_input += inp
+        total_output += outp
+        total_cost += cost
+        m = by_model.setdefault(model, {"model": model, "calls": 0,
+                                        "input_tokens": 0, "output_tokens": 0,
+                                        "cost": 0.0})
+        m["calls"] += calls
+        m["input_tokens"] += inp
+        m["output_tokens"] += outp
+        m["cost"] += cost
+        d = daily.setdefault(day, {"date": day, "input_tokens": 0,
+                                   "output_tokens": 0, "cost": 0.0})
+        d["input_tokens"] += inp
+        d["output_tokens"] += outp
+        d["cost"] += cost
+    for m in by_model.values():
+        m["cost"] = round(m["cost"], 4)
+    for d in daily.values():
+        d["cost"] = round(d["cost"], 4)
+    return {
+        "summary": {
+            "total_calls": total_calls,
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "total_cost": round(total_cost, 4),
+        },
+        "by_model": sorted(by_model.values(), key=lambda x: x["cost"], reverse=True),
+        "daily": sorted(daily.values(), key=lambda x: x["date"]),
+    }
+
+
+def _top_queries_agg(days: int, limit: int) -> dict:
+    """高成本 Query Top N：SQL 按 (query_label, model) GROUP BY，
+    价目在 Python 侧套用后合并排序（query_label 写入时已抽取）"""
+    from docmind import trace_store
+    agg = {}
+    for row in trace_store.top_queries(days):
+        query = row.get("query_label") or ""
+        model = row.get("model") or "unknown"
+        calls = row.get("calls") or 0
+        inp = row.get("inp") or 0
+        outp = row.get("outp") or 0
+        pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
+        cost = (inp / 1000.0) * pricing[0] + (outp / 1000.0) * pricing[1]
+        item = agg.setdefault(query, {"query": query, "calls": 0,
+                                      "input_tokens": 0, "output_tokens": 0,
+                                      "cost": 0.0})
+        item["calls"] += calls
+        item["input_tokens"] += inp
+        item["output_tokens"] += outp
+        item["cost"] += cost
+    items = sorted(agg.values(), key=lambda x: x["cost"], reverse=True)
+    for it in items:
+        it["cost"] = round(it["cost"], 4)
+    limit = max(1, min(limit, 50))
+    return {"items": items[:limit], "total": len(items)}
+
+
 def register_admin_routes(app) -> None:
     @app.get("/api/me", include_in_schema=False)
-    async def _me(request: fastapi.Request):
-        user = _current_user(request, app)
+    async def _me(request: fastapi.Request, user: CurrentUser):
         return {
             "user": user,
             "is_admin": bool(user and store.is_admin(user)),
@@ -99,51 +167,54 @@ def register_admin_routes(app) -> None:
         }
 
     @app.get("/api/admin/overview", include_in_schema=False)
-    async def _overview(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _overview(request: fastapi.Request, _user: RequireAdmin):
         data = store.stats_overview()
         data["cache"] = semantic_cache.stats()
-        data["usage"] = _trace_usage()
+        # trace JSONL 全量读是同步 IO 重活，下放线程池
+        data["usage"] = await anyio.to_thread.run_sync(_trace_usage)
         return JSONResponse(data)
 
     @app.get("/api/admin/badcases", include_in_schema=False)
-    async def _badcases(request: fastapi.Request):
-        _require_admin(request, app)
-        return JSONResponse(store.list_badcases())
+    async def _badcases(request: fastapi.Request, _user: RequireAdmin, limit: int = 100,
+                        offset: int = 0):
+        """badcase 流转列表（分页：limit/offset 可选，默认值保持旧行为）"""
+        return JSONResponse(await anyio.to_thread.run_sync(
+            lambda: store.list_badcases(limit=max(1, min(limit, 500)),
+                                        offset=max(0, offset))))
 
     @app.post("/api/admin/badcase/{fid}", include_in_schema=False)
-    async def _badcase_update(fid: int, body: BadcaseStatusIn, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _badcase_update(fid: int, body: BadcaseStatusIn, request: fastapi.Request, user: RequireAdmin):
         if body.status not in ("pending", "resolved", "ignored"):
             raise HTTPException(status_code=400, detail="status 非法")
         store.set_badcase_status(fid, body.status, body.note)
-        user = _current_user(request, app)
         store.record_audit(user, "badcase.update", f"feedback#{fid}", body.status)
         return {"ok": True}
 
     @app.get("/api/admin/queries", include_in_schema=False)
-    async def _queries(request: fastapi.Request, user: str = "", q: str = "",
+    async def _queries(request: fastapi.Request, _user: RequireAdmin, user: str = "", q: str = "",
                        days: int = 0, limit: int = 500):
         """管理员查看用户提问记录：按用户/关键词/时间过滤"""
-        _require_admin(request, app)
         return JSONResponse(store.list_user_queries(user, q, days, limit))
 
     @app.get("/api/admin/sessions", include_in_schema=False)
-    async def _sessions(request: fastapi.Request):
-        _require_admin(request, app)
-        return JSONResponse(store.list_all_sessions())
+    async def _sessions(request: fastapi.Request, _user: RequireAdmin, limit: int = 100,
+                        offset: int = 0):
+        """会话审计列表（分页：limit/offset 可选，默认值保持旧行为）"""
+        return JSONResponse(await anyio.to_thread.run_sync(
+            lambda: store.list_all_sessions(limit=max(1, min(limit, 500)),
+                                            offset=max(0, offset))))
 
     @app.get("/api/admin/sessions/{sid}/messages", include_in_schema=False)
-    async def _session_messages(sid: str, request: fastapi.Request):
-        _require_admin(request, app)
+    async def _session_messages(sid: str, request: fastapi.Request, _user: RequireAdmin):
         return JSONResponse(store.get_session_messages(sid))
 
     @app.post("/api/admin/reindex", include_in_schema=False)
-    async def _reindex(request: fastapi.Request):
-        """手动触发知识库增量重建：逐文件 manifest 对比，只处理变化文件"""
-        _require_admin(request, app)
+    async def _reindex(request: fastapi.Request, _user: RequireAdmin):
+        """手动触发知识库增量重建：逐文件 manifest 对比，只处理变化文件。
+        重建含切片 + embedding 网络调用（分钟级），下放线程池——
+        事件循环冻结会让全站（含 /health 探活）无响应"""
         from docmind.core import rebuild_knowledge_index
-        result = rebuild_knowledge_index()
+        result = await anyio.to_thread.run_sync(rebuild_knowledge_index)
         if "error" in result:
             status = 409 if "正在重建" in result["error"] else 500
             return JSONResponse({"ok": False, "result": result}, status_code=status)
@@ -151,214 +222,38 @@ def register_admin_routes(app) -> None:
 
     # ---- 检索日志端点 ----
     @app.get("/api/admin/traces", include_in_schema=False)
-    async def _traces(request: fastapi.Request, page: int = 1, page_size: int = 50,
+    async def _traces(request: fastapi.Request, _user: RequireAdmin, page: int = 1, page_size: int = 50,
                       kind: str = "", status: str = "", q: str = "",
                       start: str = "", end: str = "", kb: str = ""):
-        """检索日志：按类型/状态/关键词/时间范围/知识库过滤（start/end 为 YYYY-MM-DD），倒序分页"""
-        _require_admin(request, app)
-        path = config.TRACE_LOG_PATH
-        all_items = []
-        if not os.path.exists(path):
-            return JSONResponse({"items": [], "total": 0})
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()[-5000:]  # 硬上限：只读最近 5000 行
-        except OSError:
-            return JSONResponse({"items": [], "total": 0})
-
-        for line in reversed(lines):
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            # kind 筛选
-            if kind and d.get("kind") != kind:
-                continue
-            # 状态筛选（ok / error）
-            if status and d.get("status") != status:
-                continue
-            # 知识库筛选（阶段埋点 span 携带 kb 标签）
-            if kb and str(d.get("kb", "")) != kb:
-                continue
-            # 时间范围筛选（ts 日期部分按 ISO 字符串比较）
-            day = str(d.get("ts", ""))[:10]
-            if start and day < start:
-                continue
-            if end and day > end:
-                continue
-            # q 关键词过滤（匹配 name / model 字段）
-            if q:
-                q_lower = q.lower()
-                if q_lower not in str(d.get("name", "")).lower() and q_lower not in str(d.get("model", "")).lower():
-                    continue
-            all_items.append(d)
-
-        total = len(all_items)
-        # 分页
-        start = (page - 1) * page_size
-        end = start + page_size
-        items = all_items[start:end]
+        """检索日志：按类型/状态/关键词/时间范围/知识库过滤（start/end 为 YYYY-MM-DD），倒序分页。
+        数据源为 trace SQLite（SQL 索引过滤 + LIMIT/OFFSET 分页，
+        替代原全量读 JSONL 逐行解析）"""
+        from docmind import trace_store
+        page_size = max(1, min(page_size, 200))
+        items, total = await anyio.to_thread.run_sync(
+            trace_store.list_filtered,
+            kind, status, q, start, end, kb, max(1, page), page_size)
         return JSONResponse({"items": items, "total": total})
 
     # ---- 用量成本端点（价目表见模块级 MODEL_PRICING） ----
     @app.get("/api/admin/usage", include_in_schema=False)
-    async def _usage_detail(request: fastapi.Request, days: int = 30):
-        _require_admin(request, app)
-        path = config.TRACE_LOG_PATH
-        if not os.path.exists(path):
-            return JSONResponse({"summary": {"total_calls": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0}, "by_model": [], "daily": []})
-
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            return JSONResponse({"summary": {"total_calls": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_cost": 0}, "by_model": [], "daily": []})
-
-        import time as _time
-        now = _time.time()
-        cutoff_ts = now - days * 86400
-
-        by_model = {}
-        daily = {}
-        total_calls = 0
-        total_input = 0
-        total_output = 0
-        total_cost = 0.0
-
-        for line in lines:
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if d.get("kind") != "generation":
-                continue
-            # 时间过滤
-            ts_str = str(d.get("ts", ""))
-            if len(ts_str) >= 10:
-                try:
-                    from datetime import datetime as _dt
-                    dt = _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
-                    if dt.timestamp() < cutoff_ts:
-                        continue
-                    day = ts_str[:10]
-                except ValueError:
-                    continue
-            else:
-                continue
-
-            model = d.get("model", "unknown")
-            usage = d.get("usage") or {}
-            inp = usage.get("input", 0)
-            out = usage.get("output", 0)
-            pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
-            cost = (inp / 1000.0) * pricing[0] + (out / 1000.0) * pricing[1]
-
-            total_calls += 1
-            total_input += inp
-            total_output += out
-            total_cost += cost
-
-            # 按模型聚合
-            if model not in by_model:
-                by_model[model] = {"model": model, "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
-            by_model[model]["calls"] += 1
-            by_model[model]["input_tokens"] += inp
-            by_model[model]["output_tokens"] += out
-            by_model[model]["cost"] += cost
-
-            # 按日期聚合
-            if day not in daily:
-                daily[day] = {"date": day, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
-            daily[day]["input_tokens"] += inp
-            daily[day]["output_tokens"] += out
-            daily[day]["cost"] += cost
-
-        # cost 保留 4 位小数
-        for m in by_model.values():
-            m["cost"] = round(m["cost"], 4)
-        for d in daily.values():
-            d["cost"] = round(d["cost"], 4)
-
-        return JSONResponse({
-            "summary": {
-                "total_calls": total_calls,
-                "total_input_tokens": total_input,
-                "total_output_tokens": total_output,
-                "total_cost": round(total_cost, 4),
-            },
-            "by_model": sorted(by_model.values(), key=lambda x: x["cost"], reverse=True),
-            "daily": sorted(daily.values(), key=lambda x: x["date"]),
-        })
+    async def _usage_detail(request: fastapi.Request, _user: RequireAdmin, days: int = 30):
+        # SQL 聚合 + 60s TTL 缓存（mtime 失效对 SQLite 意义不大，TTL 兜底）
+        result = await anyio.to_thread.run_sync(
+            _agg_cached, "usage", days,
+            lambda: _usage_detail_agg(days))
+        return JSONResponse(result)
 
     @app.get("/api/admin/usage/top-queries", include_in_schema=False)
-    async def _top_queries(request: fastapi.Request, days: int = 30, limit: int = 10):
+    async def _top_queries(request: fastapi.Request, _user: RequireAdmin, days: int = 30, limit: int = 10):
         """高成本 Query Top N：以 generation 记录的最后一条用户消息聚合调用数/token/成本"""
-        _require_admin(request, app)
-        path = config.TRACE_LOG_PATH
-        empty = {"items": [], "total": 0}
-        if not os.path.exists(path):
-            return JSONResponse(empty)
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            return JSONResponse(empty)
-
-        import time as _time
-        cutoff_ts = _time.time() - days * 86400
-
-        agg = {}
-        for line in lines:
-            try:
-                d = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if d.get("kind") != "generation":
-                continue
-            ts_str = str(d.get("ts", ""))
-            if len(ts_str) < 19:
-                continue
-            try:
-                from datetime import datetime as _dt
-                if _dt.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S").timestamp() < cutoff_ts:
-                    continue
-            except ValueError:
-                continue
-
-            # 取最后一条用户消息作为 Query 标识（截断防爆）
-            query = ""
-            for m in reversed(d.get("input") or []):
-                if isinstance(m, dict) and m.get("role") == "user":
-                    query = str(m.get("content") or "").strip()[:80]
-                    break
-            if not query:
-                continue
-
-            model = d.get("model", "unknown")
-            usage = d.get("usage") or {}
-            inp = usage.get("input", 0)
-            out = usage.get("output", 0)
-            pricing = MODEL_PRICING.get(model, _DEFAULT_PRICING)
-            cost = (inp / 1000.0) * pricing[0] + (out / 1000.0) * pricing[1]
-
-            item = agg.setdefault(query, {
-                "query": query, "calls": 0,
-                "input_tokens": 0, "output_tokens": 0, "cost": 0.0,
-            })
-            item["calls"] += 1
-            item["input_tokens"] += inp
-            item["output_tokens"] += out
-            item["cost"] += cost
-
-        items = sorted(agg.values(), key=lambda x: x["cost"], reverse=True)
-        for it in items:
-            it["cost"] = round(it["cost"], 4)
-        limit = max(1, min(limit, 50))
-        return JSONResponse({"items": items[:limit], "total": len(items)})
+        result = await anyio.to_thread.run_sync(
+            _agg_cached, "top-queries", days,
+            lambda: _top_queries_agg(days, limit))
+        return JSONResponse(result)
 
     @app.get("/admin", include_in_schema=False)
-    async def _admin_page(request: fastapi.Request):
-        _require_admin(request, app)
+    async def _admin_page(request: fastapi.Request, _user: RequireAdmin):
         return HTMLResponse(ADMIN_HTML)
 
 

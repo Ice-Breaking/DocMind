@@ -77,23 +77,11 @@ def main():
     print("overview:", {k: ov[k] for k in
                          ("users", "sessions", "messages", "feedback_up",
                           "feedback_down", "badcase_pending") if k in ov})
-    # 拒答次数（全量 trace）
-    import json
-    import os
-    from docmind import config
-    refusals = 0
-    gens = 0
-    if os.path.exists(config.TRACE_LOG_PATH):
-        with open(config.TRACE_LOG_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get("name") == "evidence-refusal":
-                    refusals += 1
-                if d.get("kind") == "generation":
-                    gens += 1
+    # 拒答次数（trace SQLite 全量聚合）
+    from docmind import trace_store
+    refusals = trace_store.count_refusals(days=3650)
+    gens = sum(1 for d in trace_store.recent_events(limit=10**6)
+               if d.get("kind") == "generation")
     print(f"evidence-refusal events: {refusals}, generation total: {gens}")
 
 

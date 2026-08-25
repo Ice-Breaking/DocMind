@@ -14,6 +14,7 @@
 import hashlib
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 
@@ -60,9 +61,16 @@ class VectorStore:
         self._collection_name = collection_name
         self._index_dir = index_dir if index_dir else cache_mod.CACHE_DIR
         self.chunks: list[dict] = list(chunks) if chunks else []
-        self._matrix: np.ndarray | None = (
-            np.asarray(embed([c["text"] for c in self.chunks]), dtype=np.float32)
-            if self.chunks else None)
+        # 向量矩阵惰性加载：Chroma 正常路径检索不依赖 _matrix（HNSW 索引），
+        # 启动时全量拉 embeddings 纯属浪费（大库数百 MB 内存 + 启动时间）；
+        # 仅 numpy 回退路径首次使用时才经 _ensure_matrix 拉取
+        self._matrix: np.ndarray | None = None
+        # 归一化缓存：_refresh_matrix 后行向量方向不变，归一化结果
+        # 可复用——numpy 回退路径每次查询省一遍 O(N·d) 归一化
+        self._matrix_unit: np.ndarray | None = None
+        # 发布锁：(chunks, version) 作为不可变快照原子发布——检索方经
+        # snapshot() 一次性取齐，杜绝「旧索引号映射新 chunks」的撕裂读
+        self._pub_lock = threading.Lock()
         # 版本号：每次切片集合变化 +1；HybridRetriever 据此懒重建 BM25，
         # 增量索引后所有检索器自动感知，无需逐个手动同步
         self.version: int = 0
@@ -74,6 +82,19 @@ class VectorStore:
         # 仅当未注入 chunks 时才从磁盘同步
         if not self.chunks:
             self._load_from_chroma()
+
+    @property
+    def collection_name(self) -> str:
+        return self._collection_name
+
+    def snapshot(self) -> tuple[int, list[dict]]:
+        """原子取 (version, chunks) 快照。
+
+        检索方必须用同一快照内的 chunks 与 version 判定 BM25 新鲜度，
+        并全程使用快照内的 chunks 列表——增量重建会整体替换 chunks，
+        分两次读取可能拿到「新列表 + 旧版本号」的撕裂组合。"""
+        with self._pub_lock:
+            return self.version, self.chunks
 
     # ---------------- Chroma 连接与同步 ----------------
     def _get_collection(self):
@@ -96,15 +117,15 @@ class VectorStore:
             collection.delete(ids=existing["ids"])
 
     def _load_from_chroma(self) -> None:
-        """从持久化索引恢复内存镜像（chunks + 向量矩阵），实现重启免重建。
-        向量直接从 Chroma 读出，恢复过程零 embedding API 调用"""
+        """从持久化索引恢复内存镜像（chunks），实现重启免重建。
+        零 embedding API 调用；向量矩阵不在启动时拉取（惰性，
+        见 _ensure_matrix）——Chroma 正常检索路径用不到它"""
         collection = self._get_collection()
         if collection.count() == 0:
             return
-        result = collection.get(include=["documents", "metadatas", "embeddings"])
-        chunks, vectors = [], []
-        for doc, meta, vec in zip(result["documents"], result["metadatas"],
-                                  result["embeddings"]):
+        result = collection.get(include=["documents", "metadatas"])
+        chunks = []
+        for doc, meta in zip(result["documents"], result["metadatas"]):
             meta = meta or {}
             page = meta.get("page")
             try:
@@ -113,9 +134,8 @@ class VectorStore:
                 page = None
             chunks.append({"text": doc, "source": str(meta.get("source", "")),
                            "page": page})
-            vectors.append(vec)
-        self.chunks = chunks
-        self._matrix = np.asarray(vectors, dtype=np.float32) if vectors else None
+        with self._pub_lock:
+            self.chunks = chunks
         self._chroma_ready = True
         logger.info(f"从 Chroma 持久化索引恢复 {len(self.chunks)} 个切片（未调 API）")
 
@@ -163,7 +183,9 @@ class VectorStore:
 
         Chroma 可用时直接读回已持久化的向量（零 embedding API 调用）——
         增量重建只新增/修改了部分切片，全量重嵌会让"增量"名存实亡；
-        仅在无持久化索引（chunks 直接注入等场景）时才回退实时 embed"""
+        仅在无持久化索引（chunks 直接注入等场景）时才回退实时 embed。
+        顺带缓存行归一化结果（检索查询时直接乘）。"""
+        self._matrix_unit = None
         if self._chroma_ready:
             try:
                 result = self._get_collection().get(include=["embeddings"])
@@ -171,6 +193,7 @@ class VectorStore:
                 # Chroma 可能返回 ndarray：真值判断有歧义，须显式 None 检查
                 if vecs is not None and len(vecs) == len(self.chunks):
                     self._matrix = np.asarray(vecs, dtype=np.float32)
+                    self._matrix_unit = self._unit(self._matrix)
                     return
                 logger.warning("Chroma 向量数与切片数不一致，回退实时嵌入")
             except Exception as e:  # noqa: BLE001 - 读取失败回退 embed
@@ -178,8 +201,46 @@ class VectorStore:
         self._matrix = (np.asarray(embed([c["text"] for c in self.chunks]),
                                    dtype=np.float32)
                         if self.chunks else None)
+        self._matrix_unit = self._unit(self._matrix) if self._matrix is not None else None
+
+    @staticmethod
+    def _unit(mat: np.ndarray) -> np.ndarray:
+        """行归一化（零向量保护）"""
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return mat / norms
 
     # ---------------- 构建 ----------------
+    def _hit_is_fresh(self, root_dir: str) -> bool:
+        """缓存命中路径的新鲜度校验（防陈旧索引被 manifest「洗白」）。
+
+        - 全局指纹不一致 → 切片参数/模型/schema 变化，全部切片失效 → 全量重建
+        - 无 manifest（旧版程序建的索引）→ 无法验证内容新鲜度 → 全量重建，
+          不再把陈旧内容固化为「已索引」
+        - 全局指纹一致但逐文件清单背离 → 停机期间文档被修改 → 交增量重建
+          做逐文件 diff（此时 manifest 存在且指纹一致，增量路径不会递归回 build）
+        - 全部一致 → 真命中
+        """
+        cached_fp = load_global_fingerprint(self._index_dir)
+        manifest_path = os.path.join(self._index_dir, "manifest.json")
+        has_manifest = os.path.exists(manifest_path)
+        if not has_manifest:
+            logger.warning("Chroma 索引无 manifest（无法验证内容新鲜度），执行全量重建")
+            return False
+        if cached_fp != compute_global_fingerprint():
+            logger.warning("Chroma 索引全局指纹背离（切片参数/模型/schema 变化），执行全量重建")
+            return False
+        cached_manifest = load_manifest(self._index_dir)
+        current_manifest = compute_file_manifest(root_dir)
+        drifted = {f for f in current_manifest
+                   if cached_manifest.get(f) != current_manifest[f]}
+        if drifted:
+            logger.warning(f"Chroma 索引与文档清单背离 {len(drifted)} 个文件"
+                           f"（如 {sorted(drifted)[:2]}），转增量重建")
+            self.rebuild_incremental(root_dir)
+            return False
+        return True
+
     def build(self, knowledge_dir: str | None = None, use_cache: bool = True) -> int:
         """加载知识库 → 切片 → 向量化 → 写入 Chroma。返回切片数量。
 
@@ -196,44 +257,49 @@ class VectorStore:
                          if os.path.splitext(n)[1].lower() in SUPPORTED_EXTS} \
                 if os.path.isdir(root_dir) else set()
             indexed = {c.get("source", "") for c in self.chunks}
-            if dir_files <= indexed:
-                self.version += 1
-                # 仅当 manifest 尚不存在时才建立（首次/升级场景）；
-                # 命中路径不重写已有 manifest，防止洗白与 Chroma 的背离
-                if not os.path.exists(os.path.join(self._index_dir, "manifest.json")):
-                    self._persist_index_meta(knowledge_dir)
+            if dir_files <= indexed and self._hit_is_fresh(root_dir):
+                with self._pub_lock:
+                    self.version += 1
                 logger.info(f"向量索引命中 Chroma 持久化缓存（{len(self.chunks)} 个切片，未调 API）")
                 return len(self.chunks)
             missing = dir_files - indexed
-            logger.warning(f"Chroma 索引缺失 {len(missing)} 个文件的切片"
-                           f"（如 {sorted(missing)[:2]}），放弃缓存命中执行重建")
+            if missing:
+                logger.warning(f"Chroma 索引缺失 {len(missing)} 个文件的切片"
+                               f"（如 {sorted(missing)[:2]}），放弃缓存命中执行重建")
 
-        self.chunks = load_chunks(knowledge_dir)
-        if not self.chunks:
+        # 全程使用局部变量构建，最后一次性原子发布 (chunks, version)——
+        # 中途任何失败都不污染现有快照，检索方不会看到撕裂状态
+        new_chunks = load_chunks(knowledge_dir)
+        if not new_chunks:
+            with self._pub_lock:
+                self.chunks = []
+                self.version += 1
             self._matrix = None
             self._clear_collection()
             self._chroma_ready = True
-            self.version += 1
             if use_cache:
                 self._persist_index_meta(knowledge_dir)
             return 0
 
-        vectors = embed_cached(embed, [c["text"] for c in self.chunks])
+        vectors = embed_cached(embed, [c["text"] for c in new_chunks])
         collection = self._get_collection()
         self._clear_collection()
         collection.add(
-            ids=self._make_ids(self.chunks),
+            ids=self._make_ids(new_chunks),
             embeddings=[list(map(float, v)) for v in vectors],
-            documents=[c["text"] for c in self.chunks],
-            metadatas=self._metadatas(self.chunks),
+            documents=[c["text"] for c in new_chunks],
+            metadatas=self._metadatas(new_chunks),
         )
         self._matrix = np.asarray(vectors, dtype=np.float32)
+        self._matrix_unit = self._unit(self._matrix)
         self._chroma_ready = True
-        self.version += 1
+        with self._pub_lock:
+            self.chunks = new_chunks
+            self.version += 1
         if use_cache:
             self._persist_index_meta(knowledge_dir)
-            logger.info(f"向量索引已重建并写入 Chroma（{len(self.chunks)} 个切片）")
-        return len(self.chunks)
+            logger.info(f"向量索引已重建并写入 Chroma（{len(new_chunks)} 个切片）")
+        return len(new_chunks)
 
     def rebuild_incremental(self, knowledge_dir: str | None = None) -> dict:
         """增量重建：对比逐文件指纹清单（manifest），保留未变文件的切片，
@@ -278,12 +344,17 @@ class VectorStore:
 
         collection = self._get_collection()
 
-        # 删除已移除/已修改文件的旧切片（按 source 元数据过滤）
+        # 删除已移除/已修改文件的旧切片（按 source 元数据过滤）。
+        # 失败必须中止而非跳过：带着旧切片继续 add 会让新旧版本并存
+        # 污染检索，且随后 manifest 回写把该状态固化、永不重试；
+        # 中止则 manifest 保持旧版，下次重建自动补做删除（自愈）
         for fname in sorted(removed | modified):
             try:
                 collection.delete(where={"source": fname})
-            except Exception as e:  # noqa: BLE001 - 单文件删除失败不阻断整体
-                logger.warning(f"Chroma 删除 {fname} 的切片失败: {e}")
+            except Exception as e:
+                logger.error(f"Chroma 删除 {fname} 的切片失败，中止本次增量"
+                             f"（manifest 未回写，下次重建自动重试）: {e}")
+                raise
 
         # 只对新增/修改文件重新切片并向量化
         new_chunks: list[dict] = []
@@ -310,11 +381,15 @@ class VectorStore:
                 invalidate(texts)
                 raise
 
-        self.chunks = ([c for c in self.chunks if c.get("source") in unchanged]
-                       + new_chunks)
+        merged_chunks = ([c for c in self.chunks if c.get("source") in unchanged]
+                         + new_chunks)
         self._refresh_matrix()
         self._chroma_ready = True
-        self.version += 1
+        # 原子发布：检索方经 snapshot() 取齐 (version, chunks)，
+        # 杜绝「旧 BM25 索引号映射新 chunks」的撕裂读
+        with self._pub_lock:
+            self.chunks = merged_chunks
+            self.version += 1
 
         # 回写持久化（最后写 manifest：保证 manifest 存在时数据必然完整）
         save_manifest(self._index_dir, current)
@@ -326,28 +401,41 @@ class VectorStore:
 
     # ---------------- 检索 ----------------
     def search(self, query: str, top_k: int | None = None,
-               query_vec: list[float] | None = None) -> list[SearchHit]:
+               query_vec: list[float] | None = None,
+               allowed_sources: set[str] | None = None) -> list[SearchHit]:
         """余弦相似度检索 top-k（走 Chroma HNSW 索引；无持久化索引时回退 numpy）
 
-        query_vec：调用方已对同一 query 文本算过的向量，传入则免重复 embed"""
-        if not self.chunks:
+        query_vec：调用方已对同一 query 文本算过的向量，传入则免重复 embed
+        allowed_sources：ACL 白名单下推——Chroma 用 where 过滤（截断前生效，
+        受限文档不挤占 top_k 名额），numpy 路在打分后截断前过滤"""
+        chunks = self.chunks
+        if not chunks:
             return []
         k = top_k or config.TOP_K
         q = query_vec if query_vec is not None else embed([query])[0]
 
         if self._chroma_ready and self._collection is not None:
-            return self._search_chroma(q, k)
-        return self._search_numpy(q, k)
+            return self._search_chroma(q, k, allowed_sources)
+        return self._search_numpy(q, k, chunks, allowed_sources)
 
-    def _search_chroma(self, q: list[float], k: int) -> list[SearchHit]:
+    def _search_chroma(self, q: list[float], k: int,
+                       allowed_sources: set[str] | None = None) -> list[SearchHit]:
         collection = self._collection
         n = collection.count()
         if n == 0:
             return []
+        # ACL 下推：白名单为空 = 无任何可见文档，直接空结果（$in 空列表
+        # 部分版本行为不定，不依赖它）
+        if allowed_sources is not None and not allowed_sources:
+            return []
+        kwargs: dict = {}
+        if allowed_sources is not None:
+            kwargs["where"] = {"source": {"$in": sorted(allowed_sources)}}
         results = collection.query(
             query_embeddings=[list(map(float, q))],
             n_results=min(k, n),
             include=["documents", "metadatas", "distances"],
+            **kwargs,
         )
         hits = []
         if results.get("ids") and results["ids"][0]:
@@ -365,21 +453,53 @@ class VectorStore:
                 ))
         return hits
 
-    def _search_numpy(self, q: list[float], k: int) -> list[SearchHit]:
-        """numpy 余弦回退路径：chunks 直接注入（未经 build）等场景"""
-        if self._matrix is None:
+    def _ensure_matrix(self) -> np.ndarray | None:
+        """惰性获取向量矩阵：仅 numpy 回退路径首次使用时构建，
+        避免启动时全量拉 embeddings 的内存/时间开销"""
+        if self._matrix is None and self.chunks:
+            self._refresh_matrix()
+        return self._matrix
+
+    def _search_numpy(self, q: list[float], k: int,
+                      chunks: list[dict] | None = None,
+                      allowed_sources: set[str] | None = None) -> list[SearchHit]:
+        """numpy 余弦回退路径：chunks 直接注入（未经 build）等场景。
+        使用 _refresh_matrix 缓存的归一化矩阵；top-k 用 argpartition（O(N)）"""
+        mat = self._ensure_matrix()
+        if mat is None:
             return []
+        chunks = chunks if chunks is not None else self.chunks
+        # ACL 下推：先把无权来源的候选剔除再取 top-k（截断前过滤）
+        if allowed_sources is not None:
+            keep = [i for i, c in enumerate(chunks)
+                    if c.get("source", "") in allowed_sources]
+            if not keep:
+                return []
+            if len(keep) < len(chunks):
+                mat = mat[keep]
+                chunks = [chunks[i] for i in keep]
         qv = np.asarray(q, dtype=np.float32)
-        mat = self._matrix / np.linalg.norm(self._matrix, axis=1, keepdims=True)
-        qv = qv / np.linalg.norm(qv)
-        scores = mat @ qv
-        top_idx = np.argsort(scores)[::-1][:k]
+        qn = np.linalg.norm(qv)
+        if qn == 0:
+            return []
+        # 归一化矩阵缓存命中（行数与过滤后矩阵一致）时免重复归一化
+        unit = self._matrix_unit
+        if unit is None or unit.shape[0] != mat.shape[0]:
+            unit = self._unit(mat)
+        scores = unit @ (qv / qn)
+        # k 同时受 chunks 快照与矩阵行数约束：增量重建窗口期两者可能
+        # 瞬态不一致（矩阵滞后于 chunks），越界取值会崩
+        k = min(k, len(chunks), int(scores.shape[0]))
+        if k <= 0:
+            return []
+        top_idx = np.argpartition(scores, -k)[-k:]
+        top_idx = top_idx[np.argsort(scores[top_idx])[::-1]]
         return [
             SearchHit(
-                text=self.chunks[i]["text"],
-                source=self.chunks[i]["source"],
+                text=chunks[i]["text"],
+                source=chunks[i]["source"],
                 score=float(scores[i]),
-                page=self.chunks[i].get("page"),
+                page=chunks[i].get("page"),
             )
             for i in top_idx
         ]

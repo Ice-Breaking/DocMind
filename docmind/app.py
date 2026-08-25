@@ -15,38 +15,72 @@ os.environ["SSL_CERT_FILE"] = _certifi.where()
 os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi.where())
 
 
+from docmind.api_utils import server_error
 from docmind.logging_setup import setup_logging
 
 setup_logging()
 
 import logging
 
+import fastapi
+
 from docmind import acl, config
 from docmind import store as chatstore   # 别名：避免遮蔽 build_agent 返回的 VectorStore store
+from docmind import web_auth
+from docmind.deps import CurrentUser, RequireUser
 from docmind.core import build_shared, create_agent
 
 logger = logging.getLogger(__name__)
 
-logger.info("正在装配 Agent（加载知识库、连接 MCP Server）...")
-registry, store, mcp_connections = build_shared()
-tool_names = list(registry.tools.keys())
 
-# ----------------------------------------------------------------
-# 去 Gradio 化：样式/交互/界面段已删除（React SPA 为唯一前端，
-# 生产由 nginx 或下方 dist 静态挂载服务；旧 Gradio UI 为死代码）
+def create_app() -> fastapi.FastAPI:
+    """装配 FastAPI 应用（全部 REST/SSE 路由 + SPA 静态托管）。
 
-if __name__ == "__main__":
+    工厂化：uvicorn docmind.app:create_app --factory 亦可启动；
+    重量级初始化（知识库加载/MCP 连接）在工厂调用时执行而非 import 时——
+    import docmind.app 不再有隐式副作用，__main__ 只留 uvicorn。
+    """
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    import anyio
+    from fastapi import FastAPI, HTTPException, Query
+    from fastapi.responses import (FileResponse, JSONResponse,
+                                   PlainTextResponse)
+    from typing import Literal
+    from pydantic import BaseModel, Field
+
+    logger.info("正在装配 Agent（加载知识库、连接 MCP Server）...")
+    registry, store, mcp_connections = build_shared()
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        # 退出时关闭 MCP 连接（原先随进程退出靠 daemon 线程隐式消亡，
+        # 显式关闭让 stdio 子进程干净退出）
+        yield
+        for conn in (mcp_connections or []):
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    app = FastAPI(title="DocMind", lifespan=_lifespan)
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: fastapi.Request,
+                                           exc: Exception):
+        """全局兜底：未捕获异常记完整堆栈，对外统一 500 通用文案。
+
+        原先未处理异常返回 Starlette 裸 "Internal Server Error"（无日志
+        关联），而散落的 detail=f"...{e}" 又把内部细节透给浏览器——
+        两头都不对。现在：细节进日志（含 path 便于检索），对外统一文案；
+        各路由已显式转 server_error 的 500 同样脱敏。"""
+        logger.exception("未处理异常 path=%s", request.url.path, exc_info=exc)
+        return JSONResponse({"detail": "服务器内部错误，请稍后重试"},
+                            status_code=500)
+
     # 认证门禁：无任何账号时播种 admin（密码取 ADMIN_PASSWORD 环境变量）
     chatstore.ensure_seed_admin()
-
-    # ---- 纯 FastAPI 宿主（原 Gradio launch 已移除） ----
-    import uvicorn
-    import fastapi
-    from fastapi import FastAPI
-    from fastapi.responses import FileResponse
-    from docmind import web_auth
-
-    app = FastAPI(title="DocMind")
 
     # ---- 登录 / 登出（自研 token 会话，替代 Gradio auth） ----
     # 后端直连端口（7860）友好兜底：纯 API 模式（web/dist 不存在，compose 形态）
@@ -55,7 +89,6 @@ if __name__ == "__main__":
     # 仅当 dist 不存在时注册：dist 存在（单容器模式）时后端自己托管 SPA，
     # 根路径/未知路径已有 SPA 路由，不得遮蔽。且仅对浏览器导航
     # （Accept: text/html）生效，API 客户端仍收 JSON 保持契约兼容
-    import fastapi as _fastapi
     import html as _html
 
     _dist_dir = os.path.join(os.path.dirname(os.path.dirname(
@@ -94,7 +127,7 @@ if __name__ == "__main__":
 <p>您访问的地址无法打开。如未进入 DocMind 主界面，请从首页进入：</p>
 <a class="btn" href="{url}">返回 DocMind 首页</a>""")
 
-        def _friendly_backend_page(request: "_fastapi.Request",
+        def _friendly_backend_page(request: "fastapi.Request",
                                    backend_notice: bool) -> str:
             # Host 头先 HTML 转义防注入；partition 安全取端口——
             # 经 nginx 转发的 Host 不带端口（如 "127.0.0.1"），
@@ -107,14 +140,14 @@ if __name__ == "__main__":
             return _PAGE_NOTFOUND.format(url=f"http://{bare}/")
 
         @app.get("/", include_in_schema=False)
-        async def _backend_root(request: _fastapi.Request):
+        async def _backend_root(request: fastapi.Request):
             # GET / 只有直连后端才会命中（经 nginx 的 / 由 SPA 托管）
-            return _fastapi.responses.HTMLResponse(
+            return fastapi.responses.HTMLResponse(
                 _friendly_backend_page(request, backend_notice=True))
 
         @app.exception_handler(404)
         @app.exception_handler(405)
-        async def _friendly_404_405(request: _fastapi.Request, exc):
+        async def _friendly_404_405(request: fastapi.Request, exc):
             # 浏览器导航才给友好页；API 客户端（前端 fetch/脚本）保持 JSON 契约。
             # Host 无端口或 :80 → 请求经 nginx（用户就在正确入口），
             # 用中性 404 文案；带其他端口（如 :7860）→ 直连后端，提示换入口
@@ -122,10 +155,10 @@ if __name__ == "__main__":
             if "text/html" in (request.headers.get("accept") or "").lower():
                 port = (request.headers.get("host") or "").partition(":")[2]
                 backend_notice = port not in ("", "80")
-                return _fastapi.responses.HTMLResponse(
+                return fastapi.responses.HTMLResponse(
                     _friendly_backend_page(request, backend_notice),
                     status_code=status)
-            return _fastapi.responses.JSONResponse(
+            return fastapi.responses.JSONResponse(
                 {"detail": getattr(exc, "detail", "Not Found")}, status_code=status)
 
     @app.post("/login", include_in_schema=False)
@@ -140,12 +173,18 @@ if __name__ == "__main__":
             raise HTTPException(status_code=403,
                                 detail=f"失败次数过多已锁定，请 {remaining // 60 + 1} 分钟后再试")
         from docmind import ldap_auth
-        via = ""
-        if chatstore.verify_user(username, password):
-            via = "local"
-        elif ldap_auth.authenticate(username, password):
-            chatstore.ensure_external_user(username)
-            via = "ldap"
+
+        # 密码验证（PBKDF2 20 万次迭代，纯 CPU 50-100ms）与 LDAP bind
+        # （同步 socket）都放线程池：登录风暴不再冻结事件循环拖垮全站
+        def _verify_sync() -> str:
+            if chatstore.verify_user(username, password):
+                return "local"
+            if ldap_auth.authenticate(username, password):
+                chatstore.ensure_external_user(username)
+                return "ldap"
+            return ""
+
+        via = await anyio.to_thread.run_sync(_verify_sync)
         if not via:
             web_auth.record_failure(username)
             logger.warning(f"登录失败 user={username} ip={web_auth.client_ip()}")
@@ -218,8 +257,8 @@ if __name__ == "__main__":
                 HTTP_LATENCY.labels(method=request.method,
                                     path=_norm).observe(
                     _metrics_time.perf_counter() - _t0)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"http 指标记录失败 path={request.url.path}: {e}")
         return response
 
     @app.get("/metrics", include_in_schema=False)
@@ -241,14 +280,41 @@ if __name__ == "__main__":
         from fastapi.responses import Response as _MR
         return _MR(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    # (旧 CSRF/指标中间件已并入 security_and_metrics 正常注册)
-
     # ---- 健康检查：Docker HEALTHCHECK / 监控探活（不要求登录态，只暴露内部状态） ----
+    _fingerprint_cache: list[str] = []
+
+    def _build_fingerprint() -> str:
+        """构建指纹（12 位源码哈希）：部署漂移检测——比对运行容器与
+        工作区代码是否一致（QA 实测发现容器跑 11 小时前旧镜像无人察觉）。
+
+        镜像内：读构建期写入的 /app/.build_fingerprint（对镜像内源码哈希）；
+        本地开发：无该文件则对当前源码实时计算（dev 指纹随编辑变化）。"""
+        if _fingerprint_cache:
+            return _fingerprint_cache[0]
+        fp_file = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), ".build_fingerprint")
+        try:
+            if os.path.isfile(fp_file):
+                fp = open(fp_file, encoding="utf-8").read().strip() or "dev"
+            else:
+                import hashlib
+                import glob as _glob
+                root = os.path.dirname(os.path.abspath(__file__))
+                files = sorted(_glob.glob(os.path.join(root, "**", "*.py"),
+                                          recursive=True))
+                h = hashlib.sha256()
+                for f in files:
+                    h.update(open(f, "rb").read())
+                fp = h.hexdigest()[:12]
+        except Exception:  # noqa: BLE001 - 指纹失败不影响健康状态
+            fp = "unknown"
+        _fingerprint_cache.append(fp)
+        return fp
+
     @app.get("/health", include_in_schema=False)
     async def _health():
         """Lightweight health check for Docker HEALTHCHECK and monitoring."""
         import shutil
-        from fastapi.responses import JSONResponse
         checks = {}
 
         # SQLite 连通性
@@ -276,14 +342,12 @@ if __name__ == "__main__":
         all_ok = all(v == "ok" or isinstance(v, (int, float)) for v in checks.values())
         return JSONResponse(
             status_code=200 if all_ok else 503,
-            content={"status": "healthy" if all_ok else "degraded", "checks": checks},
+            content={"status": "healthy" if all_ok else "degraded",
+                     "version": _build_fingerprint(),
+                     "checks": checks},
         )
 
     # ---- 文档预览：vendored pdf.js + 知识库原文（引用溯源直达） ----
-    import fastapi
-    from fastapi import HTTPException, Query
-    from fastapi.responses import PlainTextResponse
-
     _app_dir = os.path.dirname(os.path.abspath(__file__))
     _vendor_dir = os.path.join(_app_dir, "vendor")
     _knowledge_dir = config.KNOWLEDGE_DIR
@@ -297,13 +361,47 @@ if __name__ == "__main__":
         return FileResponse(path, media_type="application/javascript"
                             if safe.endswith(".js") else "application/octet-stream")
 
+    # 同步重活助手：全部经 anyio.to_thread.run_sync 调用，
+    # 禁止在 async 路由体内直接执行（会冻结事件循环拖垮全站）
+    def _extract_text_sync(path: str) -> str:
+        from docmind.rag.chunker import _EXTRACTORS
+        ext = os.path.splitext(path)[1].lower()
+        if ext in _EXTRACTORS:
+            return _EXTRACTORS[ext](path)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _xlsx_sheets_sync(path: str) -> list[dict]:
+        import openpyxl
+        MAX_ROWS, MAX_COLS = 500, 60
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            sheets = []
+            for ws in wb.worksheets:
+                rows = []
+                for i, row in enumerate(ws.iter_rows(values_only=True)):
+                    if i >= MAX_ROWS:
+                        break
+                    rows.append(["" if c is None else str(c) for c in row[:MAX_COLS]])
+                sheets.append({"name": ws.title, "rows": rows})
+            return sheets
+        finally:
+            wb.close()
+
+    def _convert_docx_pdf_sync(soffice: str, path: str, cache_dir: str, out_pdf: str) -> None:
+        import subprocess
+        r = subprocess.run(
+            [soffice, "--headless", "--convert-to", "pdf", "--outdir", cache_dir, path],
+            capture_output=True, timeout=120)
+        if r.returncode != 0 or not os.path.isfile(out_pdf):
+            raise RuntimeError("PDF 转换失败")
+
     # methods 含 HEAD：前端先 HEAD 探测 docx 能否转 PDF（此 App 的 .get 不自动挂 HEAD）
     @app.api_route("/files/{name}", methods=["GET", "HEAD"], include_in_schema=False)
-    async def _serve_file(name: str, request: fastapi.Request,
+    async def _serve_file(name: str, request: fastapi.Request, user: RequireUser,
                           as_: str = Query(default=None, alias="as")):
         # 安全校验：登录 + 文档级 ACL——受限文档(如内部机密.md)此前可经
         # 此直链被未登录用户整篇下载，完全绕过检索层的 ACL 隔离(P0 实测)
-        user = _require_active_user(request)
         allowed = acl.allowed_docs(user)
         safe = os.path.basename(name)  # 防路径穿越：只允许知识库目录内文件名
         if safe not in allowed:
@@ -312,41 +410,28 @@ if __name__ == "__main__":
         if not os.path.isfile(path):
             raise HTTPException(status_code=404)
         if as_ == "text":
-            # 提取正文文本（docx 无 LibreOffice 时的降级通道；图片走 OCR 缓存）
-            from docmind.rag.chunker import _EXTRACTORS
-            ext = os.path.splitext(safe)[1].lower()
+            # 提取正文文本（docx 无 LibreOffice 时的降级通道；图片走 OCR 缓存）。
+            # 解析器是同步 CPU/IO 重活（PDF/Word/Excel），必须下放线程池
             try:
-                if ext in _EXTRACTORS:
-                    text = _EXTRACTORS[ext](path)
-                else:
-                    with open(path, encoding="utf-8") as f:
-                        text = f.read()
+                text = await anyio.to_thread.run_sync(_extract_text_sync, path)
+            except HTTPException:
+                raise
             except Exception as e:  # noqa: BLE001
-                raise HTTPException(status_code=500, detail=f"文本提取失败: {e}")
+                raise server_error("文本提取失败", e)
             return PlainTextResponse(text)
         if as_ == "sheets" and safe.lower().endswith(".xlsx"):
             # Excel 预览数据：各 Sheet 的行列 JSON（限量防超大表格拖垮前端）
-            from fastapi.responses import JSONResponse
-            import openpyxl
-            MAX_ROWS, MAX_COLS = 500, 60
             try:
-                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-                sheets = []
-                for ws in wb.worksheets:
-                    rows = []
-                    for i, row in enumerate(ws.iter_rows(values_only=True)):
-                        if i >= MAX_ROWS:
-                            break
-                        rows.append(["" if c is None else str(c) for c in row[:MAX_COLS]])
-                    sheets.append({"name": ws.title, "rows": rows})
-                wb.close()
+                sheets = await anyio.to_thread.run_sync(_xlsx_sheets_sync, path)
+            except HTTPException:
+                raise
             except Exception as e:  # noqa: BLE001
-                raise HTTPException(status_code=500, detail=f"Excel 解析失败: {e}")
+                raise server_error("Excel 解析失败", e)
             return JSONResponse({"sheets": sheets})
         if as_ == "pdf" and safe.lower().endswith(".docx"):
-            # LibreOffice headless 转 PDF（按源文件 mtime 缓存）；未安装 → 409，前端降级文本预览
+            # LibreOffice headless 转 PDF（按源文件 mtime 缓存）；未安装 → 409，前端降级文本预览。
+            # 单次转换最长 120s，同步子进程绝不能跑在事件循环里
             import shutil
-            import subprocess
             soffice = shutil.which("soffice") or (
                 "/Applications/LibreOffice.app/Contents/MacOS/soffice"
                 if os.path.exists("/Applications/LibreOffice.app/Contents/MacOS/soffice") else None)
@@ -357,40 +442,31 @@ if __name__ == "__main__":
             out_pdf = os.path.join(cache_dir, os.path.splitext(safe)[0] + ".pdf")
             if not os.path.isfile(out_pdf) or os.path.getmtime(out_pdf) < os.path.getmtime(path):
                 try:
-                    r = subprocess.run(
-                        [soffice, "--headless", "--convert-to", "pdf", "--outdir", cache_dir, path],
-                        capture_output=True, timeout=120)
+                    await anyio.to_thread.run_sync(
+                        _convert_docx_pdf_sync, soffice, path, cache_dir, out_pdf)
+                except HTTPException:
+                    raise
                 except Exception as e:  # noqa: BLE001
-                    raise HTTPException(status_code=500, detail=f"转换失败: {e}")
-                if r.returncode != 0 or not os.path.isfile(out_pdf):
-                    raise HTTPException(status_code=500, detail="PDF 转换失败")
+                    raise server_error("转换失败", e)
             return FileResponse(out_pdf, media_type="application/pdf")
         return FileResponse(path)
 
     # ---- 当前用户解析：自研 token 会话（web_auth） ----
-    import fastapi as _fastapi
+    def _check_session_access(request: fastapi.Request, session_id: str,
+                              allow_missing: bool = False) -> None:
+        """会话归属校验：本人或无主历史会话放行，他人会话 403。
 
-    def _current_user(request: _fastapi.Request) -> str:
-        return web_auth.current_user(request)
-
-    def _require_user(request: _fastapi.Request) -> str:
-        return web_auth.require_user(request)
-
-    def _require_active_user(request: _fastapi.Request) -> str:
-        return web_auth.require_user(request)
-
-    def _check_session_access(request: _fastapi.Request, session_id: str) -> None:
-        """会话归属校验：本人或无主历史会话放行，他人会话 403"""
+        allow_missing：SSE 新会话场景（session 尚未落库，owner 为 None）
+        放行——原先流式路由内联了另一套判定，两处语义漂移；统一入口。"""
         owner = chatstore.session_owner(session_id)
         if owner is None:
-            raise HTTPException(status_code=404, detail="会话不存在")
-        if owner not in ("", _current_user(request)):
+            if not allow_missing:
+                raise HTTPException(status_code=404, detail="会话不存在")
+            return
+        if owner not in ("", web_auth.current_user(request)):
             raise HTTPException(status_code=403, detail="无权访问该会话")
 
     # ---- 反馈闭环：👍/👎 评价（session_id + 消息序号唯一定位，重复点击覆盖） ----
-    from typing import Literal
-    from pydantic import BaseModel, Field
-
     class FeedbackIn(BaseModel):
         # 字符白名单：session_id 会进入 admin 审计页的内联事件/属性插值，
         # 任意字符入库等于给存储型 XSS 留载体（前端生成的 sess-xxx 格式
@@ -401,20 +477,20 @@ if __name__ == "__main__":
         rating: Literal["up", "down"]
 
     @app.post("/api/feedback", include_in_schema=False)
-    async def _save_feedback(fb: FeedbackIn, request: _fastapi.Request):
-        _require_active_user(request)
+    async def _save_feedback(fb: FeedbackIn, request: fastapi.Request,
+                             _user: RequireUser):
         if fb.rating not in ("up", "down"):
             raise HTTPException(status_code=400, detail="rating 必须是 up/down")
         _check_session_access(request, fb.session_id)
         try:
             chatstore.save_feedback(fb.session_id, fb.seq, fb.rating)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"反馈保存失败: {e}")
+            raise server_error("反馈保存失败", e)
         return {"ok": True}
 
     @app.get("/api/feedback/{session_id}", include_in_schema=False)
-    async def _get_feedback(session_id: str, request: _fastapi.Request):
-        _require_active_user(request)
+    async def _get_feedback(session_id: str, request: fastapi.Request,
+                            _user: RequireUser):
         _check_session_access(request, session_id)
         return chatstore.get_feedback(session_id)
 
@@ -424,18 +500,20 @@ if __name__ == "__main__":
         new_password: str = Field(..., min_length=8, max_length=128)
 
     @app.post("/api/change-password", include_in_schema=False)
-    async def _change_password(body: ChangePasswordIn, request: _fastapi.Request):
+    async def _change_password(body: ChangePasswordIn, request: fastapi.Request,
+                               user: CurrentUser):
         # 仅校验登录态（current_user），不能用 require_user：
         # 后者对 must_change_pwd 一律 403——若这里也走它，首登用户连改密
         # 接口本身都被拦，「强制改密」变成永久死锁（2026-08 二轮回归实测）。
         # 权限不放权：改密仍需本人会话 + 旧密码校验在 store.change_password 内部
-        user = web_auth.current_user(request)
         # 密码强度：≥8 位且同时含字母与数字（防弱口令 + 直链/撞库组合利用）
         np = body.new_password or ""
         if len(np) < 8 or not any(c.isalpha() for c in np) or not any(c.isdigit() for c in np):
             raise HTTPException(status_code=400,
                                 detail="新密码需至少 8 位，且同时包含字母和数字")
-        ok, msg = chatstore.change_password(user, body.old_password, body.new_password)
+        # 旧密码校验含 PBKDF2 20 万次迭代（纯 CPU），下放线程池
+        ok, msg = await anyio.to_thread.run_sync(
+            lambda: chatstore.change_password(user, body.old_password, body.new_password))
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
         # 密码已变即吊销本人其余会话：否则旧会话凭滑动续期存活至 12h TTL，
@@ -479,15 +557,17 @@ if __name__ == "__main__":
     locate_retriever.build()
 
     @app.get("/api/locate", include_in_schema=False)
-    async def _locate(request: _fastapi.Request, doc: str, q: str = ""):
-        _require_active_user(request)
+    async def _locate(request: fastapi.Request, user: RequireUser,
+                      doc: str, q: str = ""):
         doc = os.path.basename(doc)
-        if doc not in acl.allowed_docs(_current_user(request)):
+        if doc not in acl.allowed_docs(user):
             return {"found": False}   # 无权文档：与"没找到"无差别，不泄露存在性
         if not q.strip():
             return {"found": False}
-        hits = locate_retriever.search(q, top_k=1, rerank=False,
-                                       allowed_sources={doc})
+        # 检索含 query embedding 网络往返 + BM25 分词，下放线程池
+        hits = await anyio.to_thread.run_sync(
+            lambda: locate_retriever.search(q, top_k=1, rerank=False,
+                                            allowed_sources={doc}))
         if not hits:
             return {"found": False}
         return {"found": True, "text": hits[0].text, "page": hits[0].page}
@@ -501,8 +581,8 @@ if __name__ == "__main__":
         answer: str = Field(..., min_length=1, max_length=4000)
 
     @app.post("/api/suggest", include_in_schema=False)
-    async def _suggest(body: SuggestIn, request: _fastapi.Request):
-        _require_active_user(request)
+    async def _suggest(body: SuggestIn, request: fastapi.Request,
+                           _user: RequireUser):
         answer = body.answer.strip()
         if len(answer) < 80:   # 过短内容（报错/拒答）不生成
             return {"suggestions": []}
@@ -510,13 +590,16 @@ if __name__ == "__main__":
         cached = chatstore.get_suggestions(key)
         if cached:
             return {"suggestions": cached, "cached": True}
-        items = suggest_mod.generate_suggestions(body.question, answer)
+        # 生成走同步 LLM 调用，下放线程池（缓存未命中时必触发）
+        items = await anyio.to_thread.run_sync(
+            suggest_mod.generate_suggestions, body.question, answer)
         chatstore.save_suggestions(key, items)
         return {"suggestions": items, "cached": False}
 
     # ---- SSE 流式聊天（前后端分离新 UI 的应答协议层，与 Gradio 主链路并存） ----
     # 事件：cache/thinking/token/step/error/final/done，见 docmind/chat_stream.py
     import json as _json
+    import threading as _threading
     from fastapi.responses import StreamingResponse
     from docmind import chat_stream as chat_stream_mod
     from docmind.metrics import SSE_ACTIVE_STREAMS
@@ -533,16 +616,15 @@ if __name__ == "__main__":
         image_data: "str | list[str]" = Field(default="", max_length=60_000_000)
 
     @app.post("/api/chat/stream", include_in_schema=False)
-    async def _chat_stream(body: ChatIn, request: _fastapi.Request):
-        user = _require_active_user(request)   # 401/403 校验须在 try 外，避免被吞成 500
+    async def _chat_stream(body: ChatIn, request: fastapi.Request,
+                           user: RequireUser):
+        # 认证经 Depends 完成（user 参数）
         question = body.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="question 不能为空")
-        # 会话归属校验：防重建/写入他人会话上下文
+        # 会话归属校验：防重建/写入他人会话上下文（新会话尚未落库，放行）
         if body.session_id:
-            owner = chatstore.session_owner(body.session_id)
-            if owner not in (None, "", user):
-                raise HTTPException(status_code=403, detail="无权访问该会话")
+            _check_session_access(request, body.session_id, allow_missing=True)
 
         # 自定义助手接入：解析绑定的 KB 列表与 system prompt；
         # 空串/"default" 走原默认链路（缓存/单库检索/内置提示词均不变）
@@ -566,66 +648,85 @@ if __name__ == "__main__":
             image_md += "\n"
         img_data_url = img_list if img_list else None
 
-        def gen():
+        # 取消信号：客户端断连（CancelledError 杀掉 async gen）时通知
+        # producer 停止，不再启动下一轮 LLM/工具调用——否则用户关页后
+        # Agent 继续烧完整轮 token
+        cancel_event = _threading.Event()
+
+        def _produce(_emit) -> None:
+            """producer 线程：跑 stream_events 并落库。
+
+            落库放在 producer 收尾而非 gen 循环之后——客户端中途断连时
+            gen 被提前终止，落库逻辑若在 gen 里会被跳过，
+            整轮对话（含已产生的完整回答）不入库。⚠️ 兜底文案不入库
+            （错误模板进 raw 会污染后续多轮上下文）。"""
+            final_raw = ""
+            try:
+                req_agent = create_agent(registry, system_prompt=sp)
+                for ev in chat_stream_mod.stream_events(
+                        req_agent, question, body.session_id, user,
+                        assistant_id=assistant_id, system_prompt=sp,
+                        image_data=img_data_url, kb_ids=kb_ids):
+                    if cancel_event.is_set():
+                        break
+                    if ev["kind"] == "final":
+                        final_raw = ev["answer"]
+                    _emit(ev)
+                if body.session_id and final_raw and not final_raw.startswith("⚠️"):
+                    try:
+                        # 与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）。
+                        # 图片消息：content 内嵌 markdown 图（前端气泡展示），
+                        # raw 用纯问题文本（多轮上下文重建不带 base64）。
+                        # 一轮问答单事务落库：两条消息原子写入
+                        chatstore.append_exchange(
+                            body.session_id,
+                            image_md + question, question,
+                            final_raw,
+                            user=user, assistant_id=assistant_id)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"SSE 会话持久化失败: {e}")
+            except Exception:  # noqa: BLE001 - producer 异常收敛为流结束
+                logger.exception("SSE producer 异常")
+            finally:
+                _emit(None)
+
+        async def gen():
+            """async generator：producer 线程经 call_soon_threadsafe 投递
+            事件到 asyncio.Queue——原同步生成器由 Starlette 的
+            iterate_in_threadpool 驱动，每个 SSE chunk 一次线程池调度
+            往返，叠加 producer 线程一条消息涉及 3 类线程；改 async 后
+            事件直达事件循环，断连取消也更干净（CancelledError 直达
+            finally）。"""
             try:
                 SSE_ACTIVE_STREAMS.inc()
             except Exception:  # noqa: BLE001 - 指标故障不影响应答
                 pass
-            tok = chat_stream_mod.current_kb_ids.set(kb_ids)
+            loop = asyncio.get_running_loop()
+            aq: asyncio.Queue = asyncio.Queue()
+
+            def _emit(ev) -> None:
+                loop.call_soon_threadsafe(aq.put_nowait, ev)
+
             try:
-                final_raw = ""
-                req_agent = create_agent(registry, system_prompt=sp)
-
-                # SSE 心跳:联网搜索/工具调用期间可能 15-40s 无 token,
-                # 中间代理与客户端易按空闲超时断连——producer 线程产事件,
-                # 主生成器 15s 无数据即发 keepalive 注释行(SSE 标准忽略)
-                import queue as _queue
-                import threading as _threading
-
-                _evq: _queue.Queue = _queue.Queue()
-
-                def _produce():
-                    try:
-                        for ev in chat_stream_mod.stream_events(
-                                req_agent, question, body.session_id, user,
-                                assistant_id=assistant_id, system_prompt=sp,
-                                image_data=img_data_url):
-                            _evq.put(ev)
-                    finally:
-                        _evq.put(None)
-
-                _threading.Thread(target=_produce, daemon=True).start()
-
+                _threading.Thread(target=_produce, args=(_emit,),
+                                  daemon=True).start()
                 while True:
                     try:
-                        ev = _evq.get(timeout=15)
-                    except _queue.Empty:
+                        # SSE 心跳:联网搜索/工具调用期间可能 15-40s 无 token,
+                        # 中间代理与客户端易按空闲超时断连——15s 无数据即发
+                        # keepalive 注释行(SSE 标准忽略)
+                        ev = await asyncio.wait_for(aq.get(), timeout=15)
+                    except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
                         continue
                     if ev is None:
                         break
-                    if ev["kind"] == "final":
-                        final_raw = ev["answer"]
                     yield f"event: {ev['kind']}\ndata: {_json.dumps(ev, ensure_ascii=False)}\n\n"
-                # 落库：与主链路 persist_pair 一致（raw 纯净终答供多轮上下文重建）。
-                # 图片消息：content 内嵌 markdown 图（前端气泡展示），
-                # raw 用纯问题文本（多轮上下文重建不带 base64）
-                if body.session_id and final_raw:
-                    try:
-                        chatstore.append_message(body.session_id, "user",
-                                                 image_md + question, raw=question,
-                                                 user=user, assistant_id=assistant_id)
-                        chatstore.append_message(body.session_id, "assistant",
-                                                 final_raw, raw=final_raw, user=user,
-                                                 assistant_id=assistant_id)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"SSE 会话持久化失败: {e}")
                 yield f"event: done\ndata: {_json.dumps({'session_id': body.session_id}, ensure_ascii=False)}\n\n"
             finally:
-                try:
-                    chat_stream_mod.current_kb_ids.reset(tok)
-                except Exception:  # noqa: BLE001
-                    pass
+                # 任何退出路径（正常结束/客户端断连触发 CancelledError）都
+                # 通知 producer 停止，防止断连后 token 持续消耗
+                cancel_event.set()
                 try:
                     SSE_ACTIVE_STREAMS.dec()
                 except Exception:  # noqa: BLE001
@@ -636,30 +737,37 @@ if __name__ == "__main__":
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/sessions", include_in_schema=False)
-    async def _list_sessions(request: _fastapi.Request):
-        user = _require_active_user(request)   # 401/403 校验须在 try 外，避免被吞成 500
+    async def _list_sessions(request: fastapi.Request, user: RequireUser,
+                             limit: int = 50, offset: int = 0):
+        """会话列表（分页：limit/offset 可选，默认值保持旧行为）"""
+        # 认证经 Depends 完成（user 参数）
         try:
-            return chatstore.list_sessions(user=user)
+            # 相关子查询随消息量增长变慢，下放线程池
+            return await anyio.to_thread.run_sync(
+                lambda: chatstore.list_sessions(
+                    user=user, limit=max(1, min(limit, 200)),
+                    offset=max(0, offset)))
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"会话列表获取失败: {e}")
+            raise server_error("会话列表获取失败", e)
 
     @app.delete("/api/sessions/{session_id}", include_in_schema=False)
-    async def _delete_session(session_id: str, request: _fastapi.Request):
-        _require_active_user(request)
+    async def _delete_session(session_id: str, request: fastapi.Request,
+                              _user: RequireUser):
         _check_session_access(request, session_id)
         try:
             chatstore.delete_session(session_id)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"会话删除失败: {e}")
+            raise server_error("会话删除失败", e)
         return {"ok": True}
 
     @app.get("/api/sessions/{session_id}/export", include_in_schema=False)
-    async def _export_session(session_id: str, request: _fastapi.Request):
+    async def _export_session(session_id: str, request: fastapi.Request,
+                              user: RequireUser):
         """导出会话为 Markdown（存档/分享）：user/assistant 逐轮输出，
         图片附件以链接形式保留"""
-        _require_active_user(request)
         _check_session_access(request, session_id)
-        rows = chatstore.get_messages_full(session_id) or []
+        rows = await anyio.to_thread.run_sync(
+            lambda: chatstore.get_messages_full(session_id) or [])
         if not rows:
             raise HTTPException(status_code=404, detail="会话不存在或无消息")
         import datetime as _dt
@@ -667,7 +775,9 @@ if __name__ == "__main__":
         # 会话标题：优先取列表中的会话（title），取不到用 id 兜底
         title = session_id
         try:
-            for s in chatstore.list_sessions(user=_current_user(request)):
+            sessions = await anyio.to_thread.run_sync(
+                lambda: chatstore.list_sessions(user=user))
+            for s in sessions:
                 if s.get("id") == session_id:
                     title = s.get("title") or session_id
                     break
@@ -692,24 +802,22 @@ if __name__ == "__main__":
                      f"attachment; filename*=UTF-8''{_quote(f'{safe_title}.md')}"})
 
     @app.get("/api/sessions/{session_id}/messages", include_in_schema=False)
-    async def _get_messages(session_id: str, request: _fastapi.Request):
-        _require_active_user(request)
+    async def _get_messages(session_id: str, request: fastapi.Request,
+                            _user: RequireUser):
         _check_session_access(request, session_id)
         try:
-            return chatstore.get_messages_full(session_id)
+            return await anyio.to_thread.run_sync(
+                lambda: chatstore.get_messages_full(session_id))
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"消息获取失败: {e}")
+            raise server_error("消息获取失败", e)
 
     # ---- GDPR 合规：个人数据导出（可携带权）与账号级联删除（被遗忘权） ----
-    from fastapi.responses import JSONResponse
-
     @app.get("/api/me/export", include_in_schema=False)
-    async def _export_my_data(request: _fastapi.Request):
-        user = _require_user(request)
+    async def _export_my_data(request: fastapi.Request, user: RequireUser):
         try:
-            data = chatstore.export_user_data(user)
+            data = await anyio.to_thread.run_sync(chatstore.export_user_data, user)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"数据导出失败: {e}")
+            raise server_error("数据导出失败", e)
         if "error" in data:
             raise HTTPException(status_code=404, detail=data["error"])
         return JSONResponse(content=data, headers={
@@ -717,9 +825,8 @@ if __name__ == "__main__":
         })
 
     @app.post("/api/me/delete", include_in_schema=False)
-    async def _delete_my_account(request: _fastapi.Request):
-        user = _require_user(request)
-        result = chatstore.delete_user_cascade(user)
+    async def _delete_my_account(request: fastapi.Request, user: RequireUser):
+        result = await anyio.to_thread.run_sync(chatstore.delete_user_cascade, user)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         response = JSONResponse(content={"ok": True, **result})
@@ -729,8 +836,6 @@ if __name__ == "__main__":
         return response
 
     # ---- React 前端静态服务(7860 直连场景;生产 nginx 时同样可用) ----
-    _dist_dir = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "web", "dist")
     if os.path.isdir(_dist_dir):
         from fastapi.staticfiles import StaticFiles
 
@@ -757,7 +862,14 @@ if __name__ == "__main__":
                 return FileResponse(candidate)
             return FileResponse(os.path.join(_dist_dir, "index.html"))
 
+    return app
+
+
+if __name__ == "__main__":
     # ---- 启动(uvicorn 阻塞式,信号优雅退出;MCP 连接随进程退出清理) ----
+    import uvicorn
+
+    app = create_app()
     _host = os.getenv("DOCMIND_HOST", "127.0.0.1")
     _port = int(os.getenv("DOCMIND_PORT", "7860"))
     logger.info(f"DocMind 启动: http://{_host}:{_port}")
@@ -770,5 +882,3 @@ if __name__ == "__main__":
     uvicorn.run(app, host=_host, port=_port, log_level="warning",
                 proxy_headers=True,
                 forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"))
-
-    finally_placeholder = None  # noqa
