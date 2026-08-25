@@ -62,7 +62,7 @@ if __name__ == "__main__":
         os.path.abspath(__file__))), "web", "dist")
 
     if not os.path.isdir(_dist_dir):
-        _FRIENDLY_PAGE = """<!doctype html>
+        _PAGE_STYLE = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DocMind</title>
@@ -79,36 +79,52 @@ if __name__ == "__main__":
  a.btn:hover{{background:#1d4ed8}}
  .tip{{font-size:12px;color:#86909c;margin-top:18px}}
 </style></head><body><div class="card">
-<h1>这里是 DocMind 的 API 后端</h1>
+{body}</div></body></html>"""
+
+        # 场景一：浏览器直连后端调试端口（7860）——说明端口用错并给出正确入口
+        _PAGE_BACKEND = _PAGE_STYLE.format(body="""<h1>这里是 DocMind 的 API 后端</h1>
 <p>此端口（<code>{port}</code>）仅供程序调试直连，没有可交互的网页界面。</p>
 <p>请从下面入口登录使用：</p>
 <a class="btn" href="{url}">打开 DocMind（端口 80）</a>
-<p class="tip">若链接不可达，请联系管理员确认 nginx 服务（frontend 容器）是否在运行。</p>
-</div></body></html>"""
+<p class="tip">若链接不可达，请联系管理员确认 nginx 服务（frontend 容器）是否在运行。</p>""")
 
-        def _friendly_backend_page(request: "_fastapi.Request") -> str:
-            # 反射 Host 头拼正确入口链接：先 HTML 转义防 Host 头注入，再剥掉
-            # 当前调试端口换 80（nginx 入口）。取不到 Host 时退化为相对提示
+        # 场景二：经 nginx（80 入口）落到后端的浏览器 404/405——中性提示，
+        # 不能误导用户「去 80 端口」（用户明明就在 80 上）
+        _PAGE_NOTFOUND = _PAGE_STYLE.format(body="""<h1>页面不存在或请求方式不支持</h1>
+<p>您访问的地址无法打开。如未进入 DocMind 主界面，请从首页进入：</p>
+<a class="btn" href="{url}">返回 DocMind 首页</a>""")
+
+        def _friendly_backend_page(request: "_fastapi.Request",
+                                   backend_notice: bool) -> str:
+            # Host 头先 HTML 转义防注入；partition 安全取端口——
+            # 经 nginx 转发的 Host 不带端口（如 "127.0.0.1"），
+            # 旧版 split(":")[1] 在此越界致 500（已修复的回归）
             host = _html.escape(request.headers.get("host") or "", quote=True)
-            if host:
-                bare = host.split(":", 1)[0]
-                return _FRIENDLY_PAGE.format(port=host.split(":", 1)[1] or "7860",
-                                             url=f"http://{bare}/")
-            return _FRIENDLY_PAGE.format(port="7860", url="/")
+            bare, _, port = host.partition(":")
+            if backend_notice:
+                return _PAGE_BACKEND.format(port=port or "7860",
+                                            url=f"http://{bare}/")
+            return _PAGE_NOTFOUND.format(url=f"http://{bare}/")
 
         @app.get("/", include_in_schema=False)
         async def _backend_root(request: _fastapi.Request):
+            # GET / 只有直连后端才会命中（经 nginx 的 / 由 SPA 托管）
             return _fastapi.responses.HTMLResponse(
-                _friendly_backend_page(request))
+                _friendly_backend_page(request, backend_notice=True))
 
         @app.exception_handler(404)
         @app.exception_handler(405)
         async def _friendly_404_405(request: _fastapi.Request, exc):
-            # 浏览器导航才给友好页；API 客户端（前端 fetch/脚本）保持 JSON 契约
+            # 浏览器导航才给友好页；API 客户端（前端 fetch/脚本）保持 JSON 契约。
+            # Host 无端口或 :80 → 请求经 nginx（用户就在正确入口），
+            # 用中性 404 文案；带其他端口（如 :7860）→ 直连后端，提示换入口
             status = getattr(exc, "status_code", 404)
             if "text/html" in (request.headers.get("accept") or "").lower():
+                port = (request.headers.get("host") or "").partition(":")[2]
+                backend_notice = port not in ("", "80")
                 return _fastapi.responses.HTMLResponse(
-                    _friendly_backend_page(request), status_code=status)
+                    _friendly_backend_page(request, backend_notice),
+                    status_code=status)
             return _fastapi.responses.JSONResponse(
                 {"detail": getattr(exc, "detail", "Not Found")}, status_code=status)
 
