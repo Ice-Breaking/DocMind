@@ -32,6 +32,28 @@ def login():
     return True
 
 
+def cleanup_user():
+    """收尾：管理员级联删除 e2e 账号（连带会话/消息/反馈），避免污染生产库。
+
+    历史教训：只建号不清理，测试会话在审计页长期残留，附件被清理后
+    成为永久死链（破图）。提供 DOCMIND_ADMIN_USER/DOCMIND_ADMIN_PWD
+    即自动清理；未提供则跳过并提示手动删除。
+    """
+    admin, pwd = os.getenv("DOCMIND_ADMIN_USER"), os.getenv("DOCMIND_ADMIN_PWD")
+    if not (admin and pwd):
+        print("提示: 设置 DOCMIND_ADMIN_USER/DOCMIND_ADMIN_PWD 可在跑完自动删除"
+              f"测试账号 {USER}（或手动在用户管理页删除）")
+        return
+    admin_sess = requests.Session()
+    r = admin_sess.post(f"{BASE}/login", data={"username": admin, "password": pwd},
+                        allow_redirects=False, timeout=15)
+    if r.status_code not in (200, 302):
+        print(f"清理跳过: 管理员登录失败 {r.status_code}")
+        return
+    d = admin_sess.delete(f"{BASE}/api/admin/users/{USER}", timeout=15)
+    print(f"清理测试账号 {USER}: {'已级联删除 ' + str(d.json().get('deleted')) if d.status_code == 200 else 'HTTP ' + str(d.status_code)}")
+
+
 def ask(question, session_id="", timeout=120):
     """调用 SSE 对话接口,返回 (事件列表, 首token耗时, 总耗时, final文本)"""
     t0 = time.time()
@@ -160,3 +182,5 @@ print(json.dumps({"total": len(RESULTS), "passed": ok,
 with open(os.getenv("DOCMIND_E2E_OUT", "/tmp/e2e_results.json"), "w", encoding="utf-8") as fp:
     json.dump(RESULTS, fp, ensure_ascii=False, indent=2)
 print("明细已写入", os.getenv("DOCMIND_E2E_OUT", "/tmp/e2e_results.json"))
+
+cleanup_user()
