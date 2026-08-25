@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- DocMind 每日自动备份（macOS launchd）
+     安装: cp scripts/com.docmind.backup.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.docmind.backup.plist
+     卸载: launchctl bootout gui/$(id -u)/com.docmind.backup && rm ~/Library/LaunchAgents/com.docmind.backup.plist
+     立即试跑: launchctl kickstart gui/$(id -u)/com.docmind.backup
+     注: 项目目录变更时需同步修改下方脚本绝对路径 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.docmind.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/natural/Documents/QoderCN/2026-08-13/chat-1/scripts/backup.sh</string>
+    </array>
+    <!-- 每日 03:00；错点（睡眠/关机）在下次唤醒时补跑一次 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/natural/Documents/QoderCN/2026-08-13/chat-1/data/backups/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/natural/Documents/QoderCN/2026-08-13/chat-1/data/backups/launchd.log</string>
+</dict>
+</plist>

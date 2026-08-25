@@ -54,6 +54,34 @@ services:
           memory: 4g
           cpus: "2.0"
 
+  # 定时备份 sidecar：每日 3:00 备份卷数据到宿主机 ./data/backups（保留 14 天）。
+  # 复用 docmind 镜像（自带 python3+sqlite3，离线可跑，无需拉新镜像）。
+  # 不用宿主机 launchd/crontab：macOS TCC 保护 ~/Documents，宿主调度器无权
+  # 读取项目文件（实测 Operation not permitted）；容器内调度完全绕开，
+  # 且「启动即补跑」覆盖 Mac 睡眠错过 03:00 / 新环境首次部署两种场景。
+  # 「启动即补跑」覆盖 Mac 睡眠错过 03:00 / 新环境首次部署两种场景。
+  # 手动立即备份：docker exec chat-1-backup-1 python3 -u scripts/backup_scheduler.py --once
+  backup:
+    image: docmind:latest
+    volumes:
+      - docmind-data:/source:ro                   # 只读挂载：备份进程无写权限，防误删源
+      - ./docs/knowledge:/app/docs/knowledge:ro   # 知识库热内容（镜像内为构建时快照）
+      - ./scripts:/app/scripts:ro                 # 调度脚本（镜像未 COPY scripts/）
+      - ./data/backups:/app/data/backups          # 落盘宿主机（已 gitignore）
+    command: python3 -u scripts/backup_scheduler.py
+    # 镜像内置 HEALTHCHECK 探测 7860 应用端口，sidecar 不跑应用必 unhealthy；
+    # 调度进程自身由 restart 兜底，无需健康检查
+    healthcheck:
+      disable: true
+    depends_on:
+      - docmind
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+
   # 自托管元搜索引擎（联网搜索兜底）：免费无限量，作为 Tavily 的降级兜底
   # docmind 容器内通过 Docker 网络直连 http://searxng:8080
   # 本机调试可访问 http://localhost:8080
