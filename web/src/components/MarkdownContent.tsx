@@ -23,6 +23,18 @@ function isMermaidLike(cls: string, text: string): boolean {
   );
 }
 
+// 图片加载失败占位：附件文件被清理/丢失时（如历史 e2e 会话），以灰底提示
+// 代替浏览器破图图标。data URI SVG 规避额外网络请求，CSP img-src 允许 data:
+const IMG_FALLBACK =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="280" height="120">` +
+      `<rect width="100%" height="100%" fill="#f5f5f5" rx="8"/>` +
+      `<text x="50%" y="50%" text-anchor="middle" dominant-baseline="central" ` +
+      `fill="#999" font-size="13" font-family="system-ui,sans-serif">` +
+      `图片附件不存在或已清理</text></svg>`,
+  );
+
 const MarkdownContent = memo(function MarkdownContent({
   content,
   onLocate,
@@ -48,6 +60,7 @@ const MarkdownContent = memo(function MarkdownContent({
         <Image
           src={src}
           alt={alt || ''}
+          fallback={IMG_FALLBACK}
           style={{ maxWidth: 280, borderRadius: 8, margin: '4px 0' }}
           preview={{ mask: '点击预览' }}
         />

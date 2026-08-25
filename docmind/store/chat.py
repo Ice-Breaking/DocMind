@@ -1,6 +1,7 @@
 """会话/消息/反馈/追问建议：聊天持久化核心。
 
 连接经包门面晚绑定获取（store._conn()），便于测试整体替换 DB。"""
+import os
 import time
 from docmind import store
 
@@ -189,11 +190,21 @@ def list_all_sessions(limit: int = 100) -> list[dict]:
            FROM sessions s LEFT JOIN messages m ON m.session_id = s.id
            GROUP BY s.id ORDER BY s.updated_at DESC LIMIT ?""", (limit,)).fetchall()
     out = []
+    # uploads 目录与 docs_api._UPLOADS_DIR 同布局（容器/本地 CWD 均为项目根）
+    _uploads_dir = os.path.join("data", "uploads")
     for r in rows:
         m = _img_re.search(r["first_user_content"] or "")
+        img = m.group(1) if m else ""
+        if img:
+            # 文件已被清理/丢失时返回空串：审计页按 first_image 条件渲染
+            # 缩略图，空串不渲染 <Image>，避免破图图标（实测 e2e 会话
+            # 附件被清理后审计列表长期挂破图）
+            if not os.path.isfile(os.path.join(_uploads_dir,
+                                               os.path.basename(img))):
+                img = ""
         out.append({"id": r["id"], "user": r["user"] or "(匿名)", "title": r["title"],
                     "msg_count": r["msg_count"], "updated_at": r["updated_at"],
-                    "first_image": m.group(1) if m else ""})
+                    "first_image": img})
     return out
 
 
