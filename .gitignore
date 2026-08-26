@@ -34,3 +34,10 @@ node_modules/
 
 # 前端构建产物（本地构建即可，不入库；web/.gitignore 同步忽略）
 web/dist/
+
+# LoRA 微调实验的大体积产物（训练环境 / 基座权重 / adapter 与合并产物）
+# 训练数据 data/lora/*.jsonl 已被上方 data/ 规则覆盖；可复现命令见 scripts/lora/README.md
+.venv-lora/
+models/
+saves/
+scripts/lora/Modelfile.rewrite   # merge_and_serve.sh 生成物（含本机绝对路径）

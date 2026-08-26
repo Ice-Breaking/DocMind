@@ -1,0 +1,56 @@
+# LoRA 微调配置 · 检索查询改写器（LLaMA-Factory，llamafactory-cli train 本文件即训）
+#
+# 选型说明（面试可讲）：
+# - 底座 Qwen2.5-1.5B-Instruct：M4 24GB 上 CPU/GPU(MPS) 均可训，合并后
+#   Ollama 直接托管，推理占用 <2GB 内存——改写这种窄任务小模型足够
+# - lora_target all + rank 8：窄任务（问题改写）低秩即可拟合，rank 再高
+#   只会增加过拟合面与合并体积
+# - 学习率 1e-4 是 LoRA-SFT 的常规起点；3 epoch 防止小数据背题
+
+### model
+# 本地路径（由 ModelScope 预下载，见 scripts/lora/README.md 步骤 0）；
+# 也可改回 'Qwen/Qwen2.5-1.5B-Instruct' 配合 HF_ENDPOINT=https://hf-mirror.com 自动拉取
+model_name_or_path: models/Qwen2.5-1.5B-Instruct
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+
+### dataset
+dataset_dir: data/lora
+dataset: query_rewrite
+template: qwen
+cutoff_len: 512
+max_samples: 100000
+overwrite_cache: true
+preprocessing_num_workers: 4
+
+### output
+output_dir: saves/qwen2.5-1.5b-rewrite/lora-sft
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+report_to: none
+
+### train
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 2
+learning_rate: 1.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: false          # Apple MPS 不支持 bf16，开 fp16 或直接注释走默认
+fp16: false
+ddp_timeout: 180000000
+
+### eval
+val_size: 0.05
+per_device_eval_batch_size: 8
+eval_strategy: steps
+eval_steps: 100

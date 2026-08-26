@@ -1,0 +1,5 @@
+# 由 merge_and_serve.sh 自动生成；FROM 指向合并后导出的 GGUF 文件
+FROM /Users/natural/Documents/QoderCN/2026-08-13/chat-1/saves/qwen2.5-1.5b-rewrite/rewrite-f16.gguf
+PARAMETER temperature 0.1
+PARAMETER num_predict 128
+SYSTEM """把下面的用户问题改写为适合知识库检索的规范查询，只输出改写后的问题本身。"""
