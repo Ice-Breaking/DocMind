@@ -538,6 +538,8 @@ def create_app() -> fastapi.FastAPI:
     register_retrieval_routes(app)
     from docmind.eval_api import register_eval_routes
     register_eval_routes(app)
+    from docmind.ragas_eval import register_ragas_routes
+    register_ragas_routes(app)   # RAGAS 四指标生成质量评测（管理员）
     from docmind.platform_api import register_platform_routes
     register_platform_routes(app)
     from docmind.voice_api import register_voice_routes

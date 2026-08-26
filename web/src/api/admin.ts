@@ -171,6 +171,44 @@ export async function fetchQuality(days = 30): Promise<QualityData> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  RAGAS 式生成质量评测                                                 */
+/* ------------------------------------------------------------------ */
+
+export interface RagasMetric {
+  score: number | null;
+  note?: string;   // score 为 null 时的原因（判官解析失败 / 执行异常等）
+}
+
+export interface RagasResult {
+  metrics: Record<string, RagasMetric>;
+  summary: { avg_score: number | null; scored_metrics: number };
+  meta: { question: string; contexts: number; elapsed_ms: number };
+}
+
+/** 单条 RAGAS 四指标评估（忠实度/答案相关性/上下文精确率/召回率） */
+export async function runRagas(body: {
+  question: string;
+  answer: string;
+  contexts: string[];
+  expected_answer?: string;
+}): Promise<RagasResult> {
+  const r = await fetch('/api/admin/eval/ragas', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 401) throw new Error('UNAUTHORIZED');
+  if (!r.ok) {
+    let detail = 'HTTP ' + r.status;
+    try {
+      detail = (await r.json()).detail || detail;
+    } catch { /* 非 JSON 错误体，保留默认 */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+/* ------------------------------------------------------------------ */
 /*  审计中心                                                            */
 /* ------------------------------------------------------------------ */
 

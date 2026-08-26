@@ -17,6 +17,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
@@ -41,11 +42,13 @@ import {
   fetchKbs,
   fetchQuality,
   runEval,
+  runRagas,
   updateEvalDataset,
   type EvalDataset,
   type EvalRun,
   type KnowledgeBase,
   type QualityData,
+  type RagasResult,
 } from '../api';
 
 const { Text } = Typography;
@@ -594,6 +597,167 @@ function QualityTab() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Tab 4: 生成质量（RAGAS 式四指标，LLM-as-judge）                      */
+/* ------------------------------------------------------------------ */
+
+const RAGAS_METRICS: { key: string; name: string }[] = [
+  { key: 'faithfulness', name: '忠实度' },
+  { key: 'answer_relevancy', name: '答案相关性' },
+  { key: 'context_precision', name: '上下文精确率' },
+  { key: 'context_recall', name: '上下文召回率' },
+];
+
+function ragasScoreColor(v: number): string {
+  return v >= 0.8 ? '#389e0d' : v >= 0.6 ? '#d48806' : '#cf1322';
+}
+
+interface RagasFormValues {
+  question: string;
+  answer: string;
+  contexts_text: string;
+  expected_answer?: string;
+}
+
+function RagasTab() {
+  const { message: msgApi } = App.useApp();
+  const [result, setResult] = useState<RagasResult | null>(null);
+  const [form] = Form.useForm<RagasFormValues>();
+
+  const mut = useMutation({
+    mutationFn: runRagas,
+    onSuccess: (data) => setResult(data),
+    onError: (e: Error) => msgApi.error(e.message || '评估失败'),
+  });
+
+  const submit = (values: RagasFormValues) => {
+    const contexts = values.contexts_text
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (contexts.length === 0) {
+      msgApi.warning('请至少填写一行检索上下文');
+      return;
+    }
+    mut.mutate({
+      question: values.question.trim(),
+      answer: values.answer.trim(),
+      contexts,
+      expected_answer: values.expected_answer?.trim() || undefined,
+    });
+  };
+
+  return (
+    <>
+      <div style={{ marginBottom: 16 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          RAGAS 式生成质量评测：判官由大模型担任，单条评估约需 10~30 秒；
+          忠实度是防幻觉核心指标，持续低于 60% 需优先排查检索与提示词。
+        </Text>
+      </div>
+      <Form
+        form={form}
+        layout="vertical"
+        onFinish={submit}
+        style={{ maxWidth: 760 }}
+      >
+        <Form.Item
+          name="question"
+          label="用户问题"
+          rules={[{ required: true, message: '请输入用户问题' }]}
+        >
+          <Input placeholder="例如：什么是 RetrievalOps？" />
+        </Form.Item>
+        <Form.Item
+          name="answer"
+          label="模型回答"
+          rules={[{ required: true, message: '请输入模型回答' }]}
+        >
+          <Input.TextArea rows={4} placeholder="粘贴待评估的回答原文" />
+        </Form.Item>
+        <Form.Item
+          name="contexts_text"
+          label="检索上下文（每行一条）"
+          rules={[{ required: true, message: '请输入至少一条检索上下文' }]}
+        >
+          <Input.TextArea rows={5} placeholder={'片段一……\n片段二……'} />
+        </Form.Item>
+        <Form.Item
+          name="expected_answer"
+          label="参考答案（可选，提供后追加评估「上下文召回率」）"
+        >
+          <Input.TextArea rows={2} placeholder="人工标注的标准答案" />
+        </Form.Item>
+        <Space>
+          <Button
+            type="primary"
+            icon={<CaretRightOutlined />}
+            loading={mut.isPending}
+            htmlType="submit"
+          >
+            开始评估
+          </Button>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            判官走既有 llm.chat 通道，自动获得重试 / 指标 / 追踪；单指标失败不影响其余
+          </Text>
+        </Space>
+      </Form>
+
+      {result && (
+        <>
+          <Row gutter={16} style={{ marginTop: 24 }}>
+            {RAGAS_METRICS.map(({ key, name }) => {
+              const m = result.metrics[key];
+              const score = m?.score;
+              const hasScore = typeof score === 'number';
+              return (
+                <Col xs={24} sm={12} lg={6} key={key}>
+                  <Card size="small">
+                    <Statistic
+                      title={name}
+                      value={
+                        hasScore
+                          ? Math.round((score as number) * 1000) / 10
+                          : '—'
+                      }
+                      suffix={hasScore ? '%' : undefined}
+                      valueStyle={
+                        hasScore
+                          ? { color: ragasScoreColor(score as number) }
+                          : undefined
+                      }
+                    />
+                    {!hasScore && m?.note && (
+                      <Tooltip title={m.note}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          未计分：{(m.note || '').slice(0, 40)}
+                        </Text>
+                      </Tooltip>
+                    )}
+                  </Card>
+                </Col>
+              );
+            })}
+          </Row>
+          <div style={{ marginTop: 12 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              平均分{' '}
+              <Text strong style={{ color: result.summary.avg_score != null ? ragasScoreColor(result.summary.avg_score) : undefined }}>
+                {result.summary.avg_score != null
+                  ? `${(result.summary.avg_score * 100).toFixed(1)}%`
+                  : '—'}
+              </Text>{' '}
+              · 计分指标 {result.summary.scored_metrics}/4 · 耗时{' '}
+              {(result.meta.elapsed_ms / 1000).toFixed(1)} s · 上下文{' '}
+              {result.meta.contexts} 条
+            </Text>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -617,6 +781,7 @@ export default function Eval() {
           { key: 'datasets', label: '评测集', children: <DatasetsTab kbs={kbs} /> },
           { key: 'runs', label: '运行记录', children: <RunsTab /> },
           { key: 'quality', label: '质量监控', children: <QualityTab /> },
+          { key: 'ragas', label: '生成质量', children: <RagasTab /> },
         ]}
       />
     </div>
