@@ -102,3 +102,23 @@ _PYTHON = sys.executable
 MCP_SERVERS = {
     "weather": [_PYTHON, os.path.join(PROJECT_ROOT, "mcp_servers", "weather_server.py")],
 }
+
+# ── 本地小模型 + 大小模型智能路由（见 docmind/model_router.py）──────────────
+# Ollama / vLLM 等 OpenAI 兼容端点；Ollama 默认 http://localhost:11434/v1
+LOCAL_LLM_ENABLED = os.getenv("LOCAL_LLM_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+# SDK 要求 api_key 非空；Ollama 不校验该值，vLLM 未设 token 时同样任意非空即可
+LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "ollama")
+LOCAL_CHAT_MODEL = os.getenv("LOCAL_CHAT_MODEL", "qwen2.5:7b")
+
+# 路由开关：开启后寒暄类/超短无知识意图请求走本地小模型，其余仍走云端主模型；
+# 本地调用失败自动降级回云端（与项目「增强类故障永不阻断主链路」原则一致）
+MODEL_ROUTER = os.getenv("MODEL_ROUTER", "true").strip().lower() in ("1", "true", "yes")
+
+# FAQ 灰度分流：把 x% 的知识问答也确定性分流到本地小模型（0=关闭）。
+# 按问题文本 md5 分桶，同题永远同后端（会话内一致），灰度比例可平滑放大。
+ROUTER_FAQ_OFFLOAD_PCT = max(0, min(100, int(os.getenv("ROUTER_FAQ_OFFLOAD_PCT", "0"))))
+# 判定「超短请求」的字符上限（配合寒暄正则一起命中才路由到本地）
+ROUTER_TRIVIAL_MAX_CHARS = int(os.getenv("ROUTER_TRIVIAL_MAX_CHARS", "24"))
+# 本地模型请求超时秒数：超过即视为本地不可用，立即降级云端（不等满重试周期）
+LOCAL_TIMEOUT_SECONDS = float(os.getenv("LOCAL_TIMEOUT_SECONDS", "20"))

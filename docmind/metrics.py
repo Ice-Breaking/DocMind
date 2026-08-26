@@ -86,3 +86,11 @@ ERRORS = Counter(
     'Total errors',
     ['stage']  # 'llm', 'tool', 'stream', 'auth'
 )
+
+# 大小模型路由指标（docmind/model_router.py）：backend=local/cloud，
+# reason=multimodal/tools/thinking/explicit/trivial/default/off/fallback
+LLM_ROUTES = Counter(
+    'docmind_llm_route_total',
+    'LLM routing decisions',
+    ['backend', 'reason']
+)

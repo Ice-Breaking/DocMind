@@ -15,17 +15,21 @@ from openai import (
 )
 
 from docmind import config
+from docmind import model_router
 from docmind import trace
-from docmind.metrics import ERRORS, LLM_CALLS, LLM_LATENCY, LLM_TOKENS
+from docmind.metrics import ERRORS, LLM_CALLS, LLM_LATENCY, LLM_ROUTES, LLM_TOKENS
 
 logger = logging.getLogger(__name__)
 
 
-def _record_llm_metrics(status: str, start: float, resp=None) -> None:
-    """记录 LLM 调用指标；任何异常静默吞掉，绝不影响主链路"""
+def _record_llm_metrics(status: str, start: float, resp=None,
+                        model: str | None = None) -> None:
+    """记录 LLM 调用指标；任何异常静默吞掉，绝不影响主链路。
+    model：实际使用的模型名（路由分流后可能与 config.CHAT_MODEL 不同）"""
     try:
-        LLM_CALLS.labels(model=config.CHAT_MODEL, status=status).inc()
-        LLM_LATENCY.labels(model=config.CHAT_MODEL).observe(time.time() - start)
+        _m = model or config.CHAT_MODEL
+        LLM_CALLS.labels(model=_m, status=status).inc()
+        LLM_LATENCY.labels(model=_m).observe(time.time() - start)
         if resp is not None and getattr(resp, "usage", None):
             LLM_TOKENS.labels(direction="input").inc(resp.usage.prompt_tokens or 0)
             LLM_TOKENS.labels(direction="output").inc(resp.usage.completion_tokens or 0)
@@ -99,6 +103,26 @@ def get_client() -> OpenAI:
     return _get_or_create_client(base_url, api_key)
 
 
+def _route_targets(messages: list[dict] | None, has_tools: bool,
+                   thinking: bool, model: str | None) -> list[tuple]:
+    """计算按优先级排列的调用目标列表，每项
+    (model, base_url, api_key, backend, reason)。
+
+    - 调用方显式指定 model 时不路由（多模态等场景调用方最清楚该用谁）
+    - 主目标为本地小模型时在尾部追加云端降级项：本地不可用逐个回退，
+      增强类故障永不阻断主链路"""
+    cloud_cfg = _active_cfg("llm")
+    if model:
+        return [(model, cloud_cfg[1], cloud_cfg[2],
+                 "cloud", model_router.REASON_EXPLICIT)]
+    d = model_router.resolve(messages, cloud_cfg,
+                             has_tools=has_tools, thinking=thinking)
+    targets = [(*d.target(), d.backend, d.reason)]
+    if d.backend == "local":
+        targets.append((*cloud_cfg, "cloud", "fallback"))
+    return targets
+
+
 def _with_retry(fn):
     """瞬时错误指数退避 + 抖动重试，避免偶发限流/超时导致回答中断。
 
@@ -151,33 +175,59 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     若模型决定调工具，返回的 message.tool_calls 非空。
     max_tokens：限制输出长度，None 时使用 config.MAX_OUTPUT_TOKENS 防止截断。
     temperature：生成温度，None 时使用默认值 0.1。
-    model：显式覆盖模型（如多模态消息须用 VISION_MODEL），None 用在线配置。"""
+    model：显式覆盖模型（如多模态消息须用 VISION_MODEL），None 用在线配置。
+
+    大小模型路由：未显式指定模型时经 model_router 分流——寒暄/超短请求
+    走本地小模型（省成本+低延迟），其余走云端主模型；本地失败自动降级
+    云端重试一次（增强类故障永不阻断主链路）。
+    """
     kwargs = {}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
     # 默认使用配置的最大 token 数，防止回复被截断
     kwargs["max_tokens"] = max_tokens if max_tokens is not None else config.MAX_OUTPUT_TOKENS
-    _model = model or _active_cfg("llm")[0]
-    with trace.span("llm-chat", kind="generation", model=_model,
+    _targets = _route_targets(messages, bool(tools), False, model)
+
+    with trace.span("llm-chat", kind="generation", model=_targets[0][0],
                     input=_brief_messages(messages)) as ctx:
         _start = time.time()
-        try:
-            resp = _with_retry(lambda: get_client().chat.completions.create(
-                model=_model,
-                messages=messages,
-                temperature=temperature if temperature is not None else 0.1,
-                extra_body=_vl_extra_body(messages) or None,
-                **kwargs,
-            ))
-        except Exception:
-            _record_llm_metrics("error", _start)
+        resp = None
+        _used_model = None
+        for tgt in _targets:
+            _model, _base, _key, _backend, _reason = tgt
             try:
-                ERRORS.labels(stage="llm").inc()
-            except Exception:  # noqa: BLE001
-                pass
-            raise
-        _record_llm_metrics("success", _start, resp)
+                LLM_ROUTES.labels(backend=_backend, reason=_reason).inc()
+                cli = _get_or_create_client(
+                    _base, _key,
+                    timeout=(config.LOCAL_TIMEOUT_SECONDS
+                             if _backend == "local" else 60.0))
+                resp = _with_retry(
+                    lambda m=_model, c=cli: c.chat.completions.create(
+                        model=m,
+                        messages=messages,
+                        temperature=temperature if temperature is not None else 0.1,
+                        extra_body=_vl_extra_body(messages) or None,
+                        **kwargs,
+                    ))
+                _used_model = _model
+                break
+            except Exception as exc:
+                if _backend == "local":
+                    # 本地是「增强」不是依赖：失败立即降级云端再试
+                    LLM_ROUTES.labels(backend="cloud", reason="fallback").inc()
+                    logger.warning("本地模型 %s 调用失败，降级云端：%s",
+                                   _model, exc)
+                    continue
+                _record_llm_metrics("error", _start, model=_model)
+                try:
+                    ERRORS.labels(stage="llm").inc()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        if resp is None:  # pragma: no cover - 目标列表恒非空，防御式兜底
+            raise RuntimeError("LLM 调用目标列表为空")
+        _record_llm_metrics("success", _start, resp, model=_used_model)
         msg = resp.choices[0].message
         ctx["output"] = (msg.content or f"[调用工具: {[tc.function.name for tc in msg.tool_calls]}]")[:300] if msg.tool_calls or msg.content else ""
         if getattr(resp, "usage", None):
@@ -190,11 +240,14 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
                 model: str | None = None):
     """流式对话：yield ChatCompletionChunk，调用方自行累积内容与 tool_calls。
 
-    带 usage 统计（stream_options）；创建阶段的瞬时错误同样退避重试。
+    带 usage 统计（stream_options）；建流阶段的瞬时错误同样退避重试。
     enable_thinking=True 时请求百炼思维链（delta.reasoning_content 逐段返回），
     仅部分模型支持：不支持的模型报参数错误，自动去掉该参数重试（降级不影响主链路）。
     max_tokens：限制输出长度，None 时使用 config.MAX_OUTPUT_TOKENS 防止截断。
     model：显式覆盖模型（多模态消息用 VISION_MODEL），None 用在线配置。
+
+    大小模型路由：与 chat() 同规则；降级只发生在建流阶段（任何 chunk 尚未
+    产出之前），一旦开始产出绝不切换后端——保证单次回答内容来自同一模型。
     """
     kwargs = {"stream": True, "stream_options": {"include_usage": True}}
     if tools:
@@ -203,28 +256,43 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
     # 默认使用配置的最大 token 数
     kwargs["max_tokens"] = max_tokens if max_tokens is not None else config.MAX_OUTPUT_TOKENS
 
-    _model = model or _active_cfg("llm")[0]
+    _targets = _route_targets(messages, bool(tools), enable_thinking, model)
 
-    def _create(thinking: bool):
-        extra = {"enable_thinking": True} if thinking else {}
-        extra.update(_vl_extra_body(messages))   # 多模态消息自动高分辨率
-        return get_client().chat.completions.create(
-            model=_model,
-            messages=messages,
-            # 百炼建议：开启思维链时温度不宜过低（0.1 易陷入重复推理）
-            temperature=0.6 if thinking else 0.1,
-            extra_body=extra or None,
-            **kwargs,
-        )
+    def _open_stream(target: tuple):
+        """对单个目标建立流（含思维链不支持时去参重试）；返回 Stream 对象。"""
+        m, base_url, key, backend = target[0], target[1], target[2], target[3]
+        timeout = (config.LOCAL_TIMEOUT_SECONDS if backend == "local"
+                   else 60.0)
+        cli = _get_or_create_client(base_url, key, timeout=timeout)
+        _model = m
 
-    def _stream_with_metrics(gen):
+        def _create(thinking: bool):
+            extra = {"enable_thinking": True} if thinking else {}
+            extra.update(_vl_extra_body(messages))   # 多模态消息自动高分辨率
+            return cli.chat.completions.create(
+                model=_model,
+                messages=messages,
+                # 百炼建议：开启思维链时温度不宜过低（0.1 易陷入重复推理）
+                temperature=0.6 if thinking else 0.1,
+                extra_body=extra or None,
+                **kwargs,
+            )
+
+        try:
+            return _with_retry(lambda th=enable_thinking: _create(th))
+        except BadRequestError:
+            if not enable_thinking:
+                raise
+            return _with_retry(lambda: _create(False))
+
+    def _stream_with_metrics(gen, used_model: str):
         """流式指标包装：首 chunk 记成功/耗时，usage 尾包记 token，异常记 error"""
         _start = time.time()
         _counted = False
         try:
             for chunk in gen:
                 if not _counted:
-                    _record_llm_metrics("success", _start)
+                    _record_llm_metrics("success", _start, model=used_model)
                     _counted = True
                 if getattr(chunk, "usage", None):
                     try:
@@ -234,19 +302,29 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None,
                         pass
                 yield chunk
         except Exception:
-            _record_llm_metrics("error", _start)
+            _record_llm_metrics("error", _start, model=used_model)
             try:
                 ERRORS.labels(stage="llm").inc()
             except Exception:  # noqa: BLE001
                 pass
             raise
 
-    try:
-        yield from _stream_with_metrics(_with_retry(lambda: _create(enable_thinking)))
-    except BadRequestError:
-        if not enable_thinking:
+    last_err: Exception | None = None
+    for tgt in _targets:
+        try:
+            LLM_ROUTES.labels(backend=tgt[3], reason=tgt[4]).inc()
+            stream = _open_stream(tgt)
+        except Exception as exc:
+            last_err = exc
+            if tgt[3] == "local":
+                # 建流失败且尚未产出任何内容 → 安全降级云端
+                LLM_ROUTES.labels(backend="cloud", reason="fallback").inc()
+                logger.warning("本地模型 %s 建流失败，降级云端：%s", tgt[0], exc)
+                continue
             raise
-        yield from _stream_with_metrics(_with_retry(lambda: _create(False)))
+        yield from _stream_with_metrics(stream, used_model=tgt[0])
+        return
+    raise last_err  # pragma: no cover - 目标列表恒非空，防御式兜底
 
 
 def embed(texts: list[str]) -> list[list[float]]:
