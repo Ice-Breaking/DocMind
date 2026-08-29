@@ -7,6 +7,7 @@
 """
 import hashlib
 import os
+import pathlib
 import re
 
 import anyio
@@ -34,10 +35,12 @@ if not getattr(_ssl.create_default_context, "_dm_patched", False):
 import fastapi
 from fastapi import HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse, Response
+from urllib.parse import urlparse
 
 from docmind.deps import RequireUser
 from docmind import config
 from docmind.api_utils import server_error
+from docmind.docs_api import _fetch_public
 
 TTS_CACHE_DIR = os.path.join(config.PROJECT_ROOT, "data", "tts_cache")
 TTS_URL = ("https://dashscope.aliyuncs.com/api/v1/services/aigc/"
@@ -83,9 +86,17 @@ def _synthesize(text: str, voice: str) -> bytes:
     url = (r.json().get("output") or {}).get("audio", {}).get("url")
     if not url:
         raise RuntimeError(f"TTS 无音频返回: {r.text[:200]}")
-    ar = requests.get(url, timeout=60)
-    ar.raise_for_status()
-    return ar.content
+    # 音频 URL 来自上游报文（不可信输入）：先限制结果域名白名单，再走
+    # _fetch_public 的 SSRF 加固抓取（公网 IP 校验+防 rebinding+禁重定向）
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or not host.endswith(".aliyuncs.com"):
+        raise RuntimeError("TTS 返回的音频地址来源非预期，已拒绝下载")
+    try:
+        resp = _fetch_public(url)
+    except (ValueError, HTTPException) as e:
+        raise RuntimeError(f"音频下载被安全策略拒绝: {e}") from e
+    return resp.content
 
 
 def register_voice_routes(app) -> None:
@@ -137,11 +148,11 @@ def register_voice_routes(app) -> None:
         if not text:
             raise HTTPException(status_code=400, detail="无可播报内容")
         os.makedirs(TTS_CACHE_DIR, exist_ok=True)
-        key = hashlib.md5(f"{voice}|{text}".encode("utf-8")).hexdigest()
+        key = hashlib.sha256(f"{voice}|{text}".encode("utf-8")).hexdigest()
         cached = os.path.join(TTS_CACHE_DIR, f"{key}.wav")
         if os.path.isfile(cached):
-            with open(cached, "rb") as f:
-                return Response(f.read(), media_type="audio/wav")
+            return Response(pathlib.Path(cached).read_bytes(),
+                            media_type="audio/wav")
         try:
             # 合成 + 音频下载是同步网络 IO（timeout 最长 60s），必须下放
             # 线程池——事件循环冻结期间全站无响应（QA 审查发现，与 OCR 同类）
@@ -151,6 +162,5 @@ def register_voice_routes(app) -> None:
         except Exception as e:  # noqa: BLE001
             # 上游 TTS SDK 报文不外泄（可能含 endpoint/凭证线索）
             raise server_error("语音合成", e, __name__)
-        with open(cached, "wb") as f:
-            f.write(audio)
+        pathlib.Path(cached).write_bytes(audio)
         return Response(audio, media_type="audio/wav")

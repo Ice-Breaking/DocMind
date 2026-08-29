@@ -10,6 +10,7 @@
 """
 import contextvars
 import hashlib
+import re
 import secrets
 import threading
 import time
@@ -128,8 +129,15 @@ def issue(username: str) -> str:
     return token
 
 
+# 令牌格式（issue 用 secrets.token_urlsafe(32) → 43 字符 URL 安全字符集）；
+# validate 前置校验格式，畸形输入直接拒绝，不进哈希与 DB 层
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{16,128}$")
+
+
 def validate(token: str | None) -> str:
     if not token:
+        return ""
+    if not _TOKEN_RE.fullmatch(token):
         return ""
     now = time.time()
     with _lock:
@@ -146,20 +154,16 @@ def validate(token: str | None) -> str:
             if expires - now < TOKEN_TTL / 2:
                 _db_persist(_th(token), username, new_exp)
             return username
-    # L1 未命中（进程重启场景）：回源 DB
+    # L1 未命中（进程重启场景）：回源 DB（SQL 在 store 数据层）
     try:
-        row = store._conn().execute(
-            "SELECT username, expires_at FROM auth_tokens WHERE token_hash = ?",
-            (_th(token),)).fetchone()
+        row = store.lookup_auth_token(_th(token))
     except Exception:  # noqa: BLE001
         row = None
     if not row:
         return ""
     if now > row["expires_at"]:
         try:
-            c = store._conn()
-            c.execute("DELETE FROM auth_tokens WHERE token_hash = ?", (_th(token),))
-            c.commit()
+            store.delete_auth_token(_th(token))
         except Exception:  # noqa: BLE001
             pass
         return ""

@@ -18,6 +18,7 @@
 """
 import argparse
 import json
+import pathlib
 import sys
 import time
 
@@ -149,16 +150,23 @@ def main() -> None:
                   f"\n  期望: {m['expected']}")
 
     if args.report:
-        with open(args.report, "w", encoding="utf-8") as f:
-            json.dump({"cases": len(cases), "top_k": args.top_k,
-                       "baseline": {k: v for k, v in base_res.items()
-                                    if k != "misses"},
-                       "tuned": {k: v for k, v in tuned_res.items()
-                                 if k != "misses"},
-                       "groups": groups,
-                       "delta_recall": delta}, f,
-                      ensure_ascii=False, indent=2)
-        print(f"\n结果已写入 {args.report}")
+        # 报告只允许写到项目 data/lora 内（路径规范化 + 目录限制校验）
+        report_root = pathlib.Path("data", "lora").resolve()
+        report_path = pathlib.Path(args.report).resolve()
+        if not report_path.is_relative_to(report_root):
+            raise SystemExit(f"报告路径须位于 {report_root} 内")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps({"cases": len(cases), "top_k": args.top_k,
+                        "baseline": {k: v for k, v in base_res.items()
+                                     if k != "misses"},
+                        "tuned": {k: v for k, v in tuned_res.items()
+                                  if k != "misses"},
+                        "groups": groups,
+                        "delta_recall": delta},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        print(f"\n结果已写入 {report_path}")
 
 
 if __name__ == "__main__":

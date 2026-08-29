@@ -10,6 +10,7 @@
 输出:每用例的耗时、SSE 事件序列、工具轨迹、引用来源与断言结果。
 """
 import json
+import pathlib
 import time
 
 import requests
@@ -179,8 +180,10 @@ print("=" * 70)
 ok = sum(1 for r in RESULTS if r["passed"])
 print(json.dumps({"total": len(RESULTS), "passed": ok,
                   "failed": len(RESULTS) - ok}, ensure_ascii=False))
-with open(os.getenv("DOCMIND_E2E_OUT", "/tmp/e2e_results.json"), "w", encoding="utf-8") as fp:
-    json.dump(RESULTS, fp, ensure_ascii=False, indent=2)
-print("明细已写入", os.getenv("DOCMIND_E2E_OUT", "/tmp/e2e_results.json"))
+out_path = pathlib.Path("data", "eval", "e2e_results.json")
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(RESULTS, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+print("明细已写入", out_path)
 
 cleanup_user()

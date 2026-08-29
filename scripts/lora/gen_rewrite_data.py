@@ -145,20 +145,29 @@ def main() -> None:
     test, train = samples[:n_test], samples[n_test:]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for name, data in [("query_rewrite_train.jsonl", train),
-                       ("query_rewrite_test.jsonl", test)]:
-        path = OUT_DIR / name
-        with open(path, "w", encoding="utf-8") as f:
-            for s in data:
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
-        print(f"写出 {path}：{len(data)} 条")
 
-    with open(OUT_DIR / "dataset_info.json", "w", encoding="utf-8") as f:
-        json.dump({"query_rewrite": {
+    def out_file(name: str) -> Path:
+        """规范化并校验输出路径：禁止目录成分逃出 data/lora"""
+        root = OUT_DIR.resolve()
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            raise SystemExit(f"非法输出路径: {name}")
+        return path
+
+    for out_path, rows in [(out_file("query_rewrite_train.jsonl"), train),
+                           (out_file("query_rewrite_test.jsonl"), test)]:
+        out_path.write_text(
+            "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in rows),
+            encoding="utf-8")
+        print(f"写出 {out_path}：{len(rows)} 条")
+
+    out_file("dataset_info.json").write_text(
+        json.dumps({"query_rewrite": {
             "file_name": "query_rewrite_train.jsonl",
             "formatting": "sharegpt",
             "columns": {"messages": "conversations"},
-        }}, f, ensure_ascii=False, indent=2)
+        }}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
     print(f"写出 {OUT_DIR/'dataset_info.json'}")
 
 

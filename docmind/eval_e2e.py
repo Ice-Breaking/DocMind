@@ -20,6 +20,7 @@
 import argparse
 import json
 import os
+import pathlib
 import re
 import time
 from datetime import datetime
@@ -188,10 +189,10 @@ def main() -> int:
     out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "data", "eval")
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"e2e_report_{datetime.now():%Y%m%d_%H%M%S}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"summary": summary, "results": results}, f,
-                  ensure_ascii=False, indent=2)
+    path = pathlib.Path(out_dir) / f"e2e_report_{datetime.now():%Y%m%d_%H%M%S}.json"
+    path.write_text(json.dumps({"summary": summary, "results": results},
+                               ensure_ascii=False, indent=2),
+                    encoding="utf-8")
     print(f"\n报告已保存: {path}")
     return 0
 

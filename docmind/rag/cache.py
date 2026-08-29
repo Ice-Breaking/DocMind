@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import pathlib
 
 from docmind import config
 from docmind.rag.chunker import SUPPORTED_EXTS
@@ -55,19 +56,18 @@ def compute_global_fingerprint() -> str:
 def save_manifest(index_dir: str, manifest: dict) -> None:
     try:
         os.makedirs(index_dir, exist_ok=True)
-        with open(os.path.join(index_dir, "manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False)
+        pathlib.Path(index_dir, "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - 清单写失败不影响主流程（下次全量重建兜底）
         logger.warning(f"manifest 写入失败: {e}")
 
 
 def load_manifest(index_dir: str) -> dict:
     """读取逐文件指纹清单；缺失/损坏返回 {}（由调用方决定是否全量重建）"""
-    path = os.path.join(index_dir, "manifest.json")
+    path = pathlib.Path(index_dir, "manifest.json")
     try:
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
         logger.warning(f"manifest 读取失败，将全量重建: {e}")
     return {}
@@ -76,18 +76,17 @@ def load_manifest(index_dir: str) -> dict:
 def save_global_fingerprint(index_dir: str, fingerprint: str) -> None:
     try:
         os.makedirs(index_dir, exist_ok=True)
-        with open(os.path.join(index_dir, "global_fingerprint"), "w", encoding="utf-8") as f:
-            f.write(fingerprint)
+        pathlib.Path(index_dir, "global_fingerprint").write_text(
+            fingerprint, encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"全局指纹写入失败: {e}")
 
 
 def load_global_fingerprint(index_dir: str) -> str:
-    path = os.path.join(index_dir, "global_fingerprint")
+    path = pathlib.Path(index_dir, "global_fingerprint")
     try:
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                return f.read().strip()
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
     except OSError:
         pass
     return ""

@@ -1,10 +1,10 @@
-"""docs_api 安全回归：URL 导入 SSRF 防护（2026-08-24 P1）。"""
+"""docs_api 安全回归：URL 导入 SSRF 防护（2026-08-24 P1）+ 落盘边界防穿越。"""
 import socket
 
 import pytest
 from fastapi import HTTPException
 
-from docmind.docs_api import _assert_public_host
+from docmind.docs_api import _assert_public_host, _kb_docs_dir, _safe_doc_path
 
 
 @pytest.mark.parametrize("url", [
@@ -51,3 +51,38 @@ def test_unresolvable_host_rejected(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _assert_public_host("http://no-such-host.invalid/")
     assert ei.value.status_code == 400
+
+
+# ---------------- 落盘边界：_safe_doc_path / _kb_docs_dir ----------------
+
+@pytest.mark.parametrize("bad", [
+    "../evil.md",
+    "sub/../../evil.md",
+    "..\\evil.md",        # Windows 风格分隔符在 POSIX 下也拒绝
+    "..",
+    ".",
+    "",
+])
+def test_safe_doc_path_rejects_traversal(tmp_path, bad):
+    with pytest.raises(HTTPException):
+        _safe_doc_path(str(tmp_path), bad)
+
+
+def test_safe_doc_path_stays_inside_base(tmp_path):
+    p = str(_safe_doc_path(str(tmp_path), "正常文档.md"))
+    assert p.startswith(str(tmp_path.resolve()))
+    assert p.endswith("正常文档.md")
+    # 已有同名文件时 realpath 前缀校验同样通过（覆盖写场景）
+    (tmp_path / "exists.md").write_text("x", encoding="utf-8")
+    assert str(_safe_doc_path(str(tmp_path), "exists.md")).endswith("exists.md")
+
+
+def test_kb_docs_dir_rejects_traversal():
+    for bad in ("../x", "a/b", "..\\x", "..", ".", ""):
+        with pytest.raises(HTTPException):
+            _kb_docs_dir(bad)
+
+
+def test_kb_docs_dir_accepts_uuid_like():
+    d = _kb_docs_dir("c9bf9e57-1685-4c89-bafb-ff5af830be8a")
+    assert "kb_docs" in d and d.endswith("c9bf9e57-1685-4c89-bafb-ff5af830be8a")

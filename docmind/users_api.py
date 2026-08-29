@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from docmind.deps import RequireAdmin, RequireUser
 from docmind import store
+from docmind.docs_api import _safe_doc_path
 
 _USERNAME_RE = re.compile(r"^[\w.@-]{2,64}$")
 
@@ -50,8 +51,7 @@ def register_users_routes(app) -> None:
         ext = "png" if ok_png else ("jpg" if ok_jpg else "webp")
         os.makedirs(AVATAR_DIR, exist_ok=True)
         fname = f"pending_{user}_{int(time.time() * 1000)}.{ext}"
-        with open(os.path.join(AVATAR_DIR, fname), "wb") as f:
-            f.write(data)
+        _safe_doc_path(AVATAR_DIR, fname).write_bytes(data)
         store.set_pending_avatar(user, fname)
         store.record_audit(user, "user.avatar-upload", f"user:{user}", fname)
         return {"ok": True, "pending": fname}

@@ -19,6 +19,7 @@ import argparse
 import io
 import os
 import json
+import secrets
 import struct
 import sys
 import time
@@ -28,6 +29,13 @@ import requests
 
 RESULTS = []
 TAG = "qa_e2e"
+
+# E2E 临时凭据：运行时随机生成，仅本次运行有效（临时用户测后级联删除），
+# 源码不落字面量口令
+QA_PASS = f"Qa{secrets.token_hex(6)}A1"
+QA_NEW_PASS = f"Qn{secrets.token_hex(6)}A2"
+QA_RESET_PASS = f"Qr{secrets.token_hex(6)}A3"
+WRONG_PASS = f"zw{secrets.token_hex(8)}"
 
 
 def rec(layer, name, ok, detail="", warn=False):
@@ -79,30 +87,30 @@ class QA:
     # ---------- L2 认证 ----------
     def auth(self, skip_lockout=False):
         r = requests.post(f"{self.base}/login",
-                          data={"username": "admin", "password": "wrong"})
+                          data={"username": "admin", "password": WRONG_PASS})
         rec(2, "错误密码 400", r.status_code == 400, f"got {r.status_code}")
         # qa 用户全生命周期
         r = self.s.post(f"{self.base}/api/admin/users",
                         json={"username": f"{TAG}_u1",
-                              "password": "QaPass123", "is_admin": False})
+                              "password": QA_PASS, "is_admin": False})
         self.created["users"].append(f"{TAG}_u1")
         rec(2, "创建用户（强制首登改密）", r.status_code in (200, 201))
         qa = requests.Session()
         r = qa.post(f"{self.base}/login",
-                    data={"username": f"{TAG}_u1", "password": "QaPass123"})
+                    data={"username": f"{TAG}_u1", "password": QA_PASS})
         rec(2, "首登 must_change_pwd", r.json().get("must_change_pwd") is True)
         r = qa.get(f"{self.base}/api/sessions")
         rec(2, "强制改密拦截 403", r.status_code == 403)
         r = qa.post(f"{self.base}/api/change-password",
-                    json={"old_password": "QaPass123", "new_password": "QaNew456"})
+                    json={"old_password": QA_PASS, "new_password": QA_NEW_PASS})
         rec(2, "修改密码", r.status_code == 200)
         rec(2, "改密后放行", qa.get(f"{self.base}/api/sessions").status_code == 200)
         rec(2, "旧密码失效", requests.post(
             f"{self.base}/login",
-            data={"username": f"{TAG}_u1", "password": "QaPass123"}).status_code == 400)
+            data={"username": f"{TAG}_u1", "password": QA_PASS}).status_code == 400)
         qa2 = requests.Session()
         qa2.post(f"{self.base}/login",
-                 data={"username": f"{TAG}_u1", "password": "QaNew456"})
+                 data={"username": f"{TAG}_u1", "password": QA_NEW_PASS})
         rec(2, "多设备并存",
             qa.get(f"{self.base}/api/sessions").status_code == 200
             and qa2.get(f"{self.base}/api/sessions").status_code == 200)
@@ -113,13 +121,13 @@ class QA:
         if not skip_lockout:
             self.s.post(f"{self.base}/api/admin/users",
                         json={"username": f"{TAG}_u2",
-                              "password": "QaPass123", "is_admin": False})
+                              "password": QA_PASS, "is_admin": False})
             self.created["users"].append(f"{TAG}_u2")
             for _ in range(5):
                 requests.post(f"{self.base}/login",
-                              data={"username": f"{TAG}_u2", "password": "bad"})
+                              data={"username": f"{TAG}_u2", "password": WRONG_PASS})
             r = requests.post(f"{self.base}/login",
-                              data={"username": f"{TAG}_u2", "password": "QaPass123"})
+                              data={"username": f"{TAG}_u2", "password": QA_PASS})
             rec(2, "防爆破锁定 403", r.status_code == 403, f"got {r.status_code}")
 
     # ---------- L3 知识库 ----------
@@ -335,19 +343,19 @@ class QA:
         # 用户管理闭环
         r = self.s.post(f"{self.base}/api/admin/users",
                         json={"username": f"{TAG}_u3",
-                              "password": "QaPass123", "is_admin": False})
+                              "password": QA_PASS, "is_admin": False})
         self.created["users"].append(f"{TAG}_u3")
         r = self.s.post(f"{self.base}/api/admin/users/{TAG}_u3/reset-password",
-                        json={"new_password": "QaReset456"})
+                        json={"new_password": QA_RESET_PASS})
         rec(7, "重置密码", r.status_code == 200)
         rec(7, "重置后可登录", requests.post(
             f"{self.base}/login",
-            data={"username": f"{TAG}_u3", "password": "QaReset456"}).status_code == 200)
+            data={"username": f"{TAG}_u3", "password": QA_RESET_PASS}).status_code == 200)
         rec(7, "级联删除", self.s.delete(
             f"{self.base}/api/admin/users/{TAG}_u3").status_code == 200)
         rec(7, "删除后登录拒绝", requests.post(
             f"{self.base}/login",
-            data={"username": f"{TAG}_u3", "password": "QaReset456"}).status_code == 400)
+            data={"username": f"{TAG}_u3", "password": QA_RESET_PASS}).status_code == 400)
 
     # ---------- 清理 ----------
     def cleanup(self):

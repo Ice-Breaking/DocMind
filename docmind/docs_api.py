@@ -5,6 +5,7 @@
 """
 import logging
 import os
+import pathlib
 import threading
 from datetime import datetime, timezone
 
@@ -124,8 +125,7 @@ def save_chat_image(data_url: str, owner: str = "") -> tuple[str, str]:
     ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
     fname = f"{int(_time.time() * 1000)}_{uuid.uuid4().hex[:6]}{ext}"
     os.makedirs(_UPLOADS_DIR, exist_ok=True)
-    with open(os.path.join(_UPLOADS_DIR, fname), "wb") as f:
-        f.write(raw)
+    _safe_doc_path(_UPLOADS_DIR, fname).write_bytes(raw)
     _record_upload(fname, owner)
     return fname, f"data:{mime};base64,{b64}"
 
@@ -134,6 +134,39 @@ def save_chat_image(data_url: str, owner: str = "") -> tuple[str, str]:
 # 解析器解压时耗尽内存/磁盘)。docx/xlsx 均为 zip 容器
 ZIP_MAX_UNCOMPRESSED = int(os.getenv("ZIP_MAX_UNCOMPRESSED",
                                      str(500 * 1024 * 1024)))   # 500MB
+
+
+def _safe_doc_path(base_dir: str, name: str) -> str:
+    """文件系统边界的安全拼接（最后防线，不依赖上游清洗）。
+
+    上游清洗负责业务语义（上传入口 basename、URL 导入字符过滤、
+    服务端生成名），本函数在落盘边界兜底：落盘名必须是纯文件名
+    （含任何路径分隔符即拒绝）+ realpath 前缀校验，保证结果必落在
+    base_dir 内——新增写盘点直接用它，无需再记住清洗义务。"""
+    normalized = name.replace("\\", "/")
+    if (not normalized or normalized in (".", "..")
+            or "/" in normalized):
+        raise HTTPException(status_code=400, detail="非法文件名")
+    safe_name = os.path.basename(normalized)
+    base_real = os.path.realpath(base_dir)
+    path = os.path.join(base_real, safe_name)
+    if not os.path.realpath(path).startswith(base_real + os.sep):
+        raise HTTPException(status_code=400, detail="非法文件路径")
+    return pathlib.Path(path)
+
+
+def _kb_docs_dir(kb_id: str) -> str:
+    """data/kb_docs/<kb_id> 目录解析的边界兜底：kb_id 一律由服务端生成
+    （create_kb 用 uuid4，default 另行走 KNOWLEDGE_DIR），此处强制单段
+    目录名并校验拼接结果不逃出 kb_docs，防 DB 被旁路写入异常 id。"""
+    if (not kb_id or "/" in kb_id or "\\" in kb_id
+            or kb_id in (".", "..")):
+        raise HTTPException(status_code=400, detail="非法知识库标识")
+    root = os.path.realpath(os.path.join("data", "kb_docs"))
+    path = os.path.join(root, kb_id)
+    if not os.path.realpath(path).startswith(root + os.sep):
+        raise HTTPException(status_code=400, detail="非法知识库标识")
+    return path
 
 
 def _validate_content(filename: str, content: bytes) -> None:
@@ -167,13 +200,13 @@ def _validate_content(filename: str, content: bytes) -> None:
 
 def _backup_existing(kb_id: str, filename: str, doc_dir: str) -> None:
     """同名覆盖前备份旧文件（保留最近 N 版），防内容意外丢失"""
-    fp = os.path.join(doc_dir, filename)
+    fp = _safe_doc_path(doc_dir, filename)
     if not os.path.isfile(fp):
         return
     vdir = os.path.join(_VERSIONS_DIR, kb_id)
     os.makedirs(vdir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dst = os.path.join(vdir, f"{filename}.{ts}.bak")
+    dst = _safe_doc_path(vdir, f"{filename}.{ts}.bak")
     try:
         os.replace(fp, dst)
         # 只保留最近 N 版
@@ -296,19 +329,18 @@ def _resolve_doc_dir(kb_id: str) -> str:
                 os.makedirs(doc_dir, exist_ok=True)
             except OSError:
                 doc_dir = (config.KNOWLEDGE_DIR if kb_id == "default"
-                           else os.path.join("data", "kb_docs", kb_id))
+                           else _kb_docs_dir(kb_id))
                 os.makedirs(doc_dir, exist_ok=True)
         return doc_dir
     doc_dir = (config.KNOWLEDGE_DIR if kb_id == "default"
-               else os.path.join("data", "kb_docs", kb_id))
+               else _kb_docs_dir(kb_id))
     os.makedirs(doc_dir, exist_ok=True)
     return doc_dir
 
 
 def _write_text_sync(path: str, content: str) -> None:
-    """文本写盘（供 async 路由经 to_thread 调用）"""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    """文本写盘（供 async 路由经 to_thread 调用；path 须经 _safe_doc_path）"""
+    pathlib.Path(path).write_text(content, encoding="utf-8")
 
 
 def _extract_html_article(html: str) -> tuple[str, str]:
@@ -391,8 +423,7 @@ def register_docs_routes(app) -> None:
         def _persist_sync() -> None:
             _check_quota(doc_dir, len(content))
             _backup_existing(kb_id, filename, doc_dir)
-            with open(os.path.join(doc_dir, filename), "wb") as f:
-                f.write(content)
+            _safe_doc_path(doc_dir, filename).write_bytes(content)
 
         await anyio.to_thread.run_sync(_persist_sync)
 
@@ -552,8 +583,7 @@ def register_docs_routes(app) -> None:
             _validate_content(filename, content)
             _check_quota(doc_dir, len(content))
             _backup_existing(kb_id, filename, doc_dir)
-            with open(os.path.join(doc_dir, filename), "wb") as f:
-                f.write(content)
+            _safe_doc_path(doc_dir, filename).write_bytes(content)
 
         await anyio.to_thread.run_sync(_persist_sync)
 
@@ -576,7 +606,7 @@ def register_docs_routes(app) -> None:
         if not filename:
             raise HTTPException(status_code=400, detail="文件名为空")
 
-        fp = os.path.join(doc_dir, filename)
+        fp = _safe_doc_path(doc_dir, filename)
         if not os.path.isfile(fp):
             raise HTTPException(status_code=404, detail="文件不存在")
 
@@ -643,7 +673,7 @@ def register_docs_routes(app) -> None:
         doc_dir = _resolve_doc_dir(kb_id)
 
         filename = os.path.basename(filename)
-        fp = os.path.join(doc_dir, filename)
+        fp = _safe_doc_path(doc_dir, filename)
 
         if not os.path.isfile(fp):
             raise HTTPException(status_code=404, detail="文件不存在")

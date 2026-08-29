@@ -5,6 +5,7 @@
 """
 import os
 import json
+import pathlib
 
 # 知识库目录
 KB_DIR = "data/kb_docs/default"
@@ -46,8 +47,7 @@ markdown_content = """# AI 大模型知识问答
 > 注意：大模型的能力取决于训练数据的质量和多样性
 """
 
-with open(os.path.join(KB_DIR, "AI大模型知识问答.md"), "w", encoding="utf-8") as f:
-    f.write(markdown_content)
+(pathlib.Path(KB_DIR) / "AI大模型知识问答.md").write_text(markdown_content, encoding="utf-8")
 
 # 2. Python 开发常见问题
 python_content = """# Python 开发常见问题
@@ -101,8 +101,7 @@ pip freeze > requirements.txt
 - 使用 `lru_cache` 缓存函数结果
 """
 
-with open(os.path.join(KB_DIR, "Python开发常见问题.md"), "w", encoding="utf-8") as f:
-    f.write(python_content)
+(pathlib.Path(KB_DIR) / "Python开发常见问题.md").write_text(python_content, encoding="utf-8")
 
 # 3. 产品手册
 product_content = """# DocMind 产品手册
@@ -149,8 +148,7 @@ DocMind 是一款企业级 RAG（检索增强生成）平台，帮助企业快�
 - 支持并发：100+ QPS
 """
 
-with open(os.path.join(KB_DIR, "产品手册.md"), "w", encoding="utf-8") as f:
-    f.write(product_content)
+(pathlib.Path(KB_DIR) / "产品手册.md").write_text(product_content, encoding="utf-8")
 
 # 4. 纯文本示例
 txt_content = """技术文档索引
@@ -172,8 +170,7 @@ txt_content = """技术文档索引
 - 文件大小限制：50 MB
 """
 
-with open(os.path.join(KB_DIR, "内部机密.md"), "w", encoding="utf-8") as f:
-    f.write(txt_content)
+(pathlib.Path(KB_DIR) / "内部机密.md").write_text(txt_content, encoding="utf-8")
 
 # 5. JSON 配置示例
 json_content = {
@@ -208,8 +205,7 @@ json_content = {
     }
 }
 
-with open(os.path.join(KB_DIR, "知识库配置.json"), "w", encoding="utf-8") as f:
-    json.dump(json_content, f, ensure_ascii=False, indent=2)
+(pathlib.Path(KB_DIR) / "知识库配置.json").write_text(json.dumps(json_content, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # 6. CSV 数据示例
 csv_content = """模型名称,参数量,训练数据,发布时间,开源状态
@@ -221,16 +217,13 @@ Qwen,1.8B-72B,3T tokens,2023-08,是
 Mistral,7B,未公开,2023-09,是
 """
 
-with open(os.path.join(KB_DIR, "大模型对比.csv"), "w", encoding="utf-8") as f:
-    f.write(csv_content)
+(pathlib.Path(KB_DIR) / "大模型对比.csv").write_text(csv_content, encoding="utf-8")
 
 print(f"✅ 示例文件已生成到: {KB_DIR}")
 print("\n生成的文件：")
-for filename in sorted(os.listdir(KB_DIR)):
-    filepath = os.path.join(KB_DIR, filename)
-    if os.path.isfile(filepath):
-        size = os.path.getsize(filepath)
-        print(f"  - {filename} ({size} bytes)")
+for entry in sorted(pathlib.Path(KB_DIR).iterdir()):
+    if entry.is_file():
+        print(f"  - {entry.name} ({entry.stat().st_size} bytes)")
 
 print("\n下一步：")
 print('1. 在知识库管理页面点击"重建索引"')

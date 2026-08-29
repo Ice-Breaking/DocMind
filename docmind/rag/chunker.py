@@ -17,6 +17,7 @@ import base64
 import hashlib
 import logging
 import os
+import pathlib
 import re
 
 from docmind import config
@@ -122,10 +123,9 @@ def _ocr_image(path: str) -> str:
         f"{os.path.basename(path)}:{st.st_size}:{st.st_mtime_ns}".encode()
     ).hexdigest()[:16]
     os.makedirs(OCR_CACHE_DIR, exist_ok=True)
-    cache_path = os.path.join(OCR_CACHE_DIR, fp + ".txt")
-    if os.path.isfile(cache_path):
-        with open(cache_path, encoding="utf-8") as f:
-            return f.read()
+    cache_path = pathlib.Path(OCR_CACHE_DIR, fp + ".txt")
+    if cache_path.is_file():
+        return cache_path.read_text(encoding="utf-8")
 
     import requests
 
@@ -150,8 +150,7 @@ def _ocr_image(path: str) -> str:
     text = (resp.json()["choices"][0]["message"]["content"] or "").strip()
     if not text:
         raise ValueError("OCR 未识别到文字")
-    with open(cache_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    cache_path.write_text(text, encoding="utf-8")
     return text
 
 

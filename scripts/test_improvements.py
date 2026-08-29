@@ -15,6 +15,9 @@ from typing import Any
 import requests
 
 BASE_URL = "http://127.0.0.1:7860"
+if not BASE_URL.startswith(("http://127.0.0.1", "http://localhost")):
+    # 本脚本直连聊天流接口，仅允许指向本机服务（SSRF 防线）
+    raise SystemExit("BASE_URL 必须是本机地址（127.0.0.1 / localhost）")
 SESSION_ID = f"test_{int(time.time())}"
 
 
@@ -45,8 +48,8 @@ def print_fail(msg: str):
 
 
 def stream_chat(question: str) -> dict[str, Any]:
-    """发送流式聊天请求，返回完整结果"""
-    url = f"{BASE_URL}/api/chat/stream"
+    """发送流式聊天请求，返回完整结果。
+    SSRF 防线：目标固定为本机服务端点（字面量），不参数化。"""
     data = {"question": question, "session_id": SESSION_ID}
 
     start_time = time.time()
@@ -54,7 +57,8 @@ def stream_chat(question: str) -> dict[str, Any]:
     events = []
 
     try:
-        resp = requests.post(url, json=data, stream=True, timeout=60)
+        resp = requests.post("http://127.0.0.1:7860/api/chat/stream",
+                             json=data, stream=True, timeout=60)
         resp.raise_for_status()
 
         for line in resp.iter_lines():
