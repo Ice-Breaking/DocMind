@@ -5,6 +5,8 @@
 - RRF（Reciprocal Rank Fusion）按排名而非分数融合，无需归一化两路量纲
 - Rerank 独立成级：初筛候选控制在 10 条以内再精排，兼顾效果与延迟/成本
 - Rerank 失败自动降级为 RRF 结果，保证可用性
+- 查询级热缓存（query_cache）：同题重复请求跳过 embedding/rerank 两次
+  网络往返，键含模型名与候选集指纹，内容/模型变化自动失效
 """
 import logging
 import os
@@ -16,6 +18,7 @@ import requests
 from rank_bm25 import BM25Okapi
 
 from docmind import config, trace
+from docmind.rag.query_cache import rerank_cached
 from docmind.rag.tokenize_cache import tokenize_cached
 from docmind.rag.vector_store import SearchHit, VectorStore
 
@@ -189,6 +192,11 @@ class HybridRetriever:
         return [(i, float(scores[i])) for i in order if scores[i] > 0]
 
     def _rerank(self, query: str, candidates: list[SearchHit], top_n: int) -> list[SearchHit]:
+        """带结果缓存的精排入口：同 (model, query, 候选集, top_n) 命中直接返回。
+        缓存只存成功结果，失败/熔断语义不变（见 query_cache.rerank_cached）"""
+        return rerank_cached(self._rerank_api, query, candidates, top_n)
+
+    def _rerank_api(self, query: str, candidates: list[SearchHit], top_n: int) -> list[SearchHit]:
         """百炼 gte-rerank 精排；失败时抛异常由上层降级。
         用 requests 而非 urllib：自带 certifi 根证书，规避 macOS 上
         urllib 常见的 CERTIFICATE_VERIFY_FAILED 问题"""

@@ -94,3 +94,15 @@ LLM_ROUTES = Counter(
     'LLM routing decisions',
     ['backend', 'reason']
 )
+
+# 查询级热缓存指标（docmind/rag/query_cache.py）：result=hit/miss
+QUERY_EMBED_CACHE = Counter(
+    'docmind_query_embed_cache_total',
+    'Query embedding cache lookups',
+    ['result']
+)
+RERANK_CACHE = Counter(
+    'docmind_rerank_cache_total',
+    'Rerank result cache lookups',
+    ['result']
+)

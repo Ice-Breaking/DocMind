@@ -24,6 +24,18 @@ def _isolate_tokenize_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(tokenize_cache, "_local", threading.local())
 
 
+@pytest.fixture(autouse=True)
+def _isolate_query_cache():
+    """查询级热缓存（embedding/rerank LRU）是进程级单例：前后清空，
+    防止同题不同 mock 行为的测试互相串扰"""
+    from docmind.rag import query_cache
+    query_cache._query_vec_cache.clear()
+    query_cache._rerank_cache.clear()
+    yield
+    query_cache._query_vec_cache.clear()
+    query_cache._rerank_cache.clear()
+
+
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     """store/acl/semantic_cache 全部指向临时 DB，互不污染真实数据"""

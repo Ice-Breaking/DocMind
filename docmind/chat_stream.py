@@ -24,6 +24,7 @@ from docmind import store
 from docmind.metrics import CACHE_HITS, CACHE_MISSES
 from docmind.agent.react_agent import default_system_prompt
 from docmind.llm import embed
+from docmind.rag.query_cache import embed_query_cached
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,9 @@ def stream_events(agent, question: str, session_id: str = "",
     bypass_cache = freshness_critical or image_data is not None
     if config.SEMANTIC_CACHE and use_cache and not bypass_cache:
         try:
-            q_vec = embed([question])[0]
+            # 查询向量走 LRU 热缓存（query_cache）：同题重复请求免一次
+            # embedding 网络往返；时效性问题本就不进缓存，无新鲜度冲突
+            q_vec = embed_query_cached(embed, question)
             current_query_vec.set((question, q_vec))   # 供检索层复用（文本一致时）
             hit = semantic_cache.lookup(q_vec, kb_ids)
         except Exception as e:  # noqa: BLE001 - 缓存故障不阻塞主链路

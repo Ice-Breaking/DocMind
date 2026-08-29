@@ -25,6 +25,7 @@ from docmind import config
 from docmind.llm import embed
 from docmind.rag import cache as cache_mod
 from docmind.rag.embed_cache import embed_cached
+from docmind.rag.query_cache import embed_query_cached
 from docmind.rag.cache import (
     compute_file_manifest,
     compute_global_fingerprint,
@@ -412,7 +413,9 @@ class VectorStore:
         if not chunks:
             return []
         k = top_k or config.TOP_K
-        q = query_vec if query_vec is not None else embed([query])[0]
+        # 查询向量走进程内 LRU（query_cache）：同题重复请求免一次 embedding
+        # 网络往返；键含模型名，在线切换 embedding 模型后自动换键失效
+        q = query_vec if query_vec is not None else embed_query_cached(embed, query)
 
         if self._chroma_ready and self._collection is not None:
             return self._search_chroma(q, k, allowed_sources)
