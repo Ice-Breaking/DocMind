@@ -90,6 +90,21 @@ flowchart TD
 
 > QPS 瓶颈在上游 LLM API（每请求 1 次 embedding + 1 次 rerank），优化路径：语义缓存 → embedding 缓存 → rerank 批量。
 
+**分层缓存优化（同代码 A/B，2026-08-30 实测）**：新增查询级热缓存（`docmind/rag/query_cache.py`，
+embedding 向量 LRU + rerank 结果 LRU，`QUERY_EMBED_CACHE`/`RERANK_CACHE` 开关，Prometheus 命中率可观测）。
+压测集 12 个固定问题：并发 1 每题只查 1 次（纯冷查询），并发 4/8 每题重复 4/8 次（热点查询）。
+
+| 场景 | 优化前 | 优化后 | 说明 |
+|---|---|---|---|
+| 并发 1（纯冷查询） | QPS 2.46 / P50 350ms | QPS 2.84 / P50 308ms | 无缓存收益场景，数字同级——缓存不伤冷启动 |
+| 并发 4（热点查询） | QPS 2.97 / P95 1390ms | **QPS 741 / P95 6ms** | 重复问题跳过全部上游往返 |
+| 并发 8（热点查询） | QPS 3.1 / P95 2573ms | **QPS 801 / P95 11ms** | 命中率 67%（12 miss + 24 hit）可复现 |
+
+> 解读：冷查询（长尾真实问题）走全链路不获益也不退化；热点问题（企业 FAQ 场景的常态）
+> 在 embedding→rerank 两级确定性缓存上直接跳过上游 API，吞吐提升约 240 倍。
+> 与答案级语义缓存、文档侧切片 embedding 缓存、CPU 级分词缓存构成四层缓存体系，
+> 每层按「确定性 + 失效成本」设计：键含模型名与候选集指纹，模型切换/知识库更新自动失效。
+
 **质量改进验证**：`python scripts/test_improvements_with_auth.py`（6 大核心问题测试）
 
 | 测试项 | 指标 | 状态 |
@@ -152,6 +167,18 @@ curl -X POST https://<domain>/open/v1/retrieve \
   -d '{"question": "什么是 RAG？", "top_k": 4}'
 ```
 
+- **MCP Server**：`mcp_servers/kb_server.py` 把知识检索暴露为标准 MCP 工具，Claude Desktop /
+  Cursor 等客户端在 IDE 里直接查企业知识库（文档级 ACL 与限流全部继承服务端策略）：
+
+```json
+{ "mcpServers": { "docmind-kb": {
+    "command": "/abs/path/.venv/bin/python",
+    "args": ["/abs/path/mcp_servers/kb_server.py"],
+    "env": { "DOCMIND_BASE": "https://<domain>", "DOCMIND_API_KEY": "dm_xxx" } } } }
+```
+
+验证：`python scripts/test_mcp_kb_server.py`（stdio 客户端端到端：握手 → list_tools → 真实检索 → 密钥吊销）
+
 ---
 
 ## 六、环境变量（.env）
@@ -166,6 +193,7 @@ curl -X POST https://<domain>/open/v1/retrieve \
 | LDAP_URL / LDAP_USER_DN_TEMPLATE | 企业 LDAP 登录（首登自动开通） | 空（禁用） |
 | ALERT_INTERVAL_MIN / ALERT_BADCASE_PENDING / ALERT_DAILY_COST / ALERT_ERROR_COUNT | 告警阈值 | 10 / 5 / 10.0 / 10 |
 | SEMANTIC_CACHE / CACHE_THRESHOLD | 语义缓存开关与相似度阈值 | true / 0.92 |
+| QUERY_EMBED_CACHE / RERANK_CACHE | 查询级热缓存开关（embedding 向量 / rerank 结果，LRU） | true / true |
 | TAVILY_API_KEY / SERPER_API_KEY / BING_SEARCH_KEY / SEARXNG_URL | 联网搜索（四级降级 + 并发 + 缓存） | 空 |
 | WEB_SEARCH_TIMEOUT / WEB_SEARCH_CACHE_TTL | 搜索超时（秒）与缓存 TTL（秒） | 8 / 1800 |
 | LANGFUSE_* | 调用链上报（不配则本地 JSONL） | 空 |
@@ -182,6 +210,7 @@ docmind/
 ├── agent/              # 手写 ReAct + 工具注册表 + 注入防护 guard
 ├── rag/                # chunker / vector_store(Chroma+manifest) / hybrid(BM25+RRF+rerank)
 │                       # kb_registry(多库 LRU) / semantic_cache / eval_set
+│                       # embed_cache(切片向量) / query_cache(查询级热缓存) / tokenize_cache
 ├── store.py            # SQLite：用户/会话/反馈/KB/助手/评测/告警/审计/密钥/任务
 ├── admin.py            # 管理端点：概览/badcase/会话审计/traces/用量/成本
 ├── assistants_api.py   # 助手与知识库 CRUD、异步重建、入库任务
@@ -227,7 +256,8 @@ docs/
 11. **时效性保障**：关键词检测（今天/今年/最新/新闻）强制联网 + 要求声明知识截止时间，防止过时信息误导
 12. **大小模型路由**：决策层纯函数化（`model_router.py`，永不抛异常）；规则优先级 显式模型 > 多模态 > 工具调用 > 思维链 > 寒暄白名单（分词全词匹配防误伤）> FAQ 灰度分流（md5 分桶、同题同后端、默认关闭）> 默认云端；本地为主目标时预置云端降级项，流式场景只在建流前降级（一旦产出绝不换后端）；成本收益用 `scripts/cost_report.py` 可复现测算
 13. **RAGAS 式评测自研**：四指标（忠实度=断言支持率、答案相关性=反向问题 embedding 相似度、上下文精确率=AP 排名加权、上下文召回率=逐句归因）；判官复用 `llm.chat` 自动获得重试/指标/追踪；单指标故障隔离为 score=None 不拖垮整体
-14. **LoRA 微调实验**：检索查询改写器（口语问题→规范查询），1.5B 低秩(rank8) SFT + Ollama 托管；数据由 eval_set 种子确定性加噪生成（可复现），收益用改写前后 Recall@k 对比量化——见 `scripts/lora/README.md`
+14. **LoRA 微调实验**：检索查询改写器（口语问题→规范查询），1.5B 低秩(rank8) SFT + Ollama 托管；数据由 eval_set 种子确定性加噪生成（可复现），收益用改写前后 Recall@k 对比量化——实测 126 样本总体 Recall@4 **0.754→0.794（+3.97pp）**、常规集 +6.17pp，困难集零提升已归因到知识库内容覆盖而非改写质量（见 `scripts/lora/README.md`）
+15. **查询级热缓存**：embedding 向量与 rerank 结果均为 (model, 输入) 的确定性函数，进程内 LRU 缓存，键含模型名与候选集指纹——模型切换/知识库更新自动换键失效；只缓存成功结果，熔断期间命中缓存的热点问题仍可正常精排；热点查询吞吐提升约 240 倍（见压测表），`QUERY_EMBED_CACHE`/`RERANK_CACHE` 开关支撑同代码 A/B 复测
 
 ---
 
@@ -237,8 +267,10 @@ docs/
 - ✅ 企业治理（审计、备份、告警、SLA、LDAP、用户管理、API Key、模型管理）
 - ✅ 大小模型路由（本地 Ollama 接入 + 寒暄分流 + 云端降级链）
 - ✅ RAGAS 式生成质量评测（忠实度/相关性/精确率/召回率）
-- 🔜 LoRA 查询改写器训练跑通并出 A/B 数字（脚手架已就绪：`scripts/lora/`）
-- 🔜 Embedding 缓存、Rerank 批量合并、SSO（OIDC）、周报自动生成、向量库运维面板
+- ✅ LoRA 查询改写器 A/B（126 样本 Recall@4 +3.97pp，`scripts/lora/README.md`）
+- ✅ 查询级热缓存（embedding/rerank LRU，热点查询吞吐 ×240，同代码 A/B 可复现）
+- ✅ MCP Server（知识检索暴露为标准 MCP 工具，`mcp_servers/kb_server.py`）
+- 🔜 SSO（OIDC）、周报自动生成、向量库运维面板
 
 ## License
 
