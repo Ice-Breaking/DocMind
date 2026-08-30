@@ -3,7 +3,7 @@
 启动方式（stdio 模式，由 DocMind 主程序自动拉起）：
     python mcp_servers/weather_server.py
 
-扩展建议（面试可讲）：
+扩展建议：
 - 真实场景可对接和风天气 / OpenWeatherMap API
 - 这里用模拟数据，保证项目离线可演示
 """

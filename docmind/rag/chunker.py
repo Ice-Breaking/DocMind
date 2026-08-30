@@ -1,6 +1,6 @@
 """文档加载与切片：把 docs/knowledge 下的文档切成可检索的片段。
 
-格式支持（面试可讲）：
+格式支持：
 - .md / .txt：直接读取
 - .pdf：pypdf 逐页提取（纯 Python，无系统依赖）
 - .docx：python-docx 提取正文段落 + 表格

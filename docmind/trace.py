@@ -1,6 +1,6 @@
 """调用链追踪：SQLite（主）/ Langfuse（云）/ 本地 JSONL（降级）。
 
-设计要点（面试可讲）：
+设计要点：
 - 配置了 LANGFUSE_PUBLIC_KEY/SECRET_KEY → 上报 Langfuse（云或自托管均可）
 - span 默认经 docmind.trace_store 无阻塞入队批量落 SQLite（data/trace.db），
   管理端聚合走 SQL 索引，不再全量扫描文件

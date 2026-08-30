@@ -234,14 +234,13 @@ scripts/                # bench_report / load_test / eval_retrieval / backup / v
                         # test_improvements_with_auth（质量改进验证）
                         # rebuild_kb（手动重建知识库索引，collection 名须与服务一致）
 docs/
-├── 面试准备.md         # 量化数据 + 设计取舍 Q&A + 演示脚本
 ├── glossary.md         # 术语/俚语/黑话释义表（行业术语、版本号规则、时效性关键词）
 └── IMPROVEMENTS_2026-08-21.md  # 六大核心问题系统性解决方案文档
 ```
 
 ---
 
-## 八、关键设计（面试讲解点）
+## 八、关键设计
 
 1. **RRF 融合**：按排名融合免疫量纲差异；阈值语义放在 rerank 后（绝对下限 0.05 + 头部相对 15%），固定阈值会随语料漂移失准
 2. **证据拒答确定性兜底**：提示词依从非确定，KB 无证据时代码级替换最终回答并写 trace 事件，开关可回退

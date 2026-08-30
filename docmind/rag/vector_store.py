@@ -1,6 +1,6 @@
 """向量存储：ChromaDB 持久化向量库 + 内存 numpy 回退。
 
-选型说明（面试可讲）：
+选型说明：
 - v1 为纯内存 numpy 暴力检索 + JSONL/npz 文件缓存；本版本迁移到
   Chroma 本地持久化（PersistentClient，HNSW 余弦索引），重启无需
   重建，检索接口 search() 保持不变，上层无感知

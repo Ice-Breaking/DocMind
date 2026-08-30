@@ -1,6 +1,6 @@
 # LoRA 微调实验：检索查询改写器（P1-3）
 
-## 为什么做这个（面试一句话版）
+## 为什么做这个
 
 > 知识库检索对规范提问友好，真实用户口语化/中英混杂的提问会拉低向量召回。
 > 我用 LoRA 微调了一个 Qwen2.5-1.5B 小模型专职做查询改写，跑在本地 Ollama 上，
@@ -75,7 +75,7 @@ ollama run qwen2.5-rewrite-lora "帮我问下啥是LoRA呀？"   # 应输出「�
   另需 `uv pip install gguf sentencepiece` 进 `.venv-lora`）；
 - **Modelfile 的 FROM 不支持相对路径**，必须写绝对路径（脚本已处理）。
 
-### 4. A/B 对比评测（产出面试数字）
+### 4. A/B 对比评测（产出 A/B 数字）
 
 ```bash
 .venv/bin/python scripts/lora/eval_rewrite.py \
@@ -98,7 +98,7 @@ ollama run qwen2.5-rewrite-lora "帮我问下啥是LoRA呀？"   # 应输出「�
 
 平均改写延迟：基线 270ms / 微调 402ms（本地 Ollama，F16）。
 
-**困难集零提升的归因（面试加分点）**：对 HARD_SET 规范问题直接检索
+**困难集零提升的归因（关键归因）**：对 HARD_SET 规范问题直接检索
 （完全不经改写器）Recall 仅 0.588——瓶颈在示例知识库的内容覆盖
 （6 文档/12 chunks，不含 MCP、端口冲突等主题），而非改写质量；
 且微调版改写后的 0.622 高于人工规范问法直检的 0.588，说明小模型
@@ -114,7 +114,7 @@ ollama run qwen2.5-rewrite-lora "帮我问下啥是LoRA呀？"   # 应输出「�
 | `Modelfile.rewrite` | （脚本生成）Ollama 模型描述文件 |
 | `eval_rewrite.py` | 改写器 A/B 对比：Recall@k + 延迟 |
 
-## 面试追问预案
+## 设计追问预案
 
 - **为什么不直接 prompt 大模型改写？** 成本与延迟：每请求多一次云调用；
   专用小模型本地部署后该环节边际成本为零。且窄任务微调后风格稳定可控。

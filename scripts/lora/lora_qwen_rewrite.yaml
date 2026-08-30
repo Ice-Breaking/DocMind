@@ -1,6 +1,6 @@
 # LoRA 微调配置 · 检索查询改写器（LLaMA-Factory，llamafactory-cli train 本文件即训）
 #
-# 选型说明（面试可讲）：
+# 选型说明：
 # - 底座 Qwen2.5-1.5B-Instruct：M4 24GB 上 CPU/GPU(MPS) 均可训，合并后
 #   Ollama 直接托管，推理占用 <2GB 内存——改写这种窄任务小模型足够
 # - lora_target all + rank 8：窄任务（问题改写）低秩即可拟合，rank 再高
