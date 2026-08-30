@@ -41,4 +41,3 @@ web/dist/
 models/
 saves/
 scripts/lora/Modelfile.rewrite   # merge_and_serve.sh 生成物（含本机绝对路径）
-docs/面试准备.md
