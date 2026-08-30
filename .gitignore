@@ -14,6 +14,10 @@ venv/
 .DS_Store
 .aicoding-chat-workspace
 
+# 本地工具产物与测试素材（非项目代码）
+.mimosa/
+vibe_images/
+
 # SQLite 数据库及 WAL/SHM 附属文件（运行时数据，不入库）
 *.db
 *.db-shm
