@@ -1,7 +1,7 @@
 # 🧠 DocMind — 企业级多助手 RAG 平台
 
 > [![Technical Report](https://img.shields.io/badge/📄-Technical_Report-1f6feb?style=flat-square)](https://ice-breaking.github.io/DocMind/paper/)
-> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.TODO_PLACEHOLDER.svg)](https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER)
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23006686.svg)](https://doi.org/10.5281/zenodo.23006686)
 > [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](#license)
 
 > 手写 ReAct Agent + 混合检索 RAG + 多知识库多助手 + RetrievalOps 质量闭环 + 企业治理。
@@ -21,7 +21,7 @@
 |---|---|
 | 🌐 论文主页（在线阅读，含摘要与核心数据表） | <https://ice-breaking.github.io/DocMind/paper/> |
 | 📄 PDF 全文 | [docs/paper/DocMind_Technical_Report.pdf](docs/paper/DocMind_Technical_Report.pdf) · [在线版](https://ice-breaking.github.io/DocMind/paper/DocMind_Technical_Report.pdf) |
-| 🗃 Zenodo 存档（永久 DOI，引用格式） | <https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER> |
+| 🗃 Zenodo 存档（永久 DOI，引用格式） | <https://doi.org/10.5281/zenodo.23006686> |
 
 报告四条主线（均可复现）：
 
@@ -41,7 +41,7 @@
   institution = {Independent project},
   type        = {Technical report},
   year        = {2026},
-  doi         = {10.5281/zenodo.TODO_PLACEHOLDER},
+  doi         = {10.5281/zenodo.23006686},
   url         = {https://github.com/Ice-Breaking/DocMind}
 }
 ```
