@@ -94,6 +94,8 @@ python scripts/bench_report.py   # 47 样本三路线评测，输出全部表格
 
 **仓库与评测脚本**：https://github.com/Ice-Breaking/DocMind （`scripts/bench_report.py` 可复现本文全部表格）
 
+**系列文章**：二、[LoRA 查询改写器 A/B](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/02-lora-query-rewriter-ab.md) · 三、[确定性分层缓存](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/03-layered-cache-qps-x240.md) · 四、[模型路由的诚实成本账](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/04-model-routing-honest-cost.md)
+
 ---
 
 *评测环境：macOS (Apple M4)，text-embedding-v3 + gte-rerank-v2（百炼），BM25 用 rank_bm25，中文分词 jieba。评测集 47 样本（基础 30 + 困难 17）。*

@@ -45,3 +45,7 @@ web/dist/
 models/
 saves/
 scripts/lora/Modelfile.rewrite   # merge_and_serve.sh 生成物（含本机绝对路径）
+
+# 本地恢复/备份产物，不入库
+data_fresh_backup/
+.admin_password.txt

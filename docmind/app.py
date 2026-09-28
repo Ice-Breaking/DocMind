@@ -114,18 +114,27 @@ def create_app() -> fastapi.FastAPI:
 </style></head><body><div class="card">
 {body}</div></body></html>"""
 
-        # 场景一：浏览器直连后端调试端口（7860）——说明端口用错并给出正确入口
-        _PAGE_BACKEND = _PAGE_STYLE.format(body="""<h1>这里是 DocMind 的 API 后端</h1>
-<p>此端口（<code>{port}</code>）仅供程序调试直连，没有可交互的网页界面。</p>
+        # 页面模板含 CSS 大括号，不能用 str.format 二次填充（会撞上花括号）：
+        # 模板源码中 CSS 写作 {{ }}，填充时先还原为 { }，再用 __TOKEN__ 占位替换
+        def _fill(template: str, **kw: str) -> str:
+            out = template.replace("{{", "{").replace("}}", "}")
+            for k, v in kw.items():
+                out = out.replace("__" + k.upper() + "__", v)
+            return out
+
+        _PAGE_BACKEND = _PAGE_STYLE.replace(
+            "{body}", """<h1>这里是 DocMind 的 API 后端</h1>
+<p>此端口（<code>__PORT__</code>）仅供程序调试直连，没有可交互的网页界面。</p>
 <p>请从下面入口登录使用：</p>
-<a class="btn" href="{url}">打开 DocMind（端口 80）</a>
+<a class="btn" href="__URL__">打开 DocMind（端口 80）</a>
 <p class="tip">若链接不可达，请联系管理员确认 nginx 服务（frontend 容器）是否在运行。</p>""")
 
         # 场景二：经 nginx（80 入口）落到后端的浏览器 404/405——中性提示，
         # 不能误导用户「去 80 端口」（用户明明就在 80 上）
-        _PAGE_NOTFOUND = _PAGE_STYLE.format(body="""<h1>页面不存在或请求方式不支持</h1>
+        _PAGE_NOTFOUND = _PAGE_STYLE.replace(
+            "{body}", """<h1>页面不存在或请求方式不支持</h1>
 <p>您访问的地址无法打开。如未进入 DocMind 主界面，请从首页进入：</p>
-<a class="btn" href="{url}">返回 DocMind 首页</a>""")
+<a class="btn" href="__URL__">返回 DocMind 首页</a>""")
 
         def _friendly_backend_page(request: "fastapi.Request",
                                    backend_notice: bool) -> str:
@@ -135,9 +144,9 @@ def create_app() -> fastapi.FastAPI:
             host = _html.escape(request.headers.get("host") or "", quote=True)
             bare, _, port = host.partition(":")
             if backend_notice:
-                return _PAGE_BACKEND.format(port=port or "7860",
-                                            url=f"http://{bare}/")
-            return _PAGE_NOTFOUND.format(url=f"http://{bare}/")
+                return _fill(_PAGE_BACKEND,
+                             port=port or "7860", url=f"http://{bare}/")
+            return _fill(_PAGE_NOTFOUND, url=f"http://{bare}/")
 
         @app.get("/", include_in_schema=False)
         async def _backend_root(request: fastapi.Request):

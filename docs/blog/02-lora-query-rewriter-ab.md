@@ -41,7 +41,7 @@
 | LoRA | rank=8, alpha=16, dropout=0.05 |
 | 超参 | lr 1e-4, cosine, 3 epochs |
 | 硬件 | MacBook M4 24GB（MPS），约 10-20 分钟 |
-| 数据 | ~140 条指令对，sharegpt 格式 |
+| 数据 | 364 条指令对（去重后；328 训练 / 36 验证），sharegpt 格式 |
 
 过拟合防护就是三板斧：低秩 + dropout + 少 epoch，外加留出测试集监控。任务窄到"把口语问句改写成规范问句"，不需要更大的容量。
 
@@ -108,6 +108,8 @@ bash scripts/lora/merge_and_serve.sh
 报告里每个数字都由最后一条命令生成。看完这篇如果你只带走一句话：**微调不是 RAG 的替代品，是它的精装修——但动工前先用对照实验确认瓶颈真的在你装修的那面墙上。**
 
 **仓库与训练/评测脚本**：https://github.com/Ice-Breaking/DocMind （`scripts/lora/` 下从数据生成到 A/B 报告全链路可复现）
+
+**系列文章**：[一、混合检索三路线评测](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/01-hybrid-retrieval-rrf-rerank.md) · 三、[确定性分层缓存](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/03-layered-cache-qps-x240.md) · 四、[模型路由的诚实成本账](https://github.com/Ice-Breaking/DocMind/blob/main/docs/blog/04-model-routing-honest-cost.md)
 
 ---
 
