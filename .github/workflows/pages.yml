@@ -1,0 +1,46 @@
+name: Deploy paper page to GitHub Pages
+
+# 把 docs/paper/ 作为静态站点发布到 GitHub Pages：
+#   https://ice-breaking.github.io/DocMind/paper/
+# 首次启用需在仓库 Settings → Pages → Build and deployment → Source 选择 "GitHub Actions"。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/paper/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个部署，排队而不取消（避免半成品页面）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      # 只上传 docs/paper 作为站点根，避免把整个 docs/（含内部治理文档）暴露到公网
+      - name: Upload paper site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/paper
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocMind: A Self-Hosted RAG Platform with Measurable Retrieval Quality — Technical Report</title>
+<meta name="description" content="Technical report on DocMind, a self-hosted multi-assistant RAG platform: benchmark-driven hybrid retrieval, determinism-keyed layered caching (258x warm throughput), and narrow LoRA query rewriting.">
+<meta property="og:title" content="DocMind Technical Report">
+<meta property="og:description" content="Hybrid retrieval, deterministic layered caching, and LoRA query rewriting for a self-hosted RAG platform — with reproducible numbers.">
+<meta property="og:type" content="article">
+<style>
+  :root {
+    --ink: #1f2430;
+    --muted: #5b6472;
+    --line: #e3e7ee;
+    --accent: #1f6feb;
+    --accent-soft: #eef4fe;
+    --bg: #ffffff;
+    --bg-soft: #f7f9fc;
+    --code: #f2f4f8;
+    --good: #0a7d33;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.7;
+    font-size: 16px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+
+  header.masthead {
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+    padding: 56px 0 40px;
+  }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+  .badge {
+    display: inline-block; font-size: 12px; line-height: 1; padding: 6px 10px;
+    border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted);
+    text-decoration: none;
+  }
+  .badge:hover { border-color: var(--accent); color: var(--accent); }
+  h1 {
+    font-size: clamp(26px, 4.4vw, 38px);
+    line-height: 1.25; margin: 0 0 14px; letter-spacing: -0.02em; font-weight: 750;
+  }
+  .byline { color: var(--muted); font-size: 15px; margin: 0 0 6px; }
+  .byline strong { color: var(--ink); font-weight: 650; }
+  .meta-row { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  .meta-row code { background: var(--code); padding: 2px 6px; border-radius: 5px; font-size: 13px; }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; }
+  .btn {
+    display: inline-block; padding: 10px 18px; border-radius: 8px; font-size: 15px;
+    font-weight: 600; text-decoration: none; border: 1px solid transparent;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { filter: brightness(0.94); }
+  .btn-ghost { border-color: var(--line); color: var(--ink); background: #fff; }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  section { padding: 40px 0; border-bottom: 1px solid var(--line); }
+  section:last-of-type { border-bottom: none; }
+  h2 { font-size: 21px; margin: 0 0 16px; letter-spacing: -0.01em; }
+  h3 { font-size: 16px; margin: 26px 0 8px; color: var(--ink); }
+  p { margin: 0 0 14px; }
+  .abstract { font-size: 16.5px; }
+  .abstract em { color: var(--muted); }
+
+  .callout {
+    background: var(--accent-soft); border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 18px 0; font-size: 15px;
+  }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 6px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+  th { background: var(--bg-soft); font-weight: 650; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .tbl-cap { font-size: 13.5px; color: var(--muted); margin: 6px 0 0; }
+
+  figure { margin: 24px 0; }
+  figure img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  figcaption { font-size: 13.5px; color: var(--muted); margin-top: 10px; }
+
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.55;
+  }
+  code { font-family: "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .grid-2 { grid-template-columns: 1fr; } }
+  .stat {
+    border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; background: var(--bg-soft);
+  }
+  .stat .v { font-size: 26px; font-weight: 750; letter-spacing: -0.02em; color: var(--accent); }
+  .stat .k { font-size: 13.5px; color: var(--muted); margin-top: 2px; }
+
+  footer { padding: 28px 0 48px; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="badges">
+      <a class="badge" href="https://github.com/Ice-Breaking/DocMind">GitHub: Ice-Breaking/DocMind</a>
+      <a class="badge" href="DocMind_Technical_Report.pdf">PDF · Technical Report</a>
+      <a class="badge" href="https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER">DOI: 10.5281/zenodo.TODO_PLACEHOLDER</a>
+      <span class="badge">License: MIT (code)</span>
+    </div>
+    <h1>DocMind: A Self-Hosted Retrieval-Augmented Generation Platform with Measurable Retrieval Quality, Deterministic Layered Caching, and Operations-Grade Governance</h1>
+    <p class="byline"><strong>Yuxiuquan</strong> · Independent project report</p>
+    <p class="meta-row">Technical report · v1.0 · 2026-08-30 · source code available from the author</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="DocMind_Technical_Report.pdf">📄 Download PDF (5 pages)</a>
+      <a class="btn btn-ghost" href="https://github.com/Ice-Breaking/DocMind">⭐ Source code</a>
+      <a class="btn btn-ghost" href="#cite">Cite (BibTeX)</a>
+    </div>
+  </div>
+</header>
+
+<section id="abstract">
+  <div class="wrap">
+    <h2>Abstract</h2>
+    <p class="abstract">
+      Retrieval-augmented generation (RAG) systems are usually demonstrated rather than measured:
+      prototypes are wired to a vector store and a prompt, but provide no answer to how much a design change
+      helps, which queries are silently dropped, or what a system costs to run. This report describes
+      <strong>DocMind</strong>, a self-hosted multi-assistant RAG platform built around three engineering commitments:
+      retrieval quality is <em>measured</em> (a fixed 47-question benchmark gates every change), cost and latency are
+      <em>engineered</em> (a four-layer determinism-keyed cache hierarchy lifts warm throughput from 3.1 to 801 QPS),
+      and fine-tuning is applied <em>narrowly</em> (a rank-8 LoRA adapter on a 1.5B model improves overall
+      Recall@4 by 3.97 points at zero marginal API cost).
+    </p>
+    <div class="grid-2">
+      <div class="stat"><div class="v">94.1% → 100.0%</div><div class="k">Adversarial Recall@4, dense-only → hybrid + RRF</div></div>
+      <div class="stat"><div class="v">×258</div><div class="k">Warm-pass throughput, baseline → layered caches (801 QPS)</div></div>
+      <div class="stat"><div class="v">2,573 ms → 11 ms</div><div class="k">P95 latency on warm replayed questions</div></div>
+      <div class="stat"><div class="v">+3.97 pp</div><div class="k">Overall Recall@4 after LoRA query rewriting (0.754 → 0.794)</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="summary-zh">
+  <div class="wrap">
+    <h2>中文摘要</h2>
+    <p>
+      DocMind 是一个自托管的企业级多助手 RAG 平台（不依赖 LangChain / LlamaIndex，ReAct Agent 与平台能力全部自研）。
+      这份技术报告回答一个朴素的问题：<strong>如何把一个 RAG 演示变成一个可运营的 RAG 系统。</strong>
+    </p>
+    <p>
+      报告给出三条主线，每一条都带可复现数字：① 检索质量可测量——固定 47 题基准（30 常规 + 17 对抗性口语）作为每次改动的门禁，
+      混合检索（BM25 + 稠密向量经 RRF 融合）把对抗集 Recall@4 从 94.1% 提到 100.0%，交叉编码器精排让 MRR 提升 7.8%，
+      并显式论证了阈值带来的召回换拒答安全；② 成本与延迟是设计出来的——按「确定性」组织的四层缓存
+      （分词 / 文档向量 / 查询向量 / 精排结果）让热点重放负载吞吐从 3.1 QPS 提升到 801 QPS、P95 从 2,573 ms 降到 11 ms，
+      冷查询零回退；③ 微调只做窄任务——rank-8 LoRA 改写器（Qwen2.5-1.5B）让总体 Recall@4 +3.97 个百分点，
+      并通过归因实验证明剩余瓶颈在语料覆盖而非改写质量。
+    </p>
+    <div class="callout">
+      最具可迁移性的结论：当 A/B 指标进入平台期时，先测「天花板」再继续调模型——
+      本报告中调优后的改写器检索效果（0.622）甚至好于人工书写的规范问法本身（0.588）。
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <h2>System Overview</h2>
+    <p>
+      A single nginx process serves the React SPA and reverse-proxies REST / SSE traffic to a FastAPI host;
+      the whole stack ships as one docker-compose project behind ports 80/443. The agent core is a hand-written
+      ReAct loop — no agent framework — with an evidence-grounded refusal path. Every enhancement
+      (reranker, caches, web search) degrades gracefully; the answering path never depends on them succeeding.
+    </p>
+    <figure>
+      <img src="assets/arch.png" alt="DocMind deployment and data flow architecture" loading="lazy">
+      <figcaption>Figure 1: DocMind deployment and data flow. Enhancements degrade gracefully; the answering path never depends on them succeeding.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <h2>Key Results</h2>
+
+    <h3>Table 1 · Retrieval routes on the 47-question benchmark</h3>
+    <table>
+      <thead><tr><th>Route</th><th class="num">Recall@4 (canon. / adv.)</th><th class="num">MRR (canon. / adv.)</th></tr></thead>
+      <tbody>
+        <tr><td>Dense only</td><td class="num">100.0% / 94.1%</td><td class="num">0.978 / 0.843</td></tr>
+        <tr><td>Hybrid + RRF</td><td class="num">100.0% / 100.0%</td><td class="num">1.000 / 0.873</td></tr>
+        <tr><td>Hybrid + RRF + rerank</td><td class="num">100.0% / 94.1%</td><td class="num">1.000 / 0.941</td></tr>
+      </tbody>
+    </table>
+    <p class="tbl-cap">Every number is produced by the benchmark script and is reproducible from the repository.</p>
+
+    <h3>Table 2 · Same-code A/B with query-level caches toggled by flag</h3>
+    <table>
+      <thead><tr><th>Scenario</th><th class="num">Baseline (QPS / P95)</th><th class="num">With caches (QPS / P95)</th></tr></thead>
+      <tbody>
+        <tr><td>Concurrency 1 — first pass, cold</td><td class="num">2.46 / 1,040 ms</td><td class="num">2.84 / 1,059 ms</td></tr>
+        <tr><td>Concurrency 4 — second pass, warm</td><td class="num">2.97 / 1,390 ms</td><td class="num">741 / 6 ms</td></tr>
+        <tr><td>Concurrency 8 — third pass, warm</td><td class="num">3.10 / 2,573 ms</td><td class="num">801 / 11 ms</td></tr>
+      </tbody>
+    </table>
+    <p class="tbl-cap">Identical 12-question set replayed at three concurrency levels; warm passes skip both upstream round-trips.</p>
+
+    <h3>Table 3 · Recall@4 of retrieval after rewriting (baseline vs LoRA-tuned rewriter)</h3>
+    <table>
+      <thead><tr><th>Group (n)</th><th class="num">Baseline rewrite</th><th class="num">Tuned rewrite</th><th class="num">Delta</th></tr></thead>
+      <tbody>
+        <tr><td>Overall (126)</td><td class="num">0.754</td><td class="num">0.794</td><td class="num">+3.97 pp</td></tr>
+        <tr><td>Canonical (81)</td><td class="num">0.827</td><td class="num">0.889</td><td class="num">+6.17 pp</td></tr>
+        <tr><td>Adversarial (45)</td><td class="num">0.622</td><td class="num">0.622</td><td class="num">0.00</td></tr>
+      </tbody>
+    </table>
+    <p class="tbl-cap">126 deterministic samples from a held-out noise-seed range; no evaluation string appears in the training corpus.</p>
+  </div>
+</section>
+
+<section id="cite">
+  <div class="wrap">
+    <h2>Cite this work</h2>
+    <pre><code>@techreport{yuxiuquan2026docmind,
+  title       = {DocMind: A Self-Hosted Retrieval-Augmented Generation Platform with
+                 Measurable Retrieval Quality, Deterministic Layered Caching, and
+                 Operations-Grade Governance},
+  author      = {Yuxiuquan},
+  institution = {Independent project},
+  type        = {Technical report},
+  year        = {2026},
+  month       = {8},
+  doi         = {10.5281/zenodo.TODO_PLACEHOLDER},
+  url         = {https://github.com/Ice-Breaking/DocMind}
+}</code></pre>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      📄 <a href="DocMind_Technical_Report.pdf">Download the PDF</a> ·
+      💻 <a href="https://github.com/Ice-Breaking/DocMind">GitHub repository</a> ·
+      🗃 <a href="https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER">Zenodo (DOI)</a> ·
+      🤗 <a href="https://huggingface.co/papers">Hugging Face Papers</a>
+    </p>
+    <p>© 2026 Yuxiuquan · Report content CC BY 4.0 · Source code MIT License</p>
+  </div>
+</footer>
+
+</body>
+</html>
