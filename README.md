@@ -1,9 +1,50 @@
 # 🧠 DocMind — 企业级多助手 RAG 平台
 
+> [![Technical Report](https://img.shields.io/badge/📄-Technical_Report-1f6feb?style=flat-square)](https://ice-breaking.github.io/DocMind/paper/)
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.TODO_PLACEHOLDER.svg)](https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER)
+> [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](#license)
+
 > 手写 ReAct Agent + 混合检索 RAG + 多知识库多助手 + RetrievalOps 质量闭环 + 企业治理。
 > 不依赖 LangChain / LlamaIndex，Agent 核心与平台能力全部自研，便于理解、讲解与二次开发。
 
 前端为 React + Ant Design SPA（`web/`），后端为纯 FastAPI 应用；生产形态 `docker compose up -d` 一键部署（nginx 单入口）。
+
+---
+
+## 📄 论文 / Technical Report
+
+项目的完整技术方案与实验数据已整理成正式技术报告（5 页，英文）：
+
+**《DocMind: A Self-Hosted Retrieval-Augmented Generation Platform with Measurable Retrieval Quality, Deterministic Layered Caching, and Operations-Grade Governance》**（Yuxiuquan, 2026）
+
+| 入口 | 链接 |
+|---|---|
+| 🌐 论文主页（在线阅读，含摘要与核心数据表） | <https://ice-breaking.github.io/DocMind/paper/> |
+| 📄 PDF 全文 | [docs/paper/DocMind_Technical_Report.pdf](docs/paper/DocMind_Technical_Report.pdf) · [在线版](https://ice-breaking.github.io/DocMind/paper/DocMind_Technical_Report.pdf) |
+| 🗃 Zenodo 存档（永久 DOI，引用格式） | <https://doi.org/10.5281/zenodo.TODO_PLACEHOLDER> |
+
+报告四条主线（均可复现）：
+
+1. **检索质量可测量**：固定 47 题基准（30 常规 + 17 对抗性口语）作为每次改动的门禁；混合检索（BM25 + 稠密向量经 RRF 融合）把对抗集 Recall@4 从 94.1% 提到 100.0%，交叉编码器精排 MRR +7.8%，阈值带来的「召回换拒答安全」被显式论证
+2. **成本与延迟是设计出来的**：按确定性组织的四层缓存（分词 / 文档向量 / 查询向量 / 精排结果）让热点重放吞吐 3.1 → 801 QPS、P95 2,573 ms → 11 ms，冷查询零回退
+3. **微调只做窄任务**：rank-8 LoRA 改写器（Qwen2.5-1.5B）总体 Recall@4 +3.97 pp，归因实验证明剩余瓶颈在语料覆盖而非改写质量
+4. **运营级治理**：审计 / 告警 / 备份 / 文档级 ACL / MCP 工具面，72 小时窗口 94.85% 可用率、约 4.4 元/千次调用
+
+引用（BibTeX）：
+
+```bibtex
+@techreport{yuxiuquan2026docmind,
+  title       = {DocMind: A Self-Hosted Retrieval-Augmented Generation Platform with
+                 Measurable Retrieval Quality, Deterministic Layered Caching, and
+                 Operations-Grade Governance},
+  author      = {Yuxiuquan},
+  institution = {Independent project},
+  type        = {Technical report},
+  year        = {2026},
+  doi         = {10.5281/zenodo.TODO_PLACEHOLDER},
+  url         = {https://github.com/Ice-Breaking/DocMind}
+}
+```
 
 ---
 
